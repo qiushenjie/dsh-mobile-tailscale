@@ -75,7 +75,10 @@ export class TailscaleServeController {
     this.enabled = state.enabled
     this.initialized = true
     if (this.enabled) await this.start()
-    else this.publish({ enabled: false, state: 'off' })
+      else {
+        await this.stopServe()
+        this.publish({ enabled: false, state: 'off' })
+      }
   }
 
   /** Return state safe for the local desktop control UI. */
@@ -91,7 +94,10 @@ export class TailscaleServeController {
       this.enabled = enabled
       await this.options.store.save({ version: 1, enabled })
       if (enabled) await this.start()
-      else this.publish({ enabled: false, state: 'off' })
+      else {
+        await this.stopServe()
+        this.publish({ enabled: false, state: 'off' })
+      }
     })
     return this.status()
   }

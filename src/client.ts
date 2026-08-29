@@ -175,7 +175,6 @@ function installControl(): { remove: () => void; toggle: () => void } {
   const remoteToggle = element('button', 'dsh-mobile-control__primary'); remoteToggle.type = 'button'; remoteToggle.textContent = '启用远程访问'
   const remoteReconnect = element('button', 'dsh-mobile-control__secondary'); remoteReconnect.type = 'button'; remoteReconnect.textContent = '重新连接'; remoteReconnect.hidden = true
   remoteActions.append(remoteToggle, remoteReconnect)
-  const remoteReset = element('button', 'dsh-mobile-control__manage'); remoteReset.type = 'button'; remoteReset.textContent = '关闭并清除远程访问'
   const diagnosticsView = element('div', 'dsh-mobile-control__view is-diagnostics'); diagnosticsView.hidden = true
   const diagnosticsIntro = element('p', 'dsh-mobile-control__intro'); diagnosticsIntro.textContent = '检查版本、网关、网卡、防火墙和远程通道。报告自动脱敏，不读取对话或凭据。'
   const diagnosticsSummary = element('section', 'dsh-mobile-control__diagnostic-summary is-idle'); diagnosticsSummary.setAttribute('aria-live', 'polite')
@@ -200,7 +199,7 @@ function installControl(): { remove: () => void; toggle: () => void } {
   diagnosticsDetails.append(diagnosticsDetailsSummary, diagnosticsReport)
   header.append(title, headerActions); actions.append(toggle, pair, linkPair)
   lanView.append(access, qrBox, status, extensionStatus, actions, manageRow, devicePanel)
-  remoteView.append(remoteIntro, remoteAccess, remoteStatus, remoteActions, remoteReset)
+  remoteView.append(remoteIntro, remoteAccess, remoteStatus, remoteActions)
   diagnosticsView.append(diagnosticsIntro, diagnosticsSummary, diagnosticsToolbar, diagnosticsFeedback, diagnosticsChecks, diagnosticsDetails)
   panel.append(header, appDownload, switcher, lanView, remoteView, diagnosticsView); root.append(panel); document.body.append(root)
   let running = false
@@ -354,6 +353,7 @@ function installControl(): { remove: () => void; toggle: () => void } {
     }
     remoteStatus.textContent = state === 'error' ? (errorLabels[errorCode] ?? labels.error!) : (labels[state] ?? labels.error!)
     remoteToggle.textContent = remoteRunning ? '关闭远程访问' : '启用远程访问'
+    remoteToggle.disabled = false
     remoteReconnect.hidden = state !== 'error' && state !== 'unavailable'
   }
   let remoteLoadInFlight = false
@@ -378,11 +378,6 @@ function installControl(): { remove: () => void; toggle: () => void } {
     void requestJson('/api/mobile-access/remote/reconnect', { method: 'POST', body: '{}' })
       .then(renderRemote, error => { remoteStatus.textContent = String(error) })
       .finally(() => { remoteReconnectBusy = false; remoteReconnect.disabled = false })
-  })
-  remoteReset.addEventListener('click', () => {
-    if (!window.confirm('关闭 Tailscale Serve 远程访问？局域网配置不会改变。')) return
-    void requestJson('/api/mobile-access/remote/reset', { method: 'POST', body: JSON.stringify({ confirm: true }) })
-      .then(renderRemote, error => { remoteStatus.textContent = String(error) })
   })
   const renderDiagnostics = (data: Record<string, unknown>): void => {
     const overall = data.overall === 'error' ? 'error' : data.overall === 'attention' ? 'attention' : 'ok'
