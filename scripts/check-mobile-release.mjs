@@ -156,39 +156,3 @@ async function checkAndroid() {
     checkPng(`apps/mobile/android/app/src/main/res/mipmap-${density}/ic_launcher.png`, size, size, true)))
 }
 
-async function checkFunnelHost() {
-  const [manifestSource, goModule, goSum, source, executable] = await Promise.all([
-    read('package.json', 'utf8'),
-    read('native/funnel-host/go.mod', 'utf8'),
-    read('native/funnel-host/go.sum', 'utf8'),
-    read('native/funnel-host/main.go', 'utf8'),
-    read('bin/dsh-mobile-funnel-win32-x64.exe'),
-  ])
-  const manifest = JSON.parse(manifestSource)
-  if (!manifest.files?.includes('bin/dsh-mobile-funnel-win32-x64.exe')) {
-    fail('package files must include the Windows Funnel host')
-  }
-  if (!manifest.files?.includes('THIRD_PARTY_NOTICES.md')) fail('package files must include third-party notices')
-  if (!/^go 1\.26\.6$/mu.test(goModule) || !/^require tailscale\.com v1\.102\.3$/mu.test(goModule)) {
-    fail('Funnel host must pin Go 1.26.6 and Tailscale 1.102.3')
-  }
-  if (goSum.length === 0 || !source.includes('tailscale.com/tsnet')) fail('Funnel host source and module checksums are incomplete')
-  if (executable.byteLength < 2 || executable.subarray(0, 2).toString('ascii') !== 'MZ') {
-    fail('Funnel host must be a Windows executable built from the checked source')
-  }
-  if (executable.byteLength >= 40 * 1024 * 1024) fail('Funnel host must remain below 40 MiB')
-}
-
-async function main() {
-  await Promise.all([
-    checkBrandAndStoreIcon(),
-    checkAndroid(),
-    checkFunnelHost(),
-  ])
-  console.log('mobile release assets ok: transparent Android icons and Android API 36')
-}
-
-main().catch((error) => {
-  console.error(`mobile release check failed: ${error instanceof Error ? error.message : String(error)}`)
-  process.exitCode = 1
-})

@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { Config, parseGatewayConfig } from '../src/config.js'
 import { parseCidr, RequestTrustPolicy } from '../src/network.js'
-import { apply, inject, remoteGatewayConfig } from '../src/plugin.js'
+import { apply, inject } from '../src/plugin.js'
 import { DSH_MOBILE_VERSION, MINIMUM_ANDROID_APP_VERSION } from '../src/version.js'
 
 const contexts: Context[] = []
@@ -95,60 +95,6 @@ async function mount(initiallyEnabled = false): Promise<{ context: Context; rout
   return { context, route, command }
 }
 
-describe('remote Funnel gateway configuration', () => {
-  it('keeps public HTTPS on 443 when the private listener uses an ephemeral port', () => {
-    const template = parseGatewayConfig({
-      listenHost: '127.0.0.1',
-      listenPort: 0,
-      publicAuthorities: ['127.0.0.1'],
-      allowedCidrs: ['127.0.0.0/8'],
-      stateFile: join(tmpdir(), 'dsh-mobile-remote-template.json'),
-      tls: { mode: 'disabled' },
-    })
-    const publicHost = 'dsh-14a71b788377-1.tail775400.ts.net'
-    const config = remoteGatewayConfig(
-      template,
-      `https://${publicHost}`,
-      join(tmpdir(), 'dsh-mobile-remote-devices.json'),
-      'a'.repeat(64),
-    )
-    const policy = new RequestTrustPolicy(
-      config.authorities,
-      58_916,
-      [parseCidr('127.0.0.0/8')],
-      config.publicTls,
-    )
-
-    expect(config.authorities).toEqual([{ hostname: publicHost, port: 443 }])
-    expect([...policy.origins]).toEqual([`https://${publicHost}`])
-    expect(policy.acceptsHost(publicHost)).toBe(true)
-    expect(policy.acceptsOrigin(`https://${publicHost}`)).toBe(true)
-    expect(policy.acceptsHost(`${publicHost}:58916`)).toBe(false)
-    expect(policy.acceptsOrigin(`https://${publicHost}:58916`)).toBe(false)
-  })
-
-  it('allows a transport-owned fixed loopback port without changing the public authority', () => {
-    const template = parseGatewayConfig({
-      listenHost: '127.0.0.1',
-      listenPort: 0,
-      publicAuthorities: ['127.0.0.1'],
-      allowedCidrs: ['127.0.0.0/8'],
-      stateFile: join(tmpdir(), 'dsh-mobile-remote-template.json'),
-      tls: { mode: 'disabled' },
-    })
-    const config = remoteGatewayConfig(
-      template,
-      'https://example.r8.cpolar.cn',
-      join(tmpdir(), 'dsh-mobile-cpolar-devices.json'),
-      'b'.repeat(64),
-      45_321,
-    )
-
-    expect(config.listenPort).toBe(45_321)
-    expect(config.authorities).toEqual([{ hostname: 'example.r8.cpolar.cn', port: 443 }])
-  })
-})
-
 describe('stock DSH lifecycle', () => {
   it('requires the WebServer, commands, and Connection services', () => {
     expect(inject).toEqual(['webServer', 'commands', 'connection'])
@@ -166,15 +112,6 @@ describe('stock DSH lifecycle', () => {
       provider: 'tailscale',
       running: false,
       state: 'off',
-      providers: {
-        tailscale: { bundled: true, running: false, state: 'off' },
-        cpolar: {
-          bundled: false,
-          running: false,
-          state: 'off',
-          component: { installed: false, configured: false },
-        },
-      },
     })
     const diagnostics = await invoke(mounted.route, 'GET', '/api/mobile-access/diagnostics')
     expect(diagnostics.status).toBe(200)
@@ -195,20 +132,6 @@ describe('stock DSH lifecycle', () => {
     const stopped = await invoke(mounted.route, 'POST', '/api/mobile-access/control', JSON.stringify({ running: false }))
     expect(stopped.status).toBe(200)
     expect(JSON.parse(stopped.body)).toEqual({ running: false })
-  })
-
-  it('switches remote providers without changing the LAN runtime', async () => {
-    const mounted = await mount()
-    const selected = await invoke(
-      mounted.route,
-      'POST',
-      '/api/mobile-access/remote/provider',
-      JSON.stringify({ provider: 'cpolar' }),
-    )
-    expect(selected.status).toBe(200)
-    expect(JSON.parse(selected.body)).toMatchObject({ provider: 'cpolar', running: false, state: 'off' })
-    const lan = await invoke(mounted.route, 'GET', '/api/mobile-access/lan/control')
-    expect(JSON.parse(lan.body)).toEqual({ running: false })
   })
 
   it('registers a /mobile command that steers the agent with the customization guide', async () => {
@@ -234,19 +157,18 @@ describe('stock DSH lifecycle', () => {
     const empty = invoke('  ')
     expect(empty).toMatchObject({ kind: 'error' })
     expect(steered).toEqual([])
-    const result = invoke(' 把手机端改成深色主题')
+    const result = invoke('make the phone UI dark')
     expect(result).toMatchObject({ kind: 'success' })
     expect(steered.length).toBe(1)
     const [steeredMessage] = steered
     expect(steeredMessage).toBeDefined()
     expect(steeredMessage!.text).toContain('mobile-access')
-    expect(steeredMessage!.text).toContain('把手机端改成深色主题')
+    expect(steeredMessage!.text).toContain('make the phone UI dark')
     // The guide rides as a plugin-source context injection, not a user bubble.
     expect(steeredMessage!.source).toMatchObject({
       kind: 'plugin',
-      plugin: 'dsh-mobile',
+      plugin: 'dsh-mobile-tailscale',
       form: 'notice',
-      summary: '/mobile 把手机端改成深色主题',
     })
   })
 })

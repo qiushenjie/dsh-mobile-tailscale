@@ -11,16 +11,16 @@ const healthy: DiagnosticSnapshot = {
     port: 3443,
   },
   remote: {
-    provider: 'cpolar',
+    provider: 'tailscale',
     running: true,
     state: 'ready',
-    origin: 'https://private-name.r8.cpolar.cn',
+    origin: 'https://desktop-qiushenjie.taile854bf.ts.net',
   },
 }
 
 describe('connection diagnostics', () => {
   it('allows known remote relays longer than direct endpoints', () => {
-    expect(remoteDiagnosticTimeoutMs('https://private-name.r8.cpolar.cn')).toBe(10_000)
+    expect(remoteDiagnosticTimeoutMs('https://desktop-qiushenjie.taile854bf.ts.net')).toBe(10_000)
     expect(remoteDiagnosticTimeoutMs('https://example.tail1234.ts.net')).toBe(10_000)
     expect(remoteDiagnosticTimeoutMs('https://example.com')).toBe(5_000)
   })
@@ -37,7 +37,7 @@ describe('connection diagnostics', () => {
       expect.objectContaining({ id: 'remote', status: 'ok', detail: expect.stringContaining('86 ms') }),
     ]))
     expect(result.report).toContain('https://192.168.0.x:3443')
-    expect(result.report).toContain('endpoint=*.cpolar.cn')
+    expect(result.report).toContain('endpoint=*.ts.net')
     expect(result.report).not.toContain('192.168.0.101')
     expect(result.report).not.toContain('private-name')
   })
@@ -45,7 +45,7 @@ describe('connection diagnostics', () => {
   it('turns missing firewall rules and provider errors into shortest recovery actions', async () => {
     const result = await collectConnectionDiagnostics({
       ...healthy,
-      remote: { provider: 'tailscale', running: true, state: 'error', errorCode: 'funnel_permission_required' },
+      remote: { provider: 'tailscale', running: true, state: 'error', errorCode: 'funnel_unavailable' },
     }, {
       firewall: async () => ({ state: 'missing' }),
       remote: async () => ({ state: 'not-applicable' }),
@@ -54,7 +54,7 @@ describe('connection diagnostics', () => {
     expect(result.overall).toBe('error')
     expect(result.checks).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'firewall', status: 'warning', action: expect.stringContaining('setup') }),
-      expect.objectContaining({ id: 'remote', status: 'error', action: '继续完成 Tailscale Funnel 授权。' }),
+      expect.objectContaining({ id: 'remote', status: 'error', action: 'Confirm Funnel is enabled in the Tailscale admin console, then retry.' }),
     ]))
   })
 
@@ -84,7 +84,7 @@ describe('connection diagnostics', () => {
         id: 'remote',
         status: 'error',
         detail: expect.stringContaining('VPN 或 DNS 代理'),
-        action: expect.stringContaining('cpolar'),
+        action: expect.stringContaining('Switch VPN node'),
       }),
     ]))
   })

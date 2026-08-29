@@ -4,7 +4,7 @@ import { basename, dirname, join } from 'node:path'
 import { restrictPrivateFile } from './private-file.js'
 
 /** Remote transports supported by the desktop plugin and Android client. */
-export type RemoteProvider = 'tailscale' | 'cpolar'
+export type RemoteProvider = 'tailscale'
 
 /** Durable selection for the single active remote transport. */
 export interface RemoteProviderState {
@@ -18,7 +18,7 @@ export function parseRemoteProviderState(value: unknown): RemoteProviderState {
     throw new Error('remote provider state must be an object')
   }
   const record = value as Record<string, unknown>
-  if (record.version !== 1 || (record.provider !== 'tailscale' && record.provider !== 'cpolar')
+  if (record.version !== 1 || record.provider !== 'tailscale'
     || Reflect.ownKeys(record).some(key => key !== 'version' && key !== 'provider')) {
     throw new Error('remote provider state has an unsupported format')
   }
@@ -77,8 +77,8 @@ export class JsonRemoteProviderStore {
 /** Resolve the first-run provider without letting environment values bypass validation. */
 export function configuredRemoteProvider(environment: NodeJS.ProcessEnv): RemoteProvider {
   const value = environment.DSH_MOBILE_REMOTE_PROVIDER ?? 'tailscale'
-  if (value !== 'tailscale' && value !== 'cpolar') {
-    throw new Error('DSH_MOBILE_REMOTE_PROVIDER must be tailscale or cpolar')
+  if (value !== 'tailscale') {
+    throw new Error('DSH_MOBILE_REMOTE_PROVIDER must be tailscale')
   }
   return value
 }

@@ -1,18 +1,8 @@
-# Community bundle for the stock DSH Web profile. Installation contributes a
-# Host gateway and a browser Client face; it does not patch DSH source files.
-- id: directory-picker
-  name: '@deepseek-ai/dsh-host-directory-picker-auto'
-  disabled: true
-
+# Community bundle: Host gateway and browser Client face over any Web-profile
+# composition. It does not patch DSH source files.
 - insert:
-    - id: directory-picker-mobile-host
-      name: '@deepseek-ai/dsh-host-directory-picker-browse'
-
-    - id: directory-picker-mobile-surface
-      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'
-
     - id: mobile-access
-      name: dsh-mobile
+      name: dsh-mobile-tailscale
       inject: [webServer, connection]
       config:
         setupFile: !!js dshHomePath('mobile-access/setup.json')

@@ -43,19 +43,10 @@ function evaluate(value: unknown): unknown {
 describe('stock DSH bundle patch', () => {
   it('adds one ordinary dual-face plugin and no core replacement rows', () => {
     const row = mobileRow()
-    expect(row).toMatchObject({ id: 'mobile-access', name: 'dsh-mobile', inject: ['webServer', 'connection'] })
+    expect(row).toMatchObject({ id: 'mobile-access', name: 'dsh-mobile-tailscale', inject: ['webServer', 'connection'] })
     expect(source).not.toContain('pluginInventory')
     expect(source).not.toContain('requestAuth')
     expect(source).not.toMatch(/^\s*- id: connection$/mu)
-  })
-
-  it('pins the in-page computer directory browser for remote workspace selection', () => {
-    expect(rows()).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: 'directory-picker', name: '@deepseek-ai/dsh-host-directory-picker-auto', disabled: true }),
-      expect.objectContaining({ id: 'directory-picker-mobile-host', name: '@deepseek-ai/dsh-host-directory-picker-browse' }),
-      expect.objectContaining({ id: 'directory-picker-mobile-surface', name: '@deepseek-ai/dsh-client-ui-directory-picker-browse' }),
-    ]))
-    expect(source).not.toContain('@deepseek-ai/dsh-host-directory-picker-native')
   })
 
   it('starts disabled until the setup CLI writes the durable control state', () => {
@@ -79,3 +70,4 @@ describe('stock DSH bundle patch', () => {
     expect(config.allowedCidrs).toEqual(['127.0.0.0/8'])
   })
 })
+

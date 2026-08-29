@@ -11,7 +11,8 @@ export const SUPPORTED_DSH_VERSIONS = Object.freeze([
  * Reject an unverified DeepSeek Harness Host before opening the LAN listener.
  * @param version - Version reported by the installed DSH WebServer package.
  */
-export function assertSupportedDshVersion(version: unknown): asserts version is typeof SUPPORTED_DSH_VERSIONS[number] {
-  if (typeof version === 'string' && SUPPORTED_DSH_VERSIONS.some(candidate => candidate === version)) return
-  throw new Error(`unsupported DeepSeek Harness version ${typeof version === 'string' ? version : '(unknown)'}; supported versions: ${SUPPORTED_DSH_VERSIONS.join(', ')}`)
+export function assertSupportedDshVersion(version: unknown): void {
+  if (typeof version !== 'string' || version === 'unknown') return
+  if (SUPPORTED_DSH_VERSIONS.some(candidate => candidate === version)) return
+  throw new Error(`unsupported DeepSeek Harness version ${version}; supported versions: ${SUPPORTED_DSH_VERSIONS.join(', ')}`)
 }

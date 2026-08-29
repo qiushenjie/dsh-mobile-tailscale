@@ -5,8 +5,7 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm/mes
 import type {} from '@deepseek-ai/dsh-commands'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { createRequire } from 'node:module'
-import { X509Certificate } from 'node:crypto'
-import { copyFile, lstat, readFile, rm } from 'node:fs/promises'
+import { readFile, rm } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { parseControlFile, parseGatewayConfig, type PluginConfig, type ResolvedGatewayConfig } from './config.js'
 import { assertSupportedDshVersion } from './compatibility.js'
@@ -31,10 +30,8 @@ import {
   sendJson,
 } from './http-security.js'
 import { JsonDeviceStore } from './storage.js'
-import { FunnelController, funnelExecutable } from './funnel.js'
-import { CpolarController } from './cpolar.js'
-import { CpolarComponentManager, type CpolarComponentStatus } from './cpolar-component.js'
 import { configuredRemoteProvider, JsonRemoteProviderStore, type RemoteProvider } from './remote.js'
+import { TailscaleServeController } from './tailscale-serve.js'
 import { parseAuthority, parseCidr } from './network.js'
 import {
   materializeManagedSetup,
@@ -44,7 +41,7 @@ import {
 } from './managed-setup.js'
 
 /** Stable Cordis plugin name. */
-export const name = 'dsh-mobile'
+export const name = 'dsh-mobile-tailscale'
 
 /** The stock WebServer serves the control card; Connection authenticates the loopback DSH origin. */
 export const inject = ['webServer', 'commands', 'connection']
@@ -60,10 +57,17 @@ function upstreamAuthenticatedUrl(ctx: Context, upstreamOrigin: URL): string | u
     : undefined
 }
 
-function installedDshVersion(): unknown {
-  const manifest = createRequire(import.meta.url)('@deepseek-ai/dsh-host-webserver/package.json') as unknown
-  if (manifest === null || typeof manifest !== 'object') return undefined
-  return (manifest as { readonly version?: unknown }).version
+function installedDshVersion(): string | undefined {
+  try {
+    const manifest = createRequire(import.meta.url)('@deepseek-ai/dsh-host-webserver/package.json') as unknown
+    if (manifest === null || typeof manifest !== 'object') return undefined
+    const version = (manifest as { readonly version?: unknown }).version
+    return typeof version === 'string' ? version : undefined
+  } catch {
+    // The desktop app bundles the Host WebServer inside its archive, so it
+    // may not resolve from this profile; an unknown version must not block boot.
+    return undefined
+  }
 }
 
 function mapAdminError(error: unknown): HttpError {
@@ -73,12 +77,6 @@ function mapAdminError(error: unknown): HttpError {
   if (code === 'EADDRINUSE') return new HttpError(409, 'listen_port_in_use')
   if (error instanceof Error && error.message.startsWith('saved LAN interface ')) {
     return new HttpError(409, 'network_interface_unavailable')
-  }
-  if (error instanceof Error && error.message === 'cpolar_authtoken_invalid') {
-    return new HttpError(400, 'cpolar_authtoken_invalid')
-  }
-  if (error instanceof Error && error.message.startsWith('cpolar_')) {
-    return new HttpError(409, error.message)
   }
   return new HttpError(500, 'internal_error')
 }
@@ -148,43 +146,6 @@ function loopbackTemplate(loaded: LoadedSetup): ResolvedGatewayConfig {
   })
 }
 
-async function stableInstanceId(loaded: LoadedSetup, template: ResolvedGatewayConfig): Promise<string> {
-  if (loaded.kind !== 'managed') return loaded.config.instanceId ?? template.instanceId
-  const certificate = new X509Certificate(await readFile(loaded.setup.tls.caCertFile))
-  return certificate.fingerprint256.replaceAll(':', '').toLowerCase()
-}
-
-export function remoteGatewayConfig(
-  template: ResolvedGatewayConfig,
-  publicOrigin: string,
-  stateFile: string,
-  instanceId: string,
-  listenPort = 0,
-): ResolvedGatewayConfig {
-  const origin = new URL(publicOrigin)
-  if (origin.protocol !== 'https:' || origin.username !== '' || origin.password !== ''
-    || origin.pathname !== '/' || origin.search !== '' || origin.hash !== '') {
-    throw new Error('remote public origin must be an HTTPS origin')
-  }
-  // The gateway listens on an ephemeral loopback port behind Funnel, while the
-  // public authority is HTTPS on 443. Keep that external port explicit so the
-  // trust policy never substitutes the private listener port into QR URLs.
-  const publicAuthority = origin.port === '' ? `${origin.hostname}:443` : origin.host
-  const { pairingCaFile: _pairingCaFile, ...shared } = template
-  return Object.freeze({
-    ...shared,
-    listenHost: '127.0.0.1',
-    listenPort,
-    authorities: Object.freeze([parseAuthority(publicAuthority)]),
-    allowedCidrs: Object.freeze([parseCidr('127.0.0.0/8')]),
-    stateFile,
-    instanceId,
-    tls: Object.freeze({ mode: 'disabled' }),
-    publicTls: true,
-    discovery: false,
-  })
-}
-
 interface RemoteStatus {
   readonly enabled: boolean
   readonly state: string
@@ -197,9 +158,6 @@ interface RemoteStatus {
 function remoteControlPayload(
   provider: RemoteProvider,
   status: RemoteStatus,
-  gateway: MobileAccessGateway | undefined,
-  providerStatuses: Readonly<Record<RemoteProvider, RemoteStatus>>,
-  cpolarComponent: CpolarComponentStatus,
 ): Record<string, unknown> {
   return {
     provider,
@@ -209,28 +167,17 @@ function remoteControlPayload(
     ...(status.loginUrl === undefined ? {} : { loginUrl: status.loginUrl }),
     ...(status.setupUrl === undefined ? {} : { setupUrl: status.setupUrl }),
     ...(status.errorCode === undefined ? {} : { errorCode: status.errorCode }),
-    ...(gateway === undefined ? {} : { extensions: gateway.extensionStatus() }),
-    providers: {
-      tailscale: { bundled: true, running: providerStatuses.tailscale.enabled, state: providerStatuses.tailscale.state },
-      cpolar: {
-        bundled: false,
-        running: providerStatuses.cpolar.enabled,
-        state: providerStatuses.cpolar.state,
-        component: cpolarComponent,
-      },
-    },
   }
 }
 
 /** Mount the resident control route and its optional authenticated LAN gateway. */
 export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
-  const dshVersion = installedDshVersion()
+  const dshVersion = installedDshVersion() ?? 'unknown'
   assertSupportedDshVersion(dshVersion)
   const loaded = await loadSetup(config)
   const mobileAccess: MobileAccessService = createMobileAccessService(ctx)
   const template = loopbackTemplate(loaded)
   const upstreamLoginUrl = upstreamAuthenticatedUrl(ctx, template.upstreamOrigin)
-  const instanceId = await stableInstanceId(loaded, template)
   const stateDirectory = dirname(template.stateFile)
   const remoteDirectory = join(stateDirectory, 'remote')
   const remoteProviderStore = new JsonRemoteProviderStore(
@@ -238,8 +185,6 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     configuredRemoteProvider(process.env),
   )
   let remoteProvider = (await remoteProviderStore.load()).provider
-  const cpolarComponent = new CpolarComponentManager({ stateDirectory })
-  await cpolarComponent.initialize()
   const unregisterBuiltin = mobileAccess.registerExtension({
     schemaVersion: 1,
     id: 'computer-images',
@@ -303,78 +248,18 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     new JsonMobileAccessControlStore(parseControlFile(config.controlFile), config.initiallyEnabled),
     startRuntime,
   )
-  const remoteDeviceFile = join(remoteDirectory, 'devices.json')
-  const legacyCpolarDeviceFile = join(remoteDirectory, 'cpolar', 'devices.json')
-  if (remoteProvider === 'cpolar') {
-    try {
-      await lstat(remoteDeviceFile)
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-      try { await copyFile(legacyCpolarDeviceFile, remoteDeviceFile) } catch (copyError) {
-        if ((copyError as NodeJS.ErrnoException).code !== 'ENOENT') throw copyError
-      }
-    }
-  }
-  const createRemoteGateway = async (publicOrigin: string, listenPort = 0): Promise<MobileAccessGateway> => {
-      const resolved = remoteGatewayConfig(
-        template,
-        publicOrigin,
-        remoteDeviceFile,
-        instanceId,
-        listenPort,
-      )
-      const candidate = new MobileAccessGateway(
-        resolved,
-        new JsonDeviceStore(resolved.stateFile, resolved.maxDevices),
-        mobileAccess,
-        upstreamLoginUrl,
-      )
-      await candidate.start()
-      return candidate
-  }
   const tailscaleStore = new JsonMobileAccessControlStore(join(remoteDirectory, 'control.json'), false)
-  const cpolarStore = new JsonMobileAccessControlStore(join(remoteDirectory, 'cpolar', 'control.json'), false)
   const remoteControllers = {
-    tailscale: new FunnelController({
+    tailscale: new TailscaleServeController({
       store: tailscaleStore,
-      executable: funnelExecutable(import.meta.url),
-      stateDirectory: join(remoteDirectory, 'tailscale'),
-      hostname: `dsh-${instanceId.slice(0, 12)}`,
-      createGateway: createRemoteGateway,
-    }),
-    cpolar: new CpolarController({
-      store: cpolarStore,
-      executable: cpolarComponent.executable,
-      configFile: cpolarComponent.configFile,
-      region: 'cn',
-      createGateway: createRemoteGateway,
+      upstream: template.upstreamOrigin.origin,
     }),
   }
   const remoteController = () => remoteControllers[remoteProvider]
   const remotePayload = (): Record<string, unknown> => remoteControlPayload(
     remoteProvider,
     remoteController().status(),
-    remoteController().gateway(),
-    {
-      tailscale: remoteControllers.tailscale.status(),
-      cpolar: remoteControllers.cpolar.status(),
-    },
-    cpolarComponent.status(),
   )
-  const selectRemoteProvider = async (provider: RemoteProvider): Promise<void> => {
-    if (provider === remoteProvider) return
-    const previousProvider = remoteProvider
-    const previous = remoteControllers[previousProvider]
-    const restore = previous.status().enabled
-    if (restore) await previous.setEnabled(false)
-    try {
-      await remoteProviderStore.save({ version: 1, provider })
-      remoteProvider = provider
-    } catch (error) {
-      if (restore) await previous.setEnabled(true)
-      throw error
-    }
-  }
   const lanPayload = (): Record<string, unknown> => ({
     running: lanController.isRunning(),
     origin: lanGateway?.address().origin,
@@ -436,34 +321,6 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
           sendJson(response, 200, remotePayload(), false)
           return
         }
-        if (request.method === 'POST' && target.decodedPathname === `${LOCAL_ADMIN_PREFIX}/remote/provider`) {
-          const body = await readJsonObject(request, 4096)
-          if (body.provider !== 'tailscale' && body.provider !== 'cpolar') throw new HttpError(400, 'bad_request')
-          await selectRemoteProvider(body.provider)
-          sendJson(response, 200, remotePayload(), false)
-          return
-        }
-        if (request.method === 'POST' && target.decodedPathname === `${LOCAL_ADMIN_PREFIX}/remote/cpolar/component/install`) {
-          const body = await readJsonObject(request, 4096)
-          if (body.confirm !== true) throw new HttpError(400, 'bad_request')
-          await cpolarComponent.install()
-          sendJson(response, 200, remotePayload(), false)
-          return
-        }
-        if (request.method === 'POST' && target.decodedPathname === `${LOCAL_ADMIN_PREFIX}/remote/cpolar/configure`) {
-          const body = await readJsonObject(request, 4096)
-          await cpolarComponent.configure(body.authtoken)
-          sendJson(response, 200, remotePayload(), false)
-          return
-        }
-        if (request.method === 'POST' && target.decodedPathname === `${LOCAL_ADMIN_PREFIX}/remote/cpolar/component/purge`) {
-          const body = await readJsonObject(request, 4096)
-          if (body.confirm !== true) throw new HttpError(400, 'bad_request')
-          await remoteControllers.cpolar.setEnabled(false)
-          await cpolarComponent.purge()
-          sendJson(response, 200, remotePayload(), false)
-          return
-        }
         if (request.method === 'POST' && target.decodedPathname === `${LOCAL_ADMIN_PREFIX}/remote/control`) {
           const body = await readJsonObject(request, 4096)
           if (typeof body.running !== 'boolean') throw new HttpError(400, 'bad_request')
@@ -481,14 +338,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
           const body = await readJsonObject(request, 4096)
           if (body.confirm !== true) throw new HttpError(400, 'bad_request')
           await remoteController().reset()
-          await rm(remoteDeviceFile, { force: true })
           sendJson(response, 200, remotePayload(), false)
-          return
-        }
-        if (target.decodedPathname.startsWith(`${LOCAL_ADMIN_PREFIX}/remote/`)) {
-          const active = remoteController().gateway()
-          if (active === undefined) throw new HttpError(409, 'gateway_stopped')
-          await active.localAdminRoute(`${LOCAL_ADMIN_PREFIX}/remote`).handler(request, response)
           return
         }
         if (target.decodedPathname.startsWith(`${LOCAL_ADMIN_PREFIX}/lan/`)) {
@@ -524,7 +374,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
           content: [{ type: 'text', text: `${MOBILE_CUSTOMIZATION_GUIDE}\n\n用户需求：${task}` }],
           source: {
             kind: 'plugin',
-            plugin: 'dsh-mobile',
+            plugin: 'dsh-mobile-tailscale',
             form: 'notice',
             summary: boundContextSummary(`/mobile ${task}`),
           },
@@ -535,14 +385,11 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     try {
       await mobileAccess.startLocal(template.extensionsDir, ctx)
       await lanController.initialize()
-      if (remoteProvider === 'tailscale') await cpolarStore.save({ version: 1, enabled: false })
-      else await tailscaleStore.save({ version: 1, enabled: false })
       await remoteControllers.tailscale.initialize()
-      await remoteControllers.cpolar.initialize()
     } catch (error) {
       unregister()
       disposeMobileCommand()
-      await Promise.all([remoteControllers.tailscale.close(), remoteControllers.cpolar.close()])
+      await remoteControllers.tailscale.close()
       await lanController.close()
       await mobileAccess.stopLocal()
       unregisterBuiltin()
@@ -551,7 +398,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     return async () => {
       unregister()
       disposeMobileCommand()
-      await Promise.all([remoteControllers.tailscale.close(), remoteControllers.cpolar.close()])
+      await remoteControllers.tailscale.close()
       await lanController.close()
       await mobileAccess.stopLocal()
       unregisterBuiltin()

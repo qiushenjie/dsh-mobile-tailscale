@@ -31,16 +31,13 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version: 1.26.6
-          cache-dependency-path: native/funnel-host/go.sum
       - run: npm ci
-      - run: npm run build:funnel-host
       - run: npm run verify
       - name: Pack plugin and release metadata
         run: |
           npm pack
           sha256sum dsh-mobile-*.tgz > dsh-mobile-plugin.sha256
           npm sbom --sbom-format cyclonedx > dsh-mobile-npm-sbom.cdx.json
-          (cd native/funnel-host && go list -m all) > dsh-mobile-funnel-go-modules.txt
       - uses: actions/upload-artifact@v7
         with:
           name: plugin-package
@@ -48,7 +45,6 @@ jobs:
             dsh-mobile-*.tgz
             dsh-mobile-plugin.sha256
             dsh-mobile-npm-sbom.cdx.json
-            dsh-mobile-funnel-go-modules.txt
           if-no-files-found: error
 
   android:

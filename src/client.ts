@@ -133,17 +133,6 @@ async function requestJson(
   }
 }
 
-function officialFunnelSetupUrl(value: unknown): string {
-  if (typeof value !== 'string' || value.length > 2048) return ''
-  let url: URL
-  try { url = new URL(value) } catch { return '' }
-  const normalized = url.toString().replace(/\/$/u, '')
-  if (normalized === 'https://tailscale.com/s/no-funnel' || normalized === 'https://tailscale.com/s/https') return normalized
-  if (url.protocol !== 'https:' || url.hostname !== 'login.tailscale.com' || url.port !== ''
-    || url.username !== '' || url.password !== '') return ''
-  return url.toString()
-}
-
 function installControl(): { remove: () => void; toggle: () => void } {
   const root = element('div', 'dsh-mobile-control')
   const panel = element('section', 'dsh-mobile-control__panel'); panel.hidden = true
@@ -177,87 +166,16 @@ function installControl(): { remove: () => void; toggle: () => void } {
   manageRow.append(manageDevices, resetAll)
   const devicePanel = element('div', 'dsh-mobile-control__devices'); devicePanel.hidden = true
   const remoteView = element('div', 'dsh-mobile-control__view is-remote'); remoteView.hidden = true
-  const remoteIntro = element('p', 'dsh-mobile-control__intro'); remoteIntro.textContent = '选择更适合你的远程通道。切换或关闭远程访问不会影响局域网。'
-  const providerSection = element('section', 'dsh-mobile-control__provider-section')
-  const providerHeading = element('h3', 'dsh-mobile-control__section-title'); providerHeading.textContent = '选择连接方式'
-  const providerInfo = element('div', 'dsh-mobile-control__provider-info')
-  const providerInfoButton = element('button', 'dsh-mobile-control__provider-info-button'); providerInfoButton.type = 'button'; providerInfoButton.setAttribute('aria-label', '查看远程连接安全与网络说明'); providerInfoButton.setAttribute('aria-expanded', 'false'); providerInfoButton.setAttribute('aria-controls', 'dsh-mobile-provider-info'); providerInfoButton.setAttribute('aria-describedby', 'dsh-mobile-provider-info')
-  const providerInfoGlyph = element('span', 'dsh-mobile-control__provider-info-glyph'); providerInfoGlyph.textContent = 'i'; providerInfoGlyph.setAttribute('aria-hidden', 'true')
-  const providerInfoPopover = element('div', 'dsh-mobile-control__provider-info-popover'); providerInfoPopover.id = 'dsh-mobile-provider-info'; providerInfoPopover.setAttribute('role', 'tooltip'); providerInfoPopover.hidden = true
-  const providerInfoTitle = element('strong'); providerInfoTitle.textContent = '你始终可以放心'
-  const providerInfoText = element('span'); providerInfoText.textContent = '只有已配对设备能进入 DSH。cpolar 按需安装并可彻底清理；Tailscale 在中国大陆网络下可能连接缓慢、中断或无法使用，国内网络建议优先尝试 cpolar。'
-  providerInfoButton.append(providerInfoGlyph); providerInfoPopover.append(providerInfoTitle, providerInfoText); providerInfo.append(providerInfoButton, providerInfoPopover)
-  const providerChoices = element('div', 'dsh-mobile-control__provider-choices'); providerChoices.setAttribute('role', 'radiogroup'); providerChoices.setAttribute('aria-label', '远程连接方式')
-  const tailscaleChoice = element('button', 'dsh-mobile-control__provider'); tailscaleChoice.type = 'button'; tailscaleChoice.setAttribute('role', 'radio'); tailscaleChoice.setAttribute('aria-checked', 'true')
-  const tailscaleChoiceTop = element('span', 'dsh-mobile-control__provider-top')
-  const tailscaleChoiceName = element('strong'); tailscaleChoiceName.textContent = 'Tailscale Funnel'
-  const tailscaleChoiceBadge = element('span', 'dsh-mobile-control__provider-badge'); tailscaleChoiceBadge.textContent = '内置'
-  const tailscaleChoiceDescription = element('span', 'dsh-mobile-control__provider-description'); tailscaleChoiceDescription.textContent = '覆盖更广；中国大陆网络可能不稳定，首次需登录并允许 Funnel。'
-  tailscaleChoiceTop.append(tailscaleChoiceName, tailscaleChoiceBadge); tailscaleChoice.append(tailscaleChoiceTop, tailscaleChoiceDescription)
-  const cpolarChoice = element('button', 'dsh-mobile-control__provider'); cpolarChoice.type = 'button'; cpolarChoice.setAttribute('role', 'radio'); cpolarChoice.setAttribute('aria-checked', 'false')
-  const cpolarChoiceTop = element('span', 'dsh-mobile-control__provider-top')
-  const cpolarChoiceName = element('strong'); cpolarChoiceName.textContent = 'cpolar'
-  const cpolarChoiceBadge = element('span', 'dsh-mobile-control__provider-badge is-cpolar'); cpolarChoiceBadge.textContent = '国内网络优先'
-  const cpolarChoiceDescription = element('span', 'dsh-mobile-control__provider-description'); cpolarChoiceDescription.textContent = '按需安装官方组件，适合国内网络环境。'
-  cpolarChoiceTop.append(cpolarChoiceName, cpolarChoiceBadge); cpolarChoice.append(cpolarChoiceTop, cpolarChoiceDescription)
-  providerChoices.append(cpolarChoice, tailscaleChoice); providerSection.append(providerHeading, providerInfo, providerChoices)
-  const cpolarSetup = element('section', 'dsh-mobile-control__cpolar-setup'); cpolarSetup.hidden = true
-  const cpolarSetupTitle = element('h3', 'dsh-mobile-control__section-title'); cpolarSetupTitle.textContent = '准备 cpolar'
-  const cpolarComponentStatus = element('p', 'dsh-mobile-control__component-status'); cpolarComponentStatus.textContent = '正在检查组件…'
-  const cpolarInstall = element('button', 'dsh-mobile-control__primary'); cpolarInstall.type = 'button'; cpolarInstall.textContent = '安装官方组件'
-  const cpolarAccount = element('div', 'dsh-mobile-control__cpolar-account'); cpolarAccount.hidden = true
-  const cpolarAccountText = element('p', 'dsh-mobile-control__component-note'); cpolarAccountText.textContent = '登录 cpolar 官网后复制 Authtoken。令牌只保存在本机插件私有目录，不会显示在页面或日志中。'
-  const cpolarAccountLinks = element('div', 'dsh-mobile-control__link-row')
-  const cpolarSignup = element('a', 'dsh-mobile-control__text-link'); cpolarSignup.href = 'https://dashboard.cpolar.com/signup'; cpolarSignup.target = '_blank'; cpolarSignup.rel = 'noopener noreferrer'; cpolarSignup.textContent = '注册 cpolar'
-  const cpolarDashboard = element('a', 'dsh-mobile-control__text-link'); cpolarDashboard.href = 'https://dashboard.cpolar.com/auth'; cpolarDashboard.target = '_blank'; cpolarDashboard.rel = 'noopener noreferrer'; cpolarDashboard.textContent = '打开控制台获取令牌'
-  cpolarAccountLinks.append(cpolarSignup, cpolarDashboard)
-  const cpolarTokenLabel = element('label', 'dsh-mobile-control__token-label'); cpolarTokenLabel.textContent = 'Authtoken'
-  const cpolarToken = element('input', 'dsh-mobile-control__token'); cpolarToken.type = 'password'; cpolarToken.autocomplete = 'off'; cpolarToken.spellcheck = false; cpolarToken.placeholder = '粘贴 cpolar Authtoken'; cpolarTokenLabel.append(cpolarToken)
-  const cpolarConfigure = element('button', 'dsh-mobile-control__primary dsh-mobile-control__cpolar-connect'); cpolarConfigure.type = 'button'; cpolarConfigure.textContent = '保存并连接'
-  cpolarAccount.append(cpolarAccountText, cpolarAccountLinks, cpolarTokenLabel, cpolarConfigure)
-  const cpolarDetails = element('details', 'dsh-mobile-control__details')
-  const cpolarDetailsSummary = element('summary'); cpolarDetailsSummary.textContent = '组件来源与清理说明'
-  const cpolarDetailsBody = element('div', 'dsh-mobile-control__details-body')
-  const cpolarDetailsText = element('p'); cpolarDetailsText.textContent = '仅在你点击安装后从 cpolar 官网下载并校验固定版本。不会写入系统服务、开机启动、注册表或 PATH。'
-  const cpolarStorage = element('code', 'dsh-mobile-control__storage'); cpolarStorage.textContent = '插件私有目录'
-  const cpolarOfficial = element('a', 'dsh-mobile-control__text-link'); cpolarOfficial.href = 'https://www.cpolar.com/download'; cpolarOfficial.target = '_blank'; cpolarOfficial.rel = 'noopener noreferrer'; cpolarOfficial.textContent = '官方下载安装页'
-  const cpolarTerms = element('a', 'dsh-mobile-control__text-link'); cpolarTerms.href = 'https://www.cpolar.com/tos'; cpolarTerms.target = '_blank'; cpolarTerms.rel = 'noopener noreferrer'; cpolarTerms.textContent = '服务条款'
-  const cpolarPurge = element('button', 'dsh-mobile-control__danger'); cpolarPurge.type = 'button'; cpolarPurge.textContent = '彻底移除 cpolar 组件与配置'
-  cpolarDetailsBody.append(cpolarDetailsText, cpolarStorage, cpolarOfficial, cpolarTerms, cpolarPurge); cpolarDetails.append(cpolarDetailsSummary, cpolarDetailsBody)
-  cpolarSetup.append(cpolarSetupTitle, cpolarComponentStatus, cpolarInstall, cpolarAccount, cpolarDetails)
-  const tailscaleInfo = element('details', 'dsh-mobile-control__details')
-  const tailscaleInfoSummary = element('summary'); tailscaleInfoSummary.textContent = 'Tailscale 使用说明'
-  const tailscaleInfoBody = element('div', 'dsh-mobile-control__details-body')
-  const tailscaleInfoText = element('p'); tailscaleInfoText.textContent = '运行组件已随插件提供。首次连接会打开 Tailscale 官方登录和 Funnel 授权页；插件不会接触你的账号密码。'
-  tailscaleInfoBody.append(tailscaleInfoText); tailscaleInfo.append(tailscaleInfoSummary, tailscaleInfoBody)
+  const remoteIntro = element('p', 'dsh-mobile-control__intro'); remoteIntro.textContent = '通过 Tailscale Serve 提供私密远程访问。手机安装 Tailscale 并加入同一 tailnet 后，打开下方地址即可；无需配对。'
   const remoteAccess = element('div', 'dsh-mobile-control__access'); remoteAccess.hidden = true
   const remoteAccessLabel = element('span', 'dsh-mobile-control__access-label'); remoteAccessLabel.textContent = '远程地址'
   const remoteAccessLink = element('a', 'dsh-mobile-control__access-link'); remoteAccessLink.target = '_blank'; remoteAccessLink.rel = 'noreferrer'; remoteAccess.append(remoteAccessLabel, remoteAccessLink)
-  const remoteQr = element('div', 'dsh-mobile-control__qr'); remoteQr.hidden = true
   const remoteStatus = element('p', 'dsh-mobile-control__status'); remoteStatus.textContent = '正在读取远程状态…'; remoteStatus.setAttribute('aria-live', 'polite')
-  const remoteGuide = element('section', 'dsh-mobile-control__guide'); remoteGuide.hidden = true; remoteGuide.setAttribute('aria-label', 'Tailscale Funnel 启用步骤')
-  const remoteGuideTitle = element('h3', 'dsh-mobile-control__guide-title'); remoteGuideTitle.textContent = '远程访问设置 · 第 2 步'
-  const remoteGuideSummary = element('p', 'dsh-mobile-control__guide-summary'); remoteGuideSummary.textContent = 'Tailscale 登录已完成。还需为这台电脑允许 Funnel，官方页面会同时启用 HTTPS。'
-  const remoteGuideSteps = element('ol', 'dsh-mobile-control__guide-steps')
-  for (const text of ['打开当前节点的 Tailscale 官方授权页。', '确认启用 Funnel；无需再次登录 DSH。', '返回 DSH，插件会自动检查并建立连接。']) {
-    const item = element('li'); item.textContent = text; remoteGuideSteps.append(item)
-  }
-  const remoteGuideNote = element('p', 'dsh-mobile-control__guide-note'); remoteGuideNote.textContent = '需要使用 Owner、Admin 或 Network admin 账号。'
-  const remoteGuideActions = element('div', 'dsh-mobile-control__guide-actions')
-  const remoteSetup = element('button', 'dsh-mobile-control__primary'); remoteSetup.type = 'button'; remoteSetup.textContent = '继续完成 Funnel 授权'
-  const remoteSetupRetry = element('button', 'dsh-mobile-control__secondary'); remoteSetupRetry.type = 'button'; remoteSetupRetry.textContent = '已完成，立即重试'
-  remoteGuideActions.append(remoteSetup, remoteSetupRetry); remoteGuide.append(remoteGuideTitle, remoteGuideSummary, remoteGuideSteps, remoteGuideNote, remoteGuideActions)
   const remoteActions = element('div', 'dsh-mobile-control__actions')
   const remoteToggle = element('button', 'dsh-mobile-control__primary'); remoteToggle.type = 'button'; remoteToggle.textContent = '启用远程访问'
-  const remoteLogin = element('button', 'dsh-mobile-control__primary'); remoteLogin.type = 'button'; remoteLogin.textContent = '继续登录'; remoteLogin.hidden = true
   const remoteReconnect = element('button', 'dsh-mobile-control__secondary'); remoteReconnect.type = 'button'; remoteReconnect.textContent = '重新连接'; remoteReconnect.hidden = true
-  const remotePair = element('button', 'dsh-mobile-control__secondary'); remotePair.type = 'button'; remotePair.textContent = '生成远程配对二维码'; remotePair.disabled = true
-  remoteActions.append(remoteToggle, remoteLogin, remoteReconnect, remotePair)
-  const remoteManageRow = element('div', 'dsh-mobile-control__manage-row')
-  const remoteDevices = element('button', 'dsh-mobile-control__manage'); remoteDevices.type = 'button'; remoteDevices.textContent = '管理远程设备'; remoteDevices.disabled = true
-  const remoteReset = element('button', 'dsh-mobile-control__manage'); remoteReset.type = 'button'; remoteReset.textContent = '退出并清除远程登录'
-  remoteManageRow.append(remoteDevices, remoteReset)
-  const remoteDevicePanel = element('div', 'dsh-mobile-control__devices'); remoteDevicePanel.hidden = true
+  remoteActions.append(remoteToggle, remoteReconnect)
+  const remoteReset = element('button', 'dsh-mobile-control__manage'); remoteReset.type = 'button'; remoteReset.textContent = '关闭并清除远程访问'
   const diagnosticsView = element('div', 'dsh-mobile-control__view is-diagnostics'); diagnosticsView.hidden = true
   const diagnosticsIntro = element('p', 'dsh-mobile-control__intro'); diagnosticsIntro.textContent = '检查版本、网关、网卡、防火墙和远程通道。报告自动脱敏，不读取对话或凭据。'
   const diagnosticsSummary = element('section', 'dsh-mobile-control__diagnostic-summary is-idle'); diagnosticsSummary.setAttribute('aria-live', 'polite')
@@ -282,44 +200,17 @@ function installControl(): { remove: () => void; toggle: () => void } {
   diagnosticsDetails.append(diagnosticsDetailsSummary, diagnosticsReport)
   header.append(title, headerActions); actions.append(toggle, pair, linkPair)
   lanView.append(access, qrBox, status, extensionStatus, actions, manageRow, devicePanel)
-  remoteView.append(remoteIntro, providerSection, cpolarSetup, tailscaleInfo, remoteAccess, remoteQr, remoteStatus, remoteGuide, remoteActions, remoteManageRow, remoteDevicePanel)
+  remoteView.append(remoteIntro, remoteAccess, remoteStatus, remoteActions, remoteReset)
   diagnosticsView.append(diagnosticsIntro, diagnosticsSummary, diagnosticsToolbar, diagnosticsFeedback, diagnosticsChecks, diagnosticsDetails)
   panel.append(header, appDownload, switcher, lanView, remoteView, diagnosticsView); root.append(panel); document.body.append(root)
   let running = false
   let origin = ''
   let remoteRunning = false
   let remoteReady = false
-  let remoteProvider: 'tailscale' | 'cpolar' = 'tailscale'
-  let remoteLoginUrl = ''
-  let remoteSetupUrl = ''
-  let remoteSetupPending = false
-  let remoteSetupOpenedAt = 0
   let remoteReconnectBusy = false
-  let remoteProviderBusy = false
-  let cpolarInstalled = false
-  let cpolarConfigured = false
-  let providerInfoPinned = false
-  let providerInfoHovered = false
   let previousAccessView: 'lan' | 'remote' = 'lan'
   let diagnosticsBusy = false
   let copiedDiagnosticReport = ''
-  const syncProviderInfo = (): void => {
-    const open = providerInfoPinned || providerInfoHovered || providerInfo.contains(document.activeElement)
-    providerInfoPopover.hidden = !open
-    providerInfoButton.setAttribute('aria-expanded', String(open))
-  }
-  providerInfo.addEventListener('pointerenter', () => { providerInfoHovered = true; syncProviderInfo() })
-  providerInfo.addEventListener('pointerleave', () => { providerInfoHovered = false; syncProviderInfo() })
-  providerInfo.addEventListener('focusin', syncProviderInfo)
-  providerInfo.addEventListener('focusout', () => { window.setTimeout(syncProviderInfo, 0) })
-  providerInfoButton.addEventListener('click', () => { providerInfoPinned = !providerInfoPinned; syncProviderInfo() })
-  providerInfoButton.addEventListener('keydown', event => {
-    if (event.key !== 'Escape') return
-    providerInfoPinned = false
-    providerInfoHovered = false
-    providerInfoPopover.hidden = true
-    providerInfoButton.setAttribute('aria-expanded', 'false')
-  })
   const selectView = (view: 'lan' | 'remote' | 'diagnostics'): void => {
     if (view !== 'diagnostics') previousAccessView = view
     lanView.hidden = view !== 'lan'
@@ -437,58 +328,9 @@ function installControl(): { remove: () => void; toggle: () => void } {
   })
   const renderRemote = (data: Record<string, unknown>): void => {
     remoteRunning = data.running === true
-    remoteProvider = data.provider === 'cpolar' ? 'cpolar' : 'tailscale'
-    const cpolar = remoteProvider === 'cpolar'
-    tailscaleChoice.classList.toggle('is-selected', !cpolar)
-    cpolarChoice.classList.toggle('is-selected', cpolar)
-    tailscaleChoice.setAttribute('aria-checked', String(!cpolar))
-    cpolarChoice.setAttribute('aria-checked', String(cpolar))
-    tailscaleChoice.disabled = remoteProviderBusy
-    cpolarChoice.disabled = remoteProviderBusy
-    cpolarSetup.hidden = !cpolar
-    tailscaleInfo.hidden = cpolar
-    remoteReset.textContent = cpolar ? '关闭并清除远程设备' : '退出并清除远程登录'
-    const providers = data.providers !== null && typeof data.providers === 'object' ? data.providers as Record<string, unknown> : {}
-    const cpolarProvider = providers.cpolar !== null && typeof providers.cpolar === 'object' ? providers.cpolar as Record<string, unknown> : {}
-    const component = cpolarProvider.component !== null && typeof cpolarProvider.component === 'object'
-      ? cpolarProvider.component as Record<string, unknown>
-      : {}
-    cpolarInstalled = component.installed === true
-    cpolarConfigured = component.configured === true
-    cpolarChoiceBadge.textContent = cpolarConfigured ? '已就绪' : cpolarInstalled ? '已安装' : '国内网络优先'
-    const cpolarSupported = component.supported !== false
-    const componentVersion = typeof component.version === 'string' ? component.version : ''
-    const componentDownloadBytes = typeof component.downloadBytes === 'number' ? component.downloadBytes : 0
-    const componentStorage = typeof component.storagePath === 'string' ? component.storagePath : 'DSH Mobile 插件私有目录'
-    cpolarStorage.textContent = componentStorage
-    cpolarStorage.title = componentStorage
-    cpolarInstall.hidden = cpolarInstalled || !cpolarSupported
-    cpolarInstall.textContent = componentDownloadBytes > 0
-      ? `安装官方组件 · ${(componentDownloadBytes / 1024 / 1024).toFixed(1)} MB`
-      : '安装官方组件'
-    cpolarInstall.disabled = remoteProviderBusy
-    cpolarAccount.hidden = !cpolarInstalled || cpolarConfigured
-    cpolarConfigure.disabled = remoteProviderBusy
-    cpolarPurge.hidden = !cpolarInstalled && !cpolarConfigured
-    cpolarComponentStatus.textContent = !cpolarSupported
-      ? '当前仅支持 Windows x64。你仍可选择内置的 Tailscale Funnel。'
-      : !cpolarInstalled
-        ? '尚未安装。只有点击下方按钮后，才会从 cpolar 官网下载固定版本。'
-        : !cpolarConfigured
-          ? `官方组件 ${componentVersion} 已校验，下一步只需保存账号令牌。`
-          : `官方组件 ${componentVersion} 与本机账号配置已就绪。`
     const state = typeof data.state === 'string' ? data.state : 'error'
     const errorCode = typeof data.errorCode === 'string' ? data.errorCode : ''
     const remoteOrigin = typeof data.origin === 'string' ? data.origin : ''
-    remoteLoginUrl = typeof data.loginUrl === 'string' ? data.loginUrl : ''
-    const candidateSetupUrl = cpolar ? '' : officialFunnelSetupUrl(data.setupUrl)
-    const fallbackSetupUrls: Record<string, string> = {
-      funnel_permission_required: 'https://tailscale.com/s/no-funnel',
-      funnel_https_required: 'https://tailscale.com/s/https',
-      funnel_start_failed: 'https://tailscale.com/s/no-funnel',
-    }
-    remoteSetupUrl = candidateSetupUrl !== '' ? candidateSetupUrl : (fallbackSetupUrls[errorCode] ?? '')
-    const needsFunnelSetup = state === 'error' && remoteSetupUrl !== ''
     remoteReady = remoteRunning && state === 'ready' && remoteOrigin !== ''
     remoteAccess.hidden = !remoteReady
     remoteAccessLink.href = remoteOrigin
@@ -497,49 +339,22 @@ function installControl(): { remove: () => void; toggle: () => void } {
     remoteStatus.classList.toggle('is-running', remoteReady)
     const labels: Record<string, string> = {
       off: '远程访问未启用。局域网访问不受影响。',
-      unavailable: cpolar ? 'cpolar 尚未安装或未完成本机账号配置。' : '当前电脑缺少 Funnel 运行组件，请重新安装完整插件包。',
-      starting: cpolar ? '正在连接 cpolar 国内节点…' : '正在启动 Tailscale 安全通道…',
-      'needs-login': '需要在浏览器完成一次 Tailscale 登录。插件不会读取你的密码。',
-      connecting: cpolar ? '公网地址已分配，正在启动 DSH 认证网关…' : '登录完成，正在建立公开 HTTPS 地址…',
-      ready: '远程访问已就绪。只有已配对设备可以进入 DSH。',
+      starting: '正在启动 Tailscale Serve…',
+      ready: '远程访问已就绪。手机加入同一 tailnet 后打开下方地址即可访问。',
+      unavailable: '当前电脑缺少 Tailscale，请安装后重试。',
       error: '远程连接未建立。可重新连接，局域网访问仍可正常使用。',
     }
     const errorLabels: Record<string, string> = {
-      funnel_permission_required: '登录已完成。请继续授权 Funnel，完成后会自动建立远程连接。',
-      funnel_https_required: '登录已完成。请继续授权 Funnel，官方页面会同时启用 HTTPS。',
-      funnel_start_failed: '登录已完成。请继续完成 Tailscale Funnel 的首次授权。',
-      funnel_start_timeout: 'Tailscale 组件启动超时，请检查网络后重新连接。',
-      tailscale_dns_missing: 'Tailscale 暂未提供远程地址。请重新连接并确认已完成登录。',
+      tailscale_not_logged_in: 'Tailscale 未登录或未加入 tailnet，请登录后重试。',
+      tailscale_missing: '未找到 tailscale 命令，请安装 Tailscale。',
+      funnel_unavailable: 'Tailscale 未启用 Funnel（Serve 需要），请在 Tailscale 管理后台确认。',
+      permission_denied: '权限不足，请以管理员身份运行后重试。',
+      serve_failed: 'Tailscale Serve 启动失败，请检查网络后重新连接。',
       gateway_start_failed: '远程网关启动失败。请重新连接，局域网访问不受影响。',
-      control_channel_failed: '远程组件连接中断。请重新连接。',
-      cpolar_component_missing: 'cpolar 官方组件尚未安装。请先完成上方准备步骤。',
-      cpolar_component_invalid: 'cpolar 组件校验失败。请彻底移除后重新安装。',
-      cpolar_config_missing: 'cpolar 尚未保存账号令牌。请先完成上方准备步骤。',
-      cpolar_config_invalid: 'cpolar 本机配置无效。请重新保存账号令牌。',
-      cpolar_port_unavailable: '无法分配本机远程网关端口，请重试。',
-      cpolar_launch_failed: 'cpolar 客户端未能启动。',
-      cpolar_start_timeout: '连接 cpolar 国内节点超时，请重新连接。',
-      cpolar_stopped: 'cpolar 连接已停止。',
-      cpolar_exited: 'cpolar 连接意外退出，请重新连接。',
-      cpolar_invalid_output: 'cpolar 返回了无法识别的状态。',
-      cpolar_invalid_origin: 'cpolar 返回的公网地址未通过校验。',
     }
-    remoteStatus.textContent = remoteSetupPending && needsFunnelSetup
-      ? 'Tailscale 官方页面已打开。完成启用后返回 DSH，这里会自动重新连接。'
-      : (state === 'error' ? (errorLabels[errorCode] ?? labels.error!) : (labels[state] ?? labels.error!))
-    remoteGuide.hidden = !needsFunnelSetup
-    remoteSetup.disabled = remoteSetupUrl === '' || remoteReconnectBusy
-    remoteSetupRetry.disabled = remoteReconnectBusy
+    remoteStatus.textContent = state === 'error' ? (errorLabels[errorCode] ?? labels.error!) : (labels[state] ?? labels.error!)
     remoteToggle.textContent = remoteRunning ? '关闭远程访问' : '启用远程访问'
-    remoteToggle.disabled = remoteProviderBusy || (cpolar && (!cpolarInstalled || !cpolarConfigured))
-    remoteLogin.hidden = cpolar || state !== 'needs-login' || remoteLoginUrl === ''
-    remoteReconnect.hidden = needsFunnelSetup || (state !== 'error' && state !== 'unavailable')
-      || (cpolar && (!cpolarInstalled || !cpolarConfigured))
-    remoteActions.hidden = cpolar && (!cpolarInstalled || !cpolarConfigured)
-    remotePair.disabled = !remoteReady
-    remoteDevices.disabled = !remoteReady
-    if (!remoteReady) remoteQr.hidden = true
-    if (!needsFunnelSetup) remoteSetupPending = false
+    remoteReconnect.hidden = state !== 'error' && state !== 'unavailable'
   }
   let remoteLoadInFlight = false
   const loadRemote = (): void => {
@@ -549,146 +364,23 @@ function installControl(): { remove: () => void; toggle: () => void } {
       .then(renderRemote, error => { remoteStatus.textContent = String(error) })
       .finally(() => { remoteLoadInFlight = false })
   }
-  const chooseRemoteProvider = (provider: 'tailscale' | 'cpolar'): void => {
-    if (remoteProviderBusy || provider === remoteProvider) return
-    if (remoteRunning && !window.confirm('切换连接方式会先关闭当前远程通道。局域网和配对设备不会受影响，是否继续？')) return
-    remoteProviderBusy = true
-    tailscaleChoice.disabled = true
-    cpolarChoice.disabled = true
-    remoteStatus.textContent = provider === 'cpolar' ? '正在切换到 cpolar…' : '正在切换到 Tailscale Funnel…'
-    void requestJson('/api/mobile-access/remote/provider', { method: 'POST', body: JSON.stringify({ provider }) })
-      .then(renderRemote, error => { remoteStatus.textContent = String(error) })
-      .finally(() => { remoteProviderBusy = false; loadRemote() })
-  }
-  tailscaleChoice.addEventListener('click', () => { chooseRemoteProvider('tailscale') })
-  cpolarChoice.addEventListener('click', () => { chooseRemoteProvider('cpolar') })
-  cpolarInstall.addEventListener('click', () => {
-    if (remoteProviderBusy) return
-    const accepted = window.confirm('将从 cpolar 官方网站下载并校验固定版本（约 7.3 MB），仅解压到 DSH Mobile 私有目录。不会安装系统服务、写入 PATH/注册表或设置开机启动。是否继续？')
-    if (!accepted) return
-    remoteProviderBusy = true
-    cpolarInstall.disabled = true
-    cpolarInstall.textContent = '正在下载并校验…'
-    remoteStatus.textContent = '正在安装 cpolar 官方组件。完成前请保持 DSH 运行。'
-    void requestJson('/api/mobile-access/remote/cpolar/component/install', { method: 'POST', body: JSON.stringify({ confirm: true }) }, LONG_CONTROL_REQUEST_TIMEOUT_MS)
-      .then(renderRemote, error => { remoteStatus.textContent = `组件安装失败：${String(error)}` })
-      .finally(() => { remoteProviderBusy = false; loadRemote() })
-  })
-  cpolarConfigure.addEventListener('click', () => {
-    if (remoteProviderBusy) return
-    const authtoken = cpolarToken.value.trim()
-    if (authtoken.length < 20 || /\s/u.test(authtoken)) {
-      remoteStatus.textContent = '请粘贴 cpolar 控制台提供的完整 Authtoken。'
-      cpolarToken.focus()
-      return
-    }
-    remoteProviderBusy = true
-    cpolarConfigure.disabled = true
-    cpolarConfigure.setAttribute('aria-busy', 'true')
-    cpolarConfigure.textContent = '正在保存…'
-    void requestJson('/api/mobile-access/remote/cpolar/configure', { method: 'POST', body: JSON.stringify({ authtoken }) }, LONG_CONTROL_REQUEST_TIMEOUT_MS)
-      .then(() => {
-        cpolarToken.value = ''
-        remoteStatus.textContent = '账号配置已保存，正在建立 cpolar 远程通道…'
-        return requestJson('/api/mobile-access/remote/control', { method: 'POST', body: JSON.stringify({ running: true }) })
-      })
-      .then(renderRemote, error => { remoteStatus.textContent = `配置失败：${String(error)}` })
-      .finally(() => { remoteProviderBusy = false; cpolarConfigure.setAttribute('aria-busy', 'false'); cpolarConfigure.textContent = '保存并连接'; loadRemote() })
-  })
-  cpolarPurge.addEventListener('click', () => {
-    if (remoteProviderBusy) return
-    if (!window.confirm('彻底移除 DSH Mobile 私有目录中的 cpolar 组件、令牌配置和运行日志？不会影响局域网、DSH 数据或系统中的其他程序。')) return
-    remoteProviderBusy = true
-    cpolarPurge.disabled = true
-    remoteStatus.textContent = '正在关闭通道并清理 DSH Mobile 管理的 cpolar 文件…'
-    void requestJson('/api/mobile-access/remote/cpolar/component/purge', { method: 'POST', body: JSON.stringify({ confirm: true }) }, LONG_CONTROL_REQUEST_TIMEOUT_MS)
-      .then(renderRemote, error => { remoteStatus.textContent = `清理失败：${String(error)}` })
-      .finally(() => { remoteProviderBusy = false; cpolarPurge.disabled = false; loadRemote() })
-  })
   remoteToggle.addEventListener('click', () => {
     remoteToggle.disabled = true
     void requestJson('/api/mobile-access/remote/control', { method: 'POST', body: JSON.stringify({ running: !remoteRunning }) })
       .then(renderRemote, error => { remoteStatus.textContent = String(error) })
       .finally(loadRemote)
   })
-  remoteLogin.addEventListener('click', () => {
-    if (remoteLoginUrl !== '') window.open(remoteLoginUrl, '_blank', 'noopener,noreferrer')
-  })
-  const reconnectRemote = (): void => {
+  remoteReconnect.addEventListener('click', () => {
     if (remoteReconnectBusy) return
     remoteReconnectBusy = true
     remoteReconnect.disabled = true
-    remoteSetup.disabled = true
-    remoteSetupRetry.disabled = true
-    remoteStatus.textContent = remoteProvider === 'cpolar' ? '正在重新连接 cpolar 国内节点…' : '正在确认 Tailscale 设置并重新连接…'
+    remoteStatus.textContent = '正在重新连接 Tailscale Serve…'
     void requestJson('/api/mobile-access/remote/reconnect', { method: 'POST', body: '{}' })
       .then(renderRemote, error => { remoteStatus.textContent = String(error) })
-      .finally(() => {
-        remoteReconnectBusy = false
-        remoteReconnect.disabled = false
-        remoteSetup.disabled = remoteSetupUrl === ''
-        remoteSetupRetry.disabled = false
-      })
-  }
-  remoteReconnect.addEventListener('click', reconnectRemote)
-  remoteSetupRetry.addEventListener('click', () => { remoteSetupPending = false; reconnectRemote() })
-  remoteSetup.addEventListener('click', () => {
-    if (remoteSetupUrl === '') return
-    remoteSetupPending = true
-    remoteSetupOpenedAt = Date.now()
-    remoteStatus.textContent = 'Tailscale 官方页面已打开。完成启用后返回 DSH，这里会自动重新连接。'
-    window.open(remoteSetupUrl, '_blank', 'noopener,noreferrer')
-  })
-  const retryAfterSetup = (): void => {
-    if (!remoteSetupPending || document.visibilityState === 'hidden' || Date.now() - remoteSetupOpenedAt < 800) return
-    remoteSetupPending = false
-    reconnectRemote()
-  }
-  window.addEventListener('focus', retryAfterSetup)
-  document.addEventListener('visibilitychange', retryAfterSetup)
-  remotePair.addEventListener('click', () => {
-    remotePair.disabled = true
-    void requestJson('/api/mobile-access/remote/pairing/open', { method: 'POST', body: '{}' }).then(async data => {
-      const pairUrl = typeof data.pairUrl === 'string' ? data.pairUrl : ''
-      showQr(typeof data.qrSvg === 'string' ? data.qrSvg : '', remoteQr)
-      if (pairUrl !== '') {
-        try { await navigator.clipboard.writeText(pairUrl) } catch { /* QR remains the primary remote handoff. */ }
-      }
-      remoteStatus.textContent = '远程配对二维码已生成。请在 App 的“远程访问”中扫描。'
-    }, error => { remoteStatus.textContent = String(error) }).finally(() => { remotePair.disabled = !remoteReady })
-  })
-  const renderRemoteDevices = (data: Record<string, unknown>): void => {
-    const devices = Array.isArray(data.devices) ? data.devices as Record<string, unknown>[] : []
-    remoteDevicePanel.replaceChildren()
-    if (devices.length === 0) {
-      const empty = element('p', 'dsh-mobile-control__device-empty'); empty.textContent = '暂无远程配对设备。'; remoteDevicePanel.append(empty); return
-    }
-    for (const device of devices) {
-      const row = element('div', 'dsh-mobile-control__device')
-      const label = element('span', 'dsh-mobile-control__device-label'); label.textContent = typeof device.label === 'string' ? device.label : '设备'
-      const meta = element('span', 'dsh-mobile-control__device-meta'); meta.textContent = `到期 ${formatTime(device.expiresAt)}`
-      const revoke = element('button', 'dsh-mobile-control__device-revoke'); revoke.type = 'button'; revoke.textContent = '撤销'
-      const id = typeof device.id === 'string' ? device.id : ''
-      revoke.addEventListener('click', () => {
-        void requestJson('/api/mobile-access/remote/devices/revoke', { method: 'POST', body: JSON.stringify({ deviceId: id }) })
-          .then(loadRemoteDevices, error => { remoteStatus.textContent = String(error) })
-      })
-      row.append(label, meta, revoke); remoteDevicePanel.append(row)
-    }
-  }
-  const loadRemoteDevices = (): void => {
-    void requestJson('/api/mobile-access/remote/devices').then(renderRemoteDevices, error => { remoteStatus.textContent = String(error) })
-  }
-  remoteDevices.addEventListener('click', () => {
-    const show = remoteDevicePanel.hidden
-    remoteDevicePanel.hidden = !show
-    if (show) loadRemoteDevices()
+      .finally(() => { remoteReconnectBusy = false; remoteReconnect.disabled = false })
   })
   remoteReset.addEventListener('click', () => {
-    const prompt = remoteProvider === 'cpolar'
-      ? '关闭 cpolar 远程通道并移除所有远程配对设备？不会修改你的 cpolar 账号或其他隧道。'
-      : '退出电脑上的 Tailscale 登录并移除所有远程配对设备？局域网配置不会改变。'
-    if (!window.confirm(prompt)) return
+    if (!window.confirm('关闭 Tailscale Serve 远程访问？局域网配置不会改变。')) return
     void requestJson('/api/mobile-access/remote/reset', { method: 'POST', body: JSON.stringify({ confirm: true }) })
       .then(renderRemote, error => { remoteStatus.textContent = String(error) })
   })
@@ -791,18 +483,13 @@ function installControl(): { remove: () => void; toggle: () => void } {
   close.addEventListener('click', () => { setOpen(false) })
   const dismiss = (event: PointerEvent): void => {
     if (panel.hidden || !(event.target instanceof Node)) return
-    if (!providerInfo.contains(event.target)) {
-      providerInfoPinned = false
-      providerInfoHovered = false
-      syncProviderInfo()
-    }
     if (!panel.contains(event.target) && !document.querySelector('.dsh-mobile-control__trigger')?.contains(event.target)) setOpen(false)
   }
   document.addEventListener('pointerdown', dismiss)
   void requestJson('/api/mobile-access/lan/control').then(render, error => { status.textContent = String(error) })
   loadRemote()
   const remotePoll = window.setInterval(() => { if (!panel.hidden && !remoteView.hidden) loadRemote() }, 1_500)
-  return { remove: () => { window.clearInterval(remotePoll); window.removeEventListener('focus', retryAfterSetup); document.removeEventListener('visibilitychange', retryAfterSetup); document.removeEventListener('pointerdown', dismiss); root.remove() }, toggle: () => { setOpen(panel.hidden !== false) } }
+  return { remove: () => { window.clearInterval(remotePoll); document.removeEventListener('pointerdown', dismiss); root.remove() }, toggle: () => { setOpen(panel.hidden !== false) } }
 }
 
 function mobileRequest(path: string, init: RequestInit = {}): Promise<Response> {
@@ -1077,7 +764,7 @@ function installCustomAssets(): () => void {
   }
   started = true
   for (const definition of definitions.values()) void activateDefinition(definition)
-  const remoteOrigin = window.location.hostname.endsWith('.ts.net') || window.location.hostname.includes('.cpolar.')
+  const remoteOrigin = window.location.hostname.endsWith('.ts.net')
   const refreshIntervalMs = remoteOrigin ? 15_000 : 3_000
   const refreshTimeoutMs = remoteOrigin ? 20_000 : 8_000
   let stopped = false

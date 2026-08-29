@@ -28,7 +28,7 @@ export interface DiagnosticSnapshot {
     readonly port?: number
   }
   readonly remote: {
-    readonly provider: 'tailscale' | 'cpolar'
+    readonly provider: 'tailscale'
     readonly running: boolean
     readonly state: string
     readonly origin?: string
@@ -68,24 +68,13 @@ export interface ConnectionDiagnostics {
 }
 
 const REMOTE_ERROR_GUIDANCE: Readonly<Record<string, string>> = Object.freeze({
-  component_missing: '重新安装完整插件包。',
-  funnel_permission_required: '继续完成 Tailscale Funnel 授权。',
-  funnel_https_required: '继续完成 Tailscale HTTPS 授权。',
-  funnel_start_failed: '重新打开授权页并允许 Funnel。',
-  funnel_start_timeout: '检查网络后点击“重新连接”。',
-  tailscale_dns_missing: '确认 Tailscale 登录仍有效后重新连接。',
-  sidecar_launch_failed: '重新安装完整插件包后重试。',
-  sidecar_stopped: '点击“重新连接”。',
-  sidecar_exited: '点击“重新连接”；仍失败时复制诊断报告。',
-  control_channel_failed: '点击“重新连接”。',
-  cpolar_component_missing: '先安装 cpolar 官方组件。',
-  cpolar_component_invalid: '彻底移除 cpolar 组件后重新安装。',
-  cpolar_config_missing: '保存 cpolar Authtoken 后重试。',
-  cpolar_config_invalid: '重新保存 cpolar Authtoken。',
-  cpolar_start_timeout: '检查网络后点击“重新连接”。',
-  cpolar_stopped: '点击“重新连接”。',
-  cpolar_exited: '点击“重新连接”；仍失败时复制诊断报告。',
-  gateway_start_failed: '确认 DSH 正在运行后重新连接。',
+  component_missing: 'Reinstall the complete plugin package.',
+  tailscale_not_logged_in: 'Confirm Tailscale is logged in and on the same tailnet, then reconnect.',
+  tailscale_missing: 'Install Tailscale and retry.',
+  funnel_unavailable: 'Confirm Funnel is enabled in the Tailscale admin console, then retry.',
+  permission_denied: 'Run DSH as administrator and retry.',
+  serve_failed: 'Check the network, then click Reconnect.',
+  gateway_start_failed: 'Confirm DSH is running, then reconnect.',
 })
 
 function check(
@@ -115,9 +104,6 @@ function remoteSuffix(origin: string | undefined): string {
   try {
     const hostname = new URL(origin).hostname
     if (hostname.endsWith('.ts.net')) return '*.ts.net'
-    for (const suffix of ['.cpolar.cn', '.cpolar.io', '.cpolar.top', '.cpolar.com']) {
-      if (hostname.endsWith(suffix)) return `*${suffix}`
-    }
     return '公共 HTTPS 地址'
   } catch {
     return '地址格式无效'
@@ -157,7 +143,7 @@ function defaultFirewallProbe(platform: NodeJS.Platform = process.platform): (po
 /** Allow remote relays enough time to answer without making diagnostics unbounded. */
 export function remoteDiagnosticTimeoutMs(origin: string): number {
   const hostname = new URL(origin).hostname.toLowerCase()
-  if (hostname.endsWith('.ts.net') || hostname.includes('.cpolar.')) return 10_000
+  if (hostname.endsWith('.ts.net')) return 10_000
   return 5_000
 }
 
@@ -253,7 +239,7 @@ export async function collectConnectionDiagnostics(
         'error',
         '远程通道',
         'Tailscale 地址被当前 VPN 或 DNS 代理接管，但 TLS 链路未建立。',
-        '切换 VPN 节点或代理模式；仍失败时改用 cpolar。',
+        'Switch VPN node or proxy mode, then retry.',
       ))
     } else {
       checks.push(check('remote', 'error', '远程通道', '提供方显示已就绪，但公共地址暂不可达。', '点击“重新连接”；仍失败时检查提供方状态。'))
