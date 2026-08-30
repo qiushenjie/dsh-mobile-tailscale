@@ -2,6 +2,15 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.3.2 - 2026-08-29
+
+- **Remote channel no longer hardcodes the web port.** Tailscale Serve now targets a plugin-owned loopback passthrough proxy that resolves the live upstream from the host `webServer` service per request (falling back to `DSH_WEB_URL`, then `upstreamOrigin`). The remote channel follows DSH Desktop's random per-launch web port automatically — no manual `tailscale serve` re-pointing after restarts.
+- **Browser-trust fence bypass for remote.** The passthrough proxy rewrites `Host`/`Origin` to the upstream origin (the same proven pattern as the LAN gateway) and injects the upstream session cookie, so phone `/api` calls no longer hit the DSH browser-trust fence 403 while staying pairing-free.
+- **Automatic stale serve-config recovery.** Starting Serve now detects a port-443 occupancy (`already serving TCP` etc.), clears it when 443 is the only serve entry, and retries once; a conflict with other serve entries surfaces a dedicated `serve_port_conflict` error instead of the generic `serve_failed`.
+- **LAN gateway upstream follows the live instance too.** Both LAN and remote paths resolve the upstream through the webServer service, so neither depends on a fixed port being occupied by a particular instance.
+- **Transparent WebSocket passthrough.** The proxy forwards every upgrade request (any path, query preserved) instead of whitelisting three core channels, so plugin channels such as `/sidebar/ws/agent-opens` and `/sidebar/ws/agent-terminals` keep working remotely. Upgrade failures now log a diagnostic line to the harness log instead of being masked as an EOF.
+- **Pairing-free mobile-frontend assets on the remote path.** The DSH WebServer mirrors the LAN gateway's mobile metadata, custom css/js, mobile layout module and extension registry (without the LAN device-pairing requirement), so the phone's mobile UI features load over the Tailscale Serve channel too.
+
 ## 0.3.1 - 2026-08-28
 
 - Credit @BlueandwhiteXD ([#15](https://github.com/saya-ch/dsh-mobile/pull/15)) for the Android keyboard inset report and fix incorporated into the 0.3 mobile layout.

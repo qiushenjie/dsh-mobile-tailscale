@@ -21,6 +21,7 @@ import { MobileAccessGateway } from './gateway.js'
 import { createMobileAccessService, type MobileAccessService } from './extensions.js'
 import { listComputerImages, readComputerImage } from './computer-images.js'
 import {
+  AUTH_PREFIX,
   HttpError,
   LOCAL_ADMIN_PREFIX,
   assertLocalAdminTrust,
@@ -32,6 +33,8 @@ import {
 import { JsonDeviceStore } from './storage.js'
 import { configuredRemoteProvider, JsonRemoteProviderStore, type RemoteProvider } from './remote.js'
 import { TailscaleServeController } from './tailscale-serve.js'
+import { RemotePassthroughProxy } from './remote-proxy.js'
+import { resolveLiveUpstream } from './upstream.js'
 import { parseAuthority, parseCidr } from './network.js'
 import {
   materializeManagedSetup,
@@ -55,6 +58,15 @@ function upstreamAuthenticatedUrl(ctx: Context, upstreamOrigin: URL): string | u
   return typeof connection?.authenticatedUrl === 'function'
     ? connection.authenticatedUrl(upstreamOrigin.origin)
     : undefined
+}
+
+/** The authoritative live loopback origin of this process's web server, when bound to loopback. */
+function webServerOrigin(ctx: Context): string | undefined {
+  const server = (ctx as Context & { readonly webServer?: { readonly host?: unknown; readonly port?: unknown } }).webServer
+  if (server?.host !== '127.0.0.1') return undefined
+  const port = server.port
+  if (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535) return undefined
+  return `http://127.0.0.1:${port}`
 }
 
 function installedDshVersion(): string | undefined {
@@ -177,7 +189,9 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
   const loaded = await loadSetup(config)
   const mobileAccess: MobileAccessService = createMobileAccessService(ctx)
   const template = loopbackTemplate(loaded)
-  const upstreamLoginUrl = upstreamAuthenticatedUrl(ctx, template.upstreamOrigin)
+  const liveWebOrigin = webServerOrigin(ctx)
+  const resolveUpstream = (): URL => resolveLiveUpstream(template.upstreamOrigin.origin, liveWebOrigin)
+  const resolveAuthenticatedUrl = (upstream: URL): string | undefined => upstreamAuthenticatedUrl(ctx, upstream)
   const stateDirectory = dirname(template.stateFile)
   const remoteDirectory = join(stateDirectory, 'remote')
   const remoteProviderStore = new JsonRemoteProviderStore(
@@ -209,12 +223,19 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
   })
   let lanGateway: MobileAccessGateway | undefined
   const startGateway = async (candidateConfig: PluginConfig): Promise<MobileAccessRuntime> => {
-    const resolved = parseGatewayConfig(candidateConfig)
+    const upstream = resolveLiveUpstream(
+      candidateConfig.upstreamOrigin ?? template.upstreamOrigin.origin,
+      liveWebOrigin,
+    )
+    const resolved = parseGatewayConfig({
+      ...candidateConfig,
+      upstreamOrigin: upstream.origin,
+    })
     const candidate = new MobileAccessGateway(
       resolved,
       new JsonDeviceStore(resolved.stateFile, resolved.maxDevices),
       mobileAccess,
-      upstreamLoginUrl,
+      upstreamAuthenticatedUrl(ctx, upstream),
     )
     await candidate.start()
     lanGateway = candidate
@@ -249,10 +270,17 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     startRuntime,
   )
   const tailscaleStore = new JsonMobileAccessControlStore(join(remoteDirectory, 'control.json'), false)
+  const remoteProxy = new RemotePassthroughProxy({
+    resolveUpstream,
+    resolveAuthenticatedUrl,
+    upstreamTimeoutMs: template.upstreamTimeoutMs,
+    maxBodyBytes: template.maxBodyBytes,
+    maxWebSockets: template.maxWebSockets,
+  })
   const remoteControllers = {
     tailscale: new TailscaleServeController({
       store: tailscaleStore,
-      upstream: template.upstreamOrigin.origin,
+      proxy: remoteProxy,
     }),
   }
   const remoteController = () => remoteControllers[remoteProvider]
@@ -358,8 +386,23 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     },
   }
 
+  // Pairing-free mobile-frontend assets for the remote (Tailscale Serve)
+  // channel: the LAN gateway serves them behind device pairing on its own
+  // listener, so the DSH WebServer mirrors them for the phone reachable via
+  // the passthrough proxy (tailnet membership is the access control there).
+  const mobileFrontendRoute: WebRoute = {
+    kind: 'prefix',
+    path: AUTH_PREFIX,
+    handler: async (request, response) => {
+      const active = lanGateway
+      if (active === undefined) throw new HttpError(409, 'gateway_stopped')
+      await active.mobileFrontendRoute().handler(request, response)
+    },
+  }
+
   await ctx.effect(async () => {
     const unregister = ctx.webServer.register(adminRoute)
+    const unregisterFrontend = ctx.webServer.register(mobileFrontendRoute)
     const disposeMobileCommand = ctx.commands.register({
       name: 'mobile',
       description: '按需求修改 DSH Mobile 的手机端界面或添加电脑端能力',
@@ -388,6 +431,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
       await remoteControllers.tailscale.initialize()
     } catch (error) {
       unregister()
+      unregisterFrontend()
       disposeMobileCommand()
       await remoteControllers.tailscale.close()
       await lanController.close()
@@ -397,6 +441,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     }
     return async () => {
       unregister()
+      unregisterFrontend()
       disposeMobileCommand()
       await remoteControllers.tailscale.close()
       await lanController.close()

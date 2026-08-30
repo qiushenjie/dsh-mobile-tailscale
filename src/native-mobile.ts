@@ -1,5 +1,9 @@
 /** Mobile feature and compatibility rules applied to DSH React surfaces. */
 export const NATIVE_MOBILE_STYLES = `
+/* iOS inflates text in wide (landscape) viewports unless text-size-adjust is
+   pinned; this must apply outside the width media query so landscape phones
+   (which exceed 720px wide) are covered too. */
+html.dsh-native-mobile-active { -webkit-text-size-adjust:100%; text-size-adjust:100%; }
 @media (max-width:720px) {
   html.dsh-native-mobile-active,html.dsh-native-mobile-active body { width:100%; height:100%; overflow:hidden; }
   html.dsh-native-mobile-active { --dsh-mobile-motion-duration:200ms; --dsh-mobile-motion-ease:cubic-bezier(.22,1,.36,1); }
@@ -154,7 +158,80 @@ export const NATIVE_MOBILE_STYLES = `
   [data-dsh-mobile-settings-content][data-dsh-mobile-view-transition="true"],
   [data-dsh-mobile-view][data-dsh-mobile-view-transition="true"] { animation:none !important; }
 }
+/* Touch feedback: taps must give an immediate, perceivable response. The
+   stock app relies on :hover, which touch has no persistent form of, so we
+   add :active feedback here. Sidebar rows keep their deliberate neutral
+   background handling above; opacity/transform still give them feedback.
+   role=treeitem rows (the session list) are plain divs, so they are matched
+   explicitly. */
+html.dsh-native-mobile-active :is(a,button,[role="button"],[role="tab"],[role="treeitem"],label,[tabindex],[contenteditable]):active {
+  opacity:.72 !important;
+  transform:scale(.97) !important;
+  filter:brightness(.95) !important;
+}
+/* Prevent iOS auto-zoom when a field with a small font receives focus: any
+   field under 16px triggers it, which reads as "the page suddenly gets big".
+   The composer is a contenteditable div, so it must be covered too. */
+html.dsh-native-mobile-active :is(input,textarea,select,[contenteditable]) { font-size:16px !important; }
+/* Kill the double-tap-zoom affordance and the 300ms tap delay everywhere. */
+html.dsh-native-mobile-active :is(a,button,[role="button"],[role="tab"],[role="treeitem"],[tabindex]) { touch-action:manipulation !important; }
+/* The right details/explorer toggle sits directly beside the session-log
+   button in the narrow header; reserve room so the two never overlap. */
+html.dsh-native-mobile-active [data-dsh-mobile-header] [class*="_sessionLogButton"] { margin-right:48px !important; }
+/* In portrait the workbench panel (Files / terminal) would otherwise fill the
+   whole screen; present it as a right-side drawer at the same ratio as the
+   left sidebar, FULL-HEIGHT like the native panel. The app's own toggle
+   buttons are floated above the drawer (like the left sidebar's floating
+   toggle), so opening and closing both go through the button — consistent
+   with the desktop layout. */
+@media (orientation: portrait) {
+  html.dsh-native-mobile-active [data-dsh-mobile-workbench] {
+    position:fixed !important;
+    inset:0 0 0 auto !important;
+    z-index:250 !important;
+    width:min(88vw,340px) !important;
+    height:100dvh !important;
+    max-width:none !important;
+    transform:translateX(100%) !important;
+    transition:transform var(--dsh-mobile-motion-duration,200ms) var(--dsh-mobile-motion-ease,cubic-bezier(.22,1,.36,1)) !important;
+    background:var(--dsw-bg,#fff) !important;
+    box-shadow:-18px 0 46px rgb(15 23 42 / 18%) !important;
+    overflow:auto !important;
+  }
+  html.dsh-native-mobile-active [data-dsh-mobile-workbench]:not([class*="_panelHidden"]) { transform:translateX(0) !important; }
+  /* The workbench toggle cluster shares its stacking context with the panel
+     (both live inside [data-dsh-panel-host], z-index:25), so it only needs a
+     z-index ABOVE the drawer's 250 to stay clickable on top of it. It is
+     NOT moved in the DOM — moving it would detach it from the app's React
+     portal click handler. */
+  html.dsh-native-mobile-active [class*="_toggleCluster"] {
+    position:fixed !important;
+    top:max(4px,env(safe-area-inset-top)) !important;
+    right:8px !important;
+    z-index:260 !important;
+    display:flex !important;
+    align-items:center !important;
+    justify-content:center !important;
+    gap:4px !important;
+  }
+}
+/* Landscape phones are short: the sidebar's session list collapses to a few
+   rows because the app's inner flex chain does not distribute the height.
+   Instead of fighting that chain, let the whole sidebar column scroll. */
+@media (max-height:520px) and (orientation: landscape) {
+  html.dsh-native-mobile-active [data-dsh-mobile-sidebar] {
+    overflow-y:auto !important;
+    -webkit-overflow-scrolling:touch !important;
+  }
+  html.dsh-native-mobile-active [data-dsh-mobile-sidebar] [class*="_list"] {
+    height:auto !important;
+    min-height:0 !important;
+    overflow:visible !important;
+  }
+}
 `
+
+/* Locate the native mobile surface so it can be installed without re-reading the layout. */
 
 function classToken(element: Element, suffix: string): boolean {
   return Array.from(element.classList).some(value => value.endsWith(suffix))
@@ -185,6 +262,30 @@ export function installNativeMobileSurface(): () => void {
   }
   document.addEventListener('pointerdown', onPointerDown, true)
   document.addEventListener('keydown', onKeyDown, true)
+  // Guard against programmatic field focus: the stock app focuses the
+  // composer when a session opens, which pops the iOS keyboard. In touch mode,
+  // only keep focus that came from a real tap on the field itself.
+  let lastPointerTarget: Element | undefined
+  const onPointerDownForFocus = (event: PointerEvent): void => {
+    if (event.pointerType === 'touch' || event.pointerType === 'pen') {
+      lastPointerTarget = event.target instanceof Element ? event.target : undefined
+    }
+  }
+  const onFocusIn = (event: FocusEvent): void => {
+    const target = event.target
+    if (!(target instanceof HTMLElement)) return
+    if (!target.matches('input,textarea,select,[contenteditable]')) return
+    if (document.documentElement.dataset.dshMobileInput !== 'touch') return
+    const tapped = lastPointerTarget !== undefined
+      && (target === lastPointerTarget || target.contains(lastPointerTarget))
+    lastPointerTarget = undefined
+    if (tapped) return
+    requestAnimationFrame(() => {
+      if (document.activeElement === target) target.blur()
+    })
+  }
+  document.addEventListener('pointerdown', onPointerDownForFocus, true)
+  document.addEventListener('focusin', onFocusIn, true)
   const backdrop = document.createElement('button')
   backdrop.type = 'button'
   backdrop.className = 'dsh-native-mobile-backdrop'
@@ -215,6 +316,23 @@ export function installNativeMobileSurface(): () => void {
     window.setTimeout(showBranchToast, 80)
   }
   document.addEventListener('click', onBranchClick, true)
+  // In portrait, selecting a session from the sidebar should collapse the
+  // sidebar automatically: it would otherwise cover most of the screen while
+  // the user reads the opened conversation.
+  const onSidebarSessionSelect = (event: MouseEvent): void => {
+    if (!(event.target instanceof Element)) return
+    if (window.innerHeight <= window.innerWidth) return
+    const tree = event.target.closest<HTMLElement>('[data-dsh-mobile-sidebar] [role="treeitem"]')
+    if (tree === null) return
+    const sidebarEl = tree.closest<HTMLElement>('[data-dsh-mobile-sidebar]')
+    if (sidebarEl === null || sidebarEl.getAttribute('data-open') !== 'true') return
+    const sidebarToggle = document.querySelector<HTMLButtonElement>('[data-dsh-mobile-toggle]')
+    if (sidebarToggle === null) return
+    window.setTimeout(() => {
+      if (sidebarToggle.isConnected && sidebarToggle.getAttribute('aria-expanded') !== 'false') sidebarToggle.click()
+    }, 240)
+  }
+  document.addEventListener('click', onSidebarSessionSelect, true)
   let frame: HTMLElement | undefined
   let sidebar: HTMLElement | undefined
   let sidebarRoot: HTMLElement | undefined
@@ -295,6 +413,27 @@ export function installNativeMobileSurface(): () => void {
     const center = frame === undefined ? dedicatedCenter : firstByClassSuffix(frame, '_centerCol')
     const details = frame === undefined ? undefined : firstByClassSuffix(frame, '_detailsCol')
     const handle = frame === undefined ? undefined : firstByClassSuffix(frame, '_handle')
+    // Tag the workbench panel (Files explorer / terminal) precisely so the
+    // mobile CSS can turn it into a right-side drawer in portrait. The outer
+    // panel's class token ends with exactly `_panel`; the inner panelBody
+    // ends with `_panelBody`, so match the token boundary.
+    const workbench = firstByClassSuffix(document, '_workbench')
+    const isPanelToken = (element: Element): boolean =>
+      Array.from(element.classList).some(token => /_panel$/u.test(token))
+    let workbenchPanel: HTMLElement | null | undefined = workbench?.parentElement
+    while (workbenchPanel !== null && workbenchPanel !== undefined && !isPanelToken(workbenchPanel)) {
+      workbenchPanel = workbenchPanel.parentElement
+    }
+    if (workbenchPanel !== null && workbenchPanel !== undefined) {
+      workbenchPanel.dataset.dshMobileWorkbench = 'true'
+      // The workbench toggle cluster and the panel are BOTH children of the
+      // same [data-dsh-panel-host] (a fixed, viewport-sized, z-index:25
+      // containing block appended to document.body). They share one stacking
+      // context, so a higher z-index on the cluster is enough to float it
+      // above the full-height drawer — no DOM move needed. Moving the cluster
+      // out of its React portal would detach it from the app's synthetic
+      // click handler, which is exactly what broke the toggle earlier.
+    }
     if (center === undefined) {
       bindHistoryScroller(undefined)
       return
@@ -398,6 +537,9 @@ export function installNativeMobileSurface(): () => void {
   return () => {
     observer.disconnect()
     document.removeEventListener('click', onBranchClick, true)
+    document.removeEventListener('click', onSidebarSessionSelect, true)
+    document.removeEventListener('pointerdown', onPointerDownForFocus, true)
+    document.removeEventListener('focusin', onFocusIn, true)
     if (branchToastTimer !== 0) window.clearTimeout(branchToastTimer)
     branchToast.remove()
     if (scheduled !== 0) cancelAnimationFrame(scheduled)

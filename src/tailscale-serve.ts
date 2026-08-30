@@ -5,12 +5,21 @@
  * pairing gateway (tailnet membership is the access control) — a phone with
  * Tailscale on the same tailnet just opens the origin. This is the connection
  * method of the DSH Remote project, adapted to the dsh-mobile plugin surface.
+ *
+ * The serve targets the plugin's {@link RemotePassthroughProxy} loopback
+ * listener rather than the DSH web server directly: the proxy rewrites
+ * Host/Origin to the live upstream (resolved from `DSH_WEB_URL` per request),
+ * which both bypasses the DSH browser-trust fence and follows the web server
+ * across desktop/CLI restarts without manual re-pointing. Starting also
+ * recovers the common stale-config failure where port 443 is already serving a
+ * TCP forward (or another entry) by clearing it when safe and retrying once.
  * @module dsh-mobile-tailscale/tailscale-serve
  */
 
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { MobileAccessControlStore } from './control.js'
+import type { RemotePassthroughProxy } from './remote-proxy.js'
 
 /** Status of the Tailscale Serve remote transport, matching the Funnel shape. */
 export interface TailscaleServeStatus {
@@ -26,8 +35,8 @@ export interface TailscaleServeStatus {
 export interface TailscaleServeControllerOptions {
   /** Persisted on/off switch shared with the desktop control card. */
   readonly store: MobileAccessControlStore
-  /** Upstream the serve proxies to (the DSH web loopback origin). */
-  readonly upstream: string
+  /** Loopback proxy exposing the live DSH web upstream behind the serve origin. */
+  readonly proxy: RemotePassthroughProxy
   /** tailscale CLI binary name or absolute path; defaults to PATH resolution. */
   readonly bin?: string
   readonly onStatus?: (status: TailscaleServeStatus) => void
@@ -44,6 +53,12 @@ function publicStatus(status: TailscaleServeStatus): TailscaleServeStatus {
   })
 }
 
+/** Whether a failed `tailscale serve` invocation is the port-443 occupancy failure. */
+function isServePortConflict(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /already serving|already in use|cannot serve|port .*?(?:busy|conflict|in use)/i.test(message)
+}
+
 /** Classify a failed `tailscale` invocation into a stable diagnostic code. */
 function classifyServeError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
@@ -51,14 +66,16 @@ function classifyServeError(error: unknown): string {
   if (/funnel/i.test(message)) return 'funnel_unavailable'
   if (/EACCES|EPERM/i.test(message)) return 'permission_denied'
   if (/ENOENT/i.test(message)) return 'tailscale_missing'
+  if (isServePortConflict(error)) return 'serve_port_conflict'
   return 'serve_failed'
 }
 
 /**
- * Owns the `tailscale serve` process, the machine's MagicDNS origin, and the
- * persisted remote switch. Enabling runs `tailscale serve --bg --https=443
- * <upstream>` and reports the resolved `https://<hostname>.<tailnet>.ts.net`;
- * disabling runs `tailscale serve --https=443 off`.
+ * Owns the `tailscale serve` process, the machine's MagicDNS origin, the
+ * loopback passthrough proxy, and the persisted remote switch. Enabling starts
+ * the proxy, runs `tailscale serve --bg --https=443 <proxy origin>` and
+ * reports the resolved `https://<hostname>.<tailnet>.ts.net`; disabling runs
+ * `tailscale serve --https=443 off` and stops the proxy.
  */
 export class TailscaleServeController {
   private enabled = false
@@ -165,12 +182,57 @@ export class TailscaleServeController {
       const origin = await this.resolveOrigin()
       this.publish({ enabled: true, state: 'ready', origin })
     } catch (error) {
+      try { await this.options.proxy.close() } catch {
+        // The proxy must not mask the serve error reported below.
+      }
       this.publish({ enabled: true, state: 'error', errorCode: classifyServeError(error) })
     }
   }
 
   private async runServe(): Promise<void> {
-    await execFileAsync(this.bin(), ['serve', '--bg', '--yes', '--https=443', this.options.upstream], {
+    await this.options.proxy.start()
+    const target = this.options.proxy.origin()
+    try {
+      await this.applyServe(target)
+    } catch (error) {
+      if (isServePortConflict(error)) {
+        await this.recoverServePortConflict()
+        await this.applyServe(target)
+      } else {
+        throw error
+      }
+    }
+  }
+
+  private async applyServe(target: string): Promise<void> {
+    await execFileAsync(this.bin(), ['serve', '--bg', '--yes', '--https=443', target], {
+      windowsHide: true,
+      timeout: 30_000,
+    })
+  }
+
+  /**
+   * Clear a stale port-443 occupancy so the HTTPS serve can register. Only
+   * when 443 is the sole serve entry is it safe to reset the whole config;
+   * otherwise the conflict is surfaced as a dedicated diagnostic code.
+   */
+  private async recoverServePortConflict(): Promise<void> {
+    let status: unknown
+    try {
+      const { stdout } = await execFileAsync(this.bin(), ['serve', 'status', '--json'], {
+        windowsHide: true,
+        timeout: 30_000,
+      })
+      status = JSON.parse(stdout) as unknown
+    } catch {
+      throw new Error('serve port 443 is occupied by another service and its status could not be read')
+    }
+    const tcp = (status as { TCP?: Record<string, unknown> })?.TCP
+    const entries = tcp === undefined || tcp === null ? [] : Object.keys(tcp)
+    if (entries.length !== 1 || entries[0] !== '443') {
+      throw new Error('serve port 443 is occupied by another service')
+    }
+    await execFileAsync(this.bin(), ['serve', 'reset'], {
       windowsHide: true,
       timeout: 30_000,
     })
@@ -184,6 +246,11 @@ export class TailscaleServeController {
       })
     } catch {
       // Turning serve off when nothing is configured is harmless.
+    }
+    try {
+      await this.options.proxy.close()
+    } catch {
+      // A proxy that failed to close must not break the disable flow.
     }
   }
 

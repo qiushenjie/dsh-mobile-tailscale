@@ -169,7 +169,7 @@ export function parseControlFile(value: unknown): string {
   return absoluteFile(value, 'controlFile')
 }
 
-function parseUpstream(value: unknown): URL {
+export function parseUpstream(value: unknown): URL {
   const source = value ?? 'http://127.0.0.1:3080'
   if (typeof source !== 'string') throw new Error('upstreamOrigin must be a string')
   let url: URL

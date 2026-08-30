@@ -40,22 +40,103 @@ Paired LAN devices are considered fully trusted and can operate DSH on the compu
 
 ## Quick start
 
-With the `dsh` command installed:
+> **Before you start**
+>
+> - The plugin's **package name** is `dsh-mobile-tailscale`; the **executable it ships** is `dsh-mobile` (all subcommands such as `setup` run through it, e.g. `dsh plugin --profile web exec dsh-mobile setup`).
+> - Installing via `dsh-mobile-tailscale@latest` requires the package to be published on npm (`npm view dsh-mobile-tailscale` shows a version). If it is not published yet (local fork / development), use "Option 3: Install from source" below.
+
+### Option 1: `dsh` command installed
+
+**Windows (PowerShell)** — the DSH Desktop installer puts `dsh` on PATH:
 
 ```powershell
 dsh plugin --profile web add dsh-mobile-tailscale@latest
-dsh plugin --profile web exec dsh-mobile-tailscale setup
+dsh plugin --profile web exec dsh-mobile setup
 dsh --profile web
 ```
 
-Using a DeepSeek Harness source checkout:
+**macOS (Terminal)** — DSH Desktop does **not** add `dsh` to PATH by default. Either:
 
-```powershell
+1. Install the CLI globally, matching the version bundled with your Desktop (recommended):
+
+```bash
+npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+```
+
+2. Or invoke the CLI bundled inside the Desktop app (the version in the path changes when Desktop is upgraded; verify with `--version`):
+
+```bash
+DSH_CLI="/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js"
+node "$DSH_CLI" --version
+```
+
+Then run (`dsh` and `node "$DSH_CLI"` are equivalent):
+
+```bash
+dsh plugin --profile web add dsh-mobile-tailscale@latest
+dsh plugin --profile web exec dsh-mobile setup
+dsh --profile web
+```
+
+### Option 2: DeepSeek Harness source checkout
+
+> Run these commands in the **DeepSeek Harness source repository root**, not in this plugin's directory — `dsh` is a workspace executable of the DSH monorepo, and only there does `pnpm dsh` resolve.
+
+```bash
 corepack enable; pnpm install
 pnpm dsh plugin --profile web add dsh-mobile-tailscale@latest
-pnpm dsh plugin --profile web exec dsh-mobile-tailscale setup
+pnpm dsh plugin --profile web exec dsh-mobile setup
 pnpm dsh --profile web
 ```
+
+The same commands work from a PowerShell prompt in the source root on Windows.
+
+### Option 3: Install from source (no npm publish needed)
+
+Use this when the plugin has not been published to npm yet (local fork / development). The full flow: **clone → install deps → build → pack → add to profile → initialize**.
+
+**Prerequisites**: Node.js 20+ (enable corepack to use pnpm).
+
+**1. Clone and install dependencies:**
+
+```bash
+git clone https://github.com/qiushenjie/dsh-mobile-tailscale.git
+cd dsh-mobile-tailscale
+corepack enable
+npm install        # or pnpm install
+```
+
+**2. Build and pack:**
+
+```bash
+npm run build
+npm pack           # produces dsh-mobile-tailscale-<version>.tgz
+```
+
+> `npm pack` validates that `package.json`'s version matches `versionName` in `apps/mobile/android/app/build.gradle.kts`; align them first if they differ. Use `pnpm pack` if npm errors with EPERM on its cache, or `npm pack --ignore-scripts` to skip the validation and pack directly.
+
+**3. Add the tarball to the web profile and initialize:**
+
+**Windows (PowerShell):**
+
+```powershell
+dsh plugin --profile web add .\dsh-mobile-tailscale-0.3.2.tgz
+dsh plugin --profile web exec dsh-mobile setup
+dsh --profile web
+```
+
+**macOS (Terminal):**
+
+```bash
+TGZ=$(ls dsh-mobile-tailscale-*.tgz | head -1)
+dsh plugin --profile web add "$PWD/$TGZ"
+dsh plugin --profile web exec dsh-mobile setup
+dsh --profile web
+```
+
+(Use the version number printed by `npm pack` in the tarball filename; if the `dsh` command is unavailable, see Option 1 for the Desktop-bundled CLI.)
+
+**Iterating during development**: after each source change, repeat steps 2–3 (`build` + `pack` + `add`) to overwrite the installed copy. If DSH Desktop is already running, fully quit and reopen it so the new plugin bundle loads.
 
 `setup` automatically selects and remembers the current LAN; Wi-Fi, hotspot, and IP changes normally recover without re-pairing. Use `--address 192.168.x.x` only when automatic selection fails. Settings, certificates, devices, and customization files live under `$DSH_HOME/mobile-access/`.
 
@@ -175,11 +256,11 @@ dsh plugin --profile web remove dsh-mobile-tailscale
 Also remove plugin data:
 
 ```powershell
-dsh plugin --profile web exec dsh-mobile-tailscale purge --yes
+dsh plugin --profile web exec dsh-mobile purge --yes
 dsh plugin --profile web remove dsh-mobile-tailscale
 ```
 
-In source-checkout mode, replace `dsh` with `pnpm dsh`.
+In source-checkout mode, run the same commands from the DSH source root with `pnpm dsh` instead of `dsh`; on macOS without the `dsh` command, use the Desktop-bundled CLI (see Quick start, Option 1).
 
 ## Development
 

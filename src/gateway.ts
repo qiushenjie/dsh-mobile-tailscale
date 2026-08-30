@@ -72,7 +72,7 @@ interface ActiveRequest {
   readonly deviceId: string
   readonly expiresAt: number
   readonly abort: () => void
-  readonly timer: NodeJS.Timeout
+  readonly timer: NodeJS.Timeout | undefined
 }
 
 interface ActiveWebSocket {
@@ -395,7 +395,7 @@ class ByteLimitTransform extends Transform {
   }
 }
 
-function stripIpv6Brackets(hostname: string): string {
+export function stripIpv6Brackets(hostname: string): string {
   return hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
 }
 
@@ -468,7 +468,7 @@ async function tlsOptions(config: ResolvedGatewayConfig): Promise<ServerOptions>
   }
 }
 
-function websocketAccept(key: string): string {
+export function websocketAccept(key: string): string {
   return createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`, 'ascii').digest('base64')
 }
 
@@ -497,7 +497,7 @@ function rejectUpgrade(socket: Socket, status: number, code: string): void {
   ].join('\r\n'))
 }
 
-function sanitizeRequestHeaders(
+export function sanitizeRequestHeaders(
   request: IncomingMessage,
   upstream: URL,
 ): OutgoingHttpHeaders {
@@ -525,7 +525,7 @@ const BLOCKED_RESPONSE_HEADERS = new Set([
   'transfer-encoding', 'upgrade', 'via', 'x-content-type-options', 'x-frame-options', 'x-powered-by',
 ])
 
-function sanitizeResponseHeaders(headers: IncomingHttpHeaders, upstream: URL): OutgoingHttpHeaders {
+export function sanitizeResponseHeaders(headers: IncomingHttpHeaders, upstream: URL): OutgoingHttpHeaders {
   const clean: OutgoingHttpHeaders = {}
   for (const [name, value] of Object.entries(headers)) {
     const lower = name.toLowerCase()
@@ -1748,15 +1748,18 @@ export class MobileAccessGateway {
       upstream.request?.destroy()
       if (!response.destroyed) response.destroy()
     }
-    const timer = setTimeout(abort, Math.max(1, authorization.expiresAt - Date.now()))
-    timer.unref()
+    const abortDelay = Number.isFinite(authorization.expiresAt)
+      ? Math.max(1, authorization.expiresAt - Date.now())
+      : 0
+    const timer = abortDelay > 0 ? setTimeout(abort, abortDelay) : undefined
+    if (timer !== undefined) timer.unref()
     this.activeRequests.set(id, Object.freeze({ ...authorization, abort, timer }))
     return {
       id,
       signal: controller.signal,
       release: () => {
         const entry = this.activeRequests.get(id)
-        if (entry !== undefined) clearTimeout(entry.timer)
+        if (entry !== undefined && entry.timer !== undefined) clearTimeout(entry.timer)
         this.activeRequests.delete(id)
       },
     }
@@ -2026,8 +2029,7 @@ export class MobileAccessGateway {
               pairing: this.access.pairingStatus(),
               deviceCount: this.access.listDevices().length,
               resources: {
-                connections: this.connectedSockets.size,
-                activeRequests: this.activeRequests.size,
+                connections: this.connectedSockets.size,                activeRequests: this.activeRequests.size,
                 webSockets: this.activeWebSockets.size,
               },
             }, false)
@@ -2078,6 +2080,120 @@ export class MobileAccessGateway {
           }
           throw new HttpError(404, 'not_found')
         } catch (error) {
+          const mapped = mapError(error)
+          if (response.headersSent) response.destroy()
+          else sendFailure(response, mapped.status, mapped.code, false)
+        }
+      },
+    }
+  }
+
+  /**
+   * Pairing-free mobile-frontend route for the remote (Tailscale Serve)
+   * channel. The LAN gateway serves these assets behind its own device
+   * pairing; the remote channel's access control is tailnet membership, so
+   * the DSH WebServer (reachable from the phone through the passthrough
+   * proxy) serves the same metadata, custom css/js, mobile layout module and
+   * extension registry without a paired-device cookie. Extension actions and
+   * routes keep their host-side checks via a synthetic guest authorization.
+   */
+  mobileFrontendRoute(): WebRoute {
+    const guest: SessionAuthorization = Object.freeze({
+      sessionKey: 'remote',
+      deviceId: 'remote',
+      // A finite far-future expiry: the allocateRequest abort timer derives
+      // from it, and setTimeout(abort, Infinity) would overflow to ~1ms and
+      // abort every operation immediately.
+      expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
+    })
+    return {
+      kind: 'prefix',
+      path: AUTH_PREFIX,
+      handler: async (request, response) => {
+        try {
+          const target = parseRequestTarget(request.url)
+          if (target.search === '' && request.method === 'GET' && target.decodedPathname === `${AUTH_PREFIX}/metadata`) {
+            sendJson(response, 200, {
+              version: MOBILE_METADATA_VERSION,
+              pluginVersion: DSH_MOBILE_VERSION,
+              minimumAndroidAppVersion: MINIMUM_ANDROID_APP_VERSION,
+              discoveryProtocol: DISCOVERY_PROTOCOL,
+            }, false)
+            return
+          }
+          const customAsset = request.method === 'GET'
+            ? target.decodedPathname === `${AUTH_PREFIX}/custom.css`
+              ? {
+                  file: this.config.customCssFile,
+                  contentType: 'text/css; charset=utf-8',
+                  fallback: CUSTOM_STYLE_FALLBACK,
+                }
+              : target.decodedPathname === `${AUTH_PREFIX}/custom.js`
+                ? {
+                    file: this.config.customScriptFile,
+                    contentType: 'text/javascript; charset=utf-8',
+                    fallback: CUSTOM_SCRIPT_FALLBACK,
+                  }
+                : target.decodedPathname === MOBILE_LAYOUT_PATH
+                  ? {
+                      file: this.config.mobileLayoutFile,
+                      contentType: 'text/javascript; charset=utf-8',
+                      fallback: undefined,
+                    }
+                  : undefined
+            : undefined
+          const requestedExtension = extensionTarget(target.decodedPathname)
+          const requestedMobileBootBatch = mobileBootBatchKey(target.decodedPathname)
+          if (customAsset === undefined && requestedExtension === undefined && requestedMobileBootBatch === undefined) {
+            throw new HttpError(404, 'not_found')
+          }
+          if (requestedExtension !== undefined) {
+            await this.handleExtensionRequest(requestedExtension, target, request, response, guest)
+            return
+          }
+          if (requestedMobileBootBatch !== undefined) {
+            await this.serveMobileBootBatch(requestedMobileBootBatch, request, response, guest)
+            return
+          }
+          const operation = this.allocateRequest(guest, response, {})
+          try {
+            let body: Buffer
+            let mtime: Date | undefined
+            try {
+              body = await readFile(customAsset!.file, { signal: operation.signal })
+              try {
+                const fileStat = await stat(customAsset!.file)
+                mtime = fileStat.mtime
+              } catch { /* keep undefined */ }
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+              if (customAsset!.fallback === undefined) throw new HttpError(503, 'mobile_frontend_unavailable')
+              body = Buffer.from(customAsset!.fallback)
+            }
+            if (body.byteLength > 256 * 1024) throw new HttpError(413, 'payload_too_large')
+            const etag = createHash('sha256').update(body).digest('hex')
+            if (headerValue(request.headers, 'if-none-match') === etag) {
+              setSecurityHeaders(response, false)
+              response.writeHead(304)
+              response.end()
+              return
+            }
+            setSecurityHeaders(response, false)
+            const responseHeaders: Record<string, string | number> = {
+              'Content-Type': customAsset!.contentType,
+              'Content-Length': body.byteLength,
+              'ETag': etag,
+            }
+            if (mtime !== undefined) responseHeaders['Last-Modified'] = mtime.toUTCString()
+            response.writeHead(200, responseHeaders)
+            if (request.method === 'HEAD') response.end()
+            else response.end(body)
+          } finally {
+            operation.release()
+          }
+        } catch (error) {
+          const detail = error instanceof Error ? ` (${error.message})` : ''
+          process.stderr.write(`[dsh-mobile-tailscale] mobile frontend route failed for ${request.method ?? '?'} ${request.url}: ${error instanceof HttpError ? error.code : 'internal_error'}${detail}\n`)
           const mapped = mapError(error)
           if (response.headersSent) response.destroy()
           else sendFailure(response, mapped.status, mapped.code, false)

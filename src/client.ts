@@ -349,6 +349,7 @@ function installControl(): { remove: () => void; toggle: () => void } {
       funnel_unavailable: 'Tailscale 未启用 Funnel（Serve 需要），请在 Tailscale 管理后台确认。',
       permission_denied: '权限不足，请以管理员身份运行后重试。',
       serve_failed: 'Tailscale Serve 启动失败，请检查网络后重新连接。',
+      serve_port_conflict: 'Tailscale 443 端口正被其他服务占用，已自动尝试清理（仅清理 serve 自身残留）。若仍失败，请手动检查 `tailscale serve status`。',
       gateway_start_failed: '远程网关启动失败。请重新连接，局域网访问不受影响。',
     }
     remoteStatus.textContent = state === 'error' ? (errorLabels[errorCode] ?? labels.error!) : (labels[state] ?? labels.error!)

@@ -47,22 +47,103 @@ dsh-mobile-tailscale 是一个 DeepSeek Harness 插件，让手机浏览器或 A
 
 ## 快速开始
 
-已经安装 `dsh` 命令：
+> **安装前须知**
+>
+> - 插件的**包名**是 `dsh-mobile-tailscale`，它提供的**可执行命令**是 `dsh-mobile`（`setup`、`purge` 等子命令都通过它运行，例如 `dsh plugin --profile web exec dsh-mobile setup`）。
+> - 使用 `dsh-mobile-tailscale@latest` 安装的前提是包已经发布到 npm（`npm view dsh-mobile-tailscale` 能查到版本）。尚未发布时（本地 fork / 开发阶段），请用下面的「方式三：从本地源码安装」。
+
+### 方式一：使用 `dsh` 命令
+
+**Windows（PowerShell）** —— DSH Desktop 安装后 `dsh` 已在 PATH：
 
 ```powershell
 dsh plugin --profile web add dsh-mobile-tailscale@latest
-dsh plugin --profile web exec dsh-mobile-tailscale setup
+dsh plugin --profile web exec dsh-mobile setup
 dsh --profile web
 ```
 
-直接使用 DeepSeek Harness 源码：
+**macOS（终端）** —— DSH Desktop 默认**不会**把 `dsh` 加入 PATH，需要二选一：
 
-```powershell
+1. 全局安装与 Desktop 内置版本一致的 CLI（推荐）：
+
+```bash
+npm install -g @deepseek-ai/dsh@0.1.1-rc.2
+```
+
+2. 或直接调用 Desktop 内置的 CLI（路径里的版本号会随 Desktop 升级变化，先 `--version` 确认）：
+
+```bash
+DSH_CLI="/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js"
+node "$DSH_CLI" --version
+```
+
+然后执行（`dsh` 与 `node "$DSH_CLI"` 等价）：
+
+```bash
+dsh plugin --profile web add dsh-mobile-tailscale@latest
+dsh plugin --profile web exec dsh-mobile setup
+dsh --profile web
+```
+
+### 方式二：直接使用 DeepSeek Harness 源码
+
+> 下面命令在 **DeepSeek Harness 源码仓库根目录** 执行（不是本插件目录）—— `dsh` 是 DSH monorepo 的 workspace 可执行文件，只有在那里 `pnpm dsh` 才能解析到。
+
+```bash
 corepack enable; pnpm install
 pnpm dsh plugin --profile web add dsh-mobile-tailscale@latest
-pnpm dsh plugin --profile web exec dsh-mobile-tailscale setup
+pnpm dsh plugin --profile web exec dsh-mobile setup
 pnpm dsh --profile web
 ```
+
+Windows 下在源码根目录的 PowerShell 里执行同样的命令即可。
+
+### 方式三：从本地源码安装（无需发布 npm）
+
+插件尚未发布到 npm 时（本地 fork / 开发阶段）使用。整体流程：**克隆 → 装依赖 → 构建 → 打包 → 装入 profile → 初始化**。
+
+**前置条件**：Node.js 20+（建议开启 corepack 以使用 pnpm）。
+
+**1. 获取源码并安装依赖：**
+
+```bash
+git clone https://github.com/qiushenjie/dsh-mobile-tailscale.git
+cd dsh-mobile-tailscale
+corepack enable
+npm install        # 也可用 pnpm install
+```
+
+**2. 构建并打包：**
+
+```bash
+npm run build
+npm pack           # 生成 dsh-mobile-tailscale-<version>.tgz
+```
+
+> `npm pack` 会校验 `package.json` 的 version 与 `apps/mobile/android/app/build.gradle.kts` 的 `versionName` 一致，不一致时先对齐再打包；npm 缓存报 EPERM 时改用 `pnpm pack`，只想跳过校验直接打包用 `npm pack --ignore-scripts`。
+
+**3. 把 tarball 装入 web profile 并初始化：**
+
+**Windows（PowerShell）：**
+
+```powershell
+dsh plugin --profile web add .\dsh-mobile-tailscale-0.3.2.tgz
+dsh plugin --profile web exec dsh-mobile setup
+dsh --profile web
+```
+
+**macOS（终端）：**
+
+```bash
+TGZ=$(ls dsh-mobile-tailscale-*.tgz | head -1)
+dsh plugin --profile web add "$PWD/$TGZ"
+dsh plugin --profile web exec dsh-mobile setup
+dsh --profile web
+```
+
+（tarball 文件名里的版本号以 `npm pack` 实际输出为准；`dsh` 命令不可用时参考方式一改用 Desktop 内置 CLI。）
+
+**开发迭代**：每次改动源码后，重新执行第 2、3 步（`build` + `pack` + `add`）覆盖安装即可。DSH Desktop 正在运行时，需要完全退出并重新打开才会加载新插件。
 
 `setup` 会自动选择并记住当前局域网，切换 Wi-Fi、热点或 IP 后通常自动恢复；仅在自动选择失败时使用 `--address 192.168.x.x`。设置、证书、设备和自定义文件保存在 `$DSH_HOME/mobile-access/`。
 
@@ -94,14 +175,15 @@ pnpm dsh --profile web
 **前提**：电脑和手机都安装 [Tailscale](https://tailscale.com/download)，并登录到同一个 tailnet。
 
 1. 在 DeepSeek Harness 左下角打开 **移动访问 → 远程**。
-2. 点击 **开启 Tailscale Serve**。插件会在本机执行 `tailscale serve --bg --https=443 http://127.0.0.1:3080`，并把电脑的 MagicDNS 名作为远程地址。
+2. 点击 **开启 Tailscale Serve**。插件会在本机启动一个回环直通代理，并执行 `tailscale serve --bg --https=443 http://127.0.0.1:<代理端口>`，把电脑的 MagicDNS 名作为远程地址。代理按请求解析实时上游（优先 `DSH_WEB_URL`），因此不需要固定 DSH 的 Web 端口。
 3. 状态变为就绪后，面板会显示 `https://<机器名>.<tailnet>.ts.net` 这样的地址。
 4. 在手机浏览器（或 Android App 的远程入口）打开该地址即可；同一 tailnet 内直接访问，无需扫码配对。
 
-- 不使用时应关闭远程开关（插件会执行 `tailscale serve --https=443 off`）。
+- 不使用时应关闭远程开关（插件会执行 `tailscale serve --https=443 off` 并停止代理）。
 - 远程地址仅在 tailnet 内可见（`tailnet only`），不会被公开到公网。
-- 若地址不可达，先确认 `tailscale status` 显示在线、`tailscale serve status` 中有对应代理记录，以及 DSH Web 监听在 `127.0.0.1:3080`。
-- DSH Desktop 用户：需要在设置里把 Web 端口固定为 3080（`dsh-desktop.port: 3080`）并开启浏览器访问，Tailscale Serve 才能正确转发。
+- 若地址不可达，先确认 `tailscale status` 显示在线、`tailscale serve status` 中有对应代理记录。
+- 上游自动跟随 `DSH_WEB_URL`（回退到配置的 `upstreamOrigin`）：DSH Desktop 每次启动端口随机，插件会在启动/重连时自动重新注册，无需手动重新指向。
+- 443 端口若被残留的 TCP 转发占用，启动时会自动清理（仅当 443 是唯一的 serve 条目）并重试；与其他条目冲突时面板会显示明确的 `serve_port_conflict` 提示。
 
 ## 扩展与自定义
 
@@ -180,11 +262,11 @@ dsh plugin --profile web remove dsh-mobile-tailscale
 同时清除插件数据：
 
 ```powershell
-dsh plugin --profile web exec dsh-mobile-tailscale purge --yes
+dsh plugin --profile web exec dsh-mobile purge --yes
 dsh plugin --profile web remove dsh-mobile-tailscale
 ```
 
-源码模式把上述 `dsh` 换成 `pnpm dsh`。
+源码模式：在 DSH 源码根目录把 `dsh` 换成 `pnpm dsh`；macOS 未安装 `dsh` 命令时用 DSH Desktop 内置 CLI，见「快速开始」方式一。
 
 ## 开发
 

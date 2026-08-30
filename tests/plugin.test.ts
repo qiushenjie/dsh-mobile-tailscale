@@ -60,14 +60,17 @@ async function invoke(route: WebRoute, method: 'GET' | 'POST', path: string, bod
 async function mount(initiallyEnabled = false): Promise<{ context: Context; route: WebRoute; command: CommandDefinition }> {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-mobile-plugin-'))
   temporaryDirectories.push(directory)
-  let route: WebRoute | undefined
+  const routes: WebRoute[] = []
   let command: CommandDefinition | undefined
   const context = new Context()
   contexts.push(context)
   context.provide('webServer', {
     register(candidate: WebRoute) {
-      route = candidate
-      return () => { if (route === candidate) route = undefined }
+      routes.push(candidate)
+      return () => {
+        const index = routes.indexOf(candidate)
+        if (index >= 0) routes.splice(index, 1)
+      }
     },
   } as WebServer)
   context.provide('commands', {
@@ -90,6 +93,7 @@ async function mount(initiallyEnabled = false): Promise<{ context: Context; rout
     initiallyEnabled,
     tls: { mode: 'disabled' },
   })
+  const route = routes.find(candidate => candidate.kind === 'prefix' && candidate.path === '/api/mobile-access')
   if (route === undefined) throw new Error('plugin did not register its control route')
   if (command === undefined) throw new Error('plugin did not register its /mobile command')
   return { context, route, command }
