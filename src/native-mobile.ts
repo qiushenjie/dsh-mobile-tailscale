@@ -215,18 +215,23 @@ html.dsh-native-mobile-active [data-dsh-mobile-header] [class*="_sessionLogButto
     gap:4px !important;
   }
 }
-/* Landscape phones are short: the sidebar's session list collapses to a few
-   rows because the app's inner flex chain does not distribute the height.
-   Instead of fighting that chain, let the whole sidebar column scroll. */
+/* Landscape phones are short: the sidebar's fixed header + footer squeeze the
+   session list to a couple of rows, and forcing overflow:visible on the list
+   disables its native scroll. Reclaim the height by dropping the secondary
+   footer actions and compressing the logo row, then keep the list scrollable
+   (native overflow:auto). Settings stay reachable via the kept settingsArea. */
 @media (max-height:520px) and (orientation: landscape) {
-  html.dsh-native-mobile-active [data-dsh-mobile-sidebar] {
-    overflow-y:auto !important;
-    -webkit-overflow-scrolling:touch !important;
+  html.dsh-native-mobile-active [data-dsh-mobile-sidebar] [class*="_footerActions"] {
+    display:none !important;
   }
-  html.dsh-native-mobile-active [data-dsh-mobile-sidebar] [class*="_list"] {
-    height:auto !important;
+  html.dsh-native-mobile-active [data-dsh-mobile-sidebar] [class*="_logoRow"] {
+    height:44px !important;
+    min-height:44px !important;
+  }
+  html.dsh-native-mobile-active [data-dsh-mobile-sidebar] [class*="_list"]:not([class*="_listArea"]) {
+    overflow-y:auto !important;
     min-height:0 !important;
-    overflow:visible !important;
+    -webkit-overflow-scrolling:touch !important;
   }
 }
 `
