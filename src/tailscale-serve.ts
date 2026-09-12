@@ -53,14 +53,32 @@ function publicStatus(status: TailscaleServeStatus): TailscaleServeStatus {
   })
 }
 
+/**
+ * A Serve failure whose diagnostic code is already known.
+ *
+ * The port-443 recovery path raises both of its errors itself, and their text
+ * ("…is occupied by another service") matched none of the message patterns
+ * below, so the panel reported the generic `serve_failed` instead of
+ * `serve_port_conflict`. Carrying the code explicitly keeps the classification
+ * from depending on wording.
+ */
+class ServeDiagnosticError extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message)
+    this.name = 'ServeDiagnosticError'
+  }
+}
+
 /** Whether a failed `tailscale serve` invocation is the port-443 occupancy failure. */
 function isServePortConflict(error: unknown): boolean {
+  if (error instanceof ServeDiagnosticError) return error.code === 'serve_port_conflict'
   const message = error instanceof Error ? error.message : String(error)
   return /already serving|already in use|cannot serve|port .*?(?:busy|conflict|in use)/i.test(message)
 }
 
 /** Classify a failed `tailscale` invocation into a stable diagnostic code. */
 function classifyServeError(error: unknown): string {
+  if (error instanceof ServeDiagnosticError) return error.code
   const message = error instanceof Error ? error.message : String(error)
   if (/not logged in|logged out|login required|no node key/i.test(message)) return 'tailscale_not_logged_in'
   if (/funnel/i.test(message)) return 'funnel_unavailable'
@@ -236,12 +254,12 @@ export class TailscaleServeController {
       })
       status = JSON.parse(stdout) as unknown
     } catch {
-      throw new Error('serve port 443 is occupied by another service and its status could not be read')
+      throw new ServeDiagnosticError('serve_port_conflict', 'serve port 443 is occupied by another service and its status could not be read')
     }
     const tcp = (status as { TCP?: Record<string, unknown> })?.TCP
     const entries = tcp === undefined || tcp === null ? [] : Object.keys(tcp)
     if (entries.length !== 1 || entries[0] !== '443') {
-      throw new Error('serve port 443 is occupied by another service')
+      throw new ServeDiagnosticError('serve_port_conflict', 'serve port 443 is occupied by another service')
     }
     await execFileAsync(this.bin(), ['serve', 'reset'], {
       windowsHide: true,

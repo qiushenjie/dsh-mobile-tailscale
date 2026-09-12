@@ -116,4 +116,31 @@ describe('Tailscale Serve lifecycle', () => {
     expect(await calls()).toContain('serve --https=443 off')
     expect(closes()).toBeGreaterThan(0)
   })
+
+  it('reports a port conflict as serve_port_conflict, not the generic serve_failed', async () => {
+    // The recovery path raises these errors itself, and their wording matched
+    // none of the message patterns the classifier looks for, so the panel used
+    // to lose the actionable hint and show the generic code.
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-tailscale-conflict-'))
+    const bin = join(directory, 'tailscale')
+    await writeFile(bin, [
+      '#!/bin/sh',
+      'case "$*" in',
+      // 443 is occupied, and not as the sole entry, so the recovery path
+      // refuses to reset the config and raises its own diagnostic.
+      '  *"serve --bg"*) echo "Error: already serving TCP on port 443" >&2; exit 1 ;;',
+      '  *"serve status --json"*) printf \'%s\' \'{"TCP":{"443":{},"8443":{}}}\' ;;',
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'), 'utf8')
+    await chmod(bin, 0o755)
+
+    const { proxy } = await fakeProxy()
+    const controller = new TailscaleServeController({ store: store(true), proxy, bin })
+
+    await controller.initialize()
+
+    expect(controller.status()).toMatchObject({ state: 'error', errorCode: 'serve_port_conflict' })
+  })
 })
