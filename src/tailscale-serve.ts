@@ -93,7 +93,13 @@ export class TailscaleServeController {
     this.initialized = true
     if (this.enabled) await this.start()
       else {
-        await this.stopServe()
+        // A disabled switch means this plugin does not own `serve`, not that
+        // `serve` should be cleared. `tailscale serve --https=443 off` is a
+        // node-global side effect that would tear down an unrelated 443 entry
+        // the user configured themselves, on every boot, because a fresh
+        // install persists `enabled: false`. There is nothing of ours to stop
+        // here either: nothing was started, so the proxy is already closed.
+        await this.closeProxy()
         this.publish({ enabled: false, state: 'off' })
       }
   }
@@ -182,7 +188,12 @@ export class TailscaleServeController {
       const origin = await this.resolveOrigin()
       this.publish({ enabled: true, state: 'ready', origin })
     } catch (error) {
-      try { await this.options.proxy.close() } catch {
+      // `runServe` registers the 443 entry before `resolveOrigin` reads the
+      // MagicDNS name back, so a failure after the registration would otherwise
+      // leave `serve` pointing at a proxy we are about to close — the phone
+      // then sees connection-refused while the panel reports an error. Clear
+      // the entry we just created, then report.
+      try { await this.stopServe() } catch {
         // The proxy must not mask the serve error reported below.
       }
       this.publish({ enabled: true, state: 'error', errorCode: classifyServeError(error) })
@@ -247,6 +258,11 @@ export class TailscaleServeController {
     } catch {
       // Turning serve off when nothing is configured is harmless.
     }
+    await this.closeProxy()
+  }
+
+  /** Stop the loopback proxy if it is running. Never touches `tailscale serve`. */
+  private async closeProxy(): Promise<void> {
     try {
       await this.options.proxy.close()
     } catch {

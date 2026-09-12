@@ -26,6 +26,7 @@ import {
 import { connect, type Socket } from 'node:net'
 import {
   HttpError,
+  LOCAL_ADMIN_PREFIX,
   parseRequestTarget,
   sendFailure,
 } from './http-security.js'
@@ -38,6 +39,16 @@ import {
 } from './gateway.js'
 
 const MAX_HEADER_BYTES = 16 * 1024
+/**
+ * Whether a pathname belongs to this plugin's loopback-only administration
+ * surface. Every channel that is not already loopback-confined must refuse it
+ * before forwarding.
+ * @param pathname - Decoded request pathname.
+ * @returns Whether the request targets the local admin prefix.
+ */
+function isLocalAdminPath(pathname: string): boolean {
+  return pathname === LOCAL_ADMIN_PREFIX || pathname.startsWith(`${LOCAL_ADMIN_PREFIX}/`)
+}
 /** Largest upstream document this proxy will buffer in order to rewrite it. */
 const MAX_REWRITABLE_INDEX_BYTES = 512 * 1024
 /** Absolute bound on a buffered HTML document before the proxy gives up. */
@@ -173,6 +184,15 @@ export class RemotePassthroughProxy {
 
   private async handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const target = parseRequestTarget(request.url)
+    // This proxy is reachable from the whole tailnet, and it rewrites Host and
+    // Origin to the loopback upstream, so anything it forwards arrives at the
+    // DSH WebServer looking exactly like a request from the local machine. The
+    // plugin's own administration surface is guarded by that loopback
+    // assumption alone (`assertLocalAdminTrust`), and it mints pairing tokens,
+    // lists devices, and revokes or clears them. Forwarding it would let any
+    // tailnet device escalate to LAN-device trust, so it is refused here — the
+    // same refusal the LAN gateway applies on its own listener.
+    if (isLocalAdminPath(target.decodedPathname)) throw new HttpError(404, 'not_found')
     const method = request.method ?? 'GET'
     if (!['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
       throw new HttpError(405, 'method_not_allowed')
@@ -275,6 +295,9 @@ export class RemotePassthroughProxy {
 
   private async handleUpgrade(request: IncomingMessage, client: Socket, head: Buffer): Promise<void> {
     const target = parseRequestTarget(request.url)
+    // Refuse the local admin prefix on this channel, for the same reason the
+    // HTTP path does: the proxy makes tailnet requests look loopback-local.
+    if (isLocalAdminPath(target.decodedPathname)) throw new HttpError(404, 'not_found')
     // Transparent passthrough: forward every upgrade request as-is (path and
     // query included). The upstream DSH web server owns the trust fence and
     // decides which WebSocket channels to accept, so a whitelist here would

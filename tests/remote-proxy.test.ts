@@ -313,6 +313,41 @@ describe('RemotePassthroughProxy', () => {
     expect(recordedHost).toEqual([new URL(upstreamOrigin).host])
     expect(recordedOrigin).toEqual([upstreamOrigin])
   })
+
+  it('refuses the loopback-only admin surface instead of forwarding it', async () => {
+    // Verified against a live deployment before this guard existed: a plain
+    // curl to POST /api/mobile-access/lan/pairing/open on the tailnet origin
+    // answered 201 with a pairing token, and GET .../lan/status answered 200,
+    // because the proxy makes tailnet requests arrive at the upstream looking
+    // loopback-local and assertLocalAdminTrust keys off exactly that.
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end('{"token":"must-never-be-reachable"}')
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    for (const path of [
+      '/api/mobile-access/lan/pairing/open',
+      '/api/mobile-access/lan/status',
+      '/api/mobile-access/lan/devices/revoke',
+      '/api/mobile-access/lan/devices/reset',
+      '/api/mobile-access/remote/control',
+      '/api/mobile-access',
+    ]) {
+      const response = await fetch(proxy.origin() + path, { method: 'POST' })
+      expect(response.status, path).toBe(404)
+      expect(await response.json(), path).toEqual({ error: 'not_found' })
+    }
+    // The guard runs before the forward, so nothing reached the upstream.
+    expect(upstream.recorded).toHaveLength(0)
+
+    // A neighbouring path that merely shares the prefix stays reachable.
+    const neighbour = await fetch(proxy.origin() + '/api/mobile-accessibility')
+    expect(neighbour.status).toBe(200)
+    expect(upstream.recorded).toHaveLength(1)
+  })
 })
 
 describe('resolveLiveUpstream', () => {
