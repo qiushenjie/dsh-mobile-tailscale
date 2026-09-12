@@ -98,6 +98,13 @@ const MAX_MOBILE_BOOT_BATCH_BYTES = 32 * 1024 * 1024
 const MAX_MOBILE_BOOT_ENTRY_BYTES = 8 * 1024 * 1024
 const MAX_MOBILE_BOOT_BATCHES = 8
 const UPSTREAM_AUTH_REFRESH_MARGIN_MS = 60_000
+/**
+ * Largest delay `setTimeout` accepts (2^31 - 1 ms, ~24.85 days). A longer delay
+ * overflows the 32-bit timer and is silently truncated to 1 ms, which would
+ * abort the operation immediately instead of at its deadline. Every
+ * session-derived delay must be clamped to this.
+ */
+const MAX_TIMER_DELAY_MS = 2_147_483_647
 const UPSTREAM_COOKIE_PAIR = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+=[\x21-\x3A\x3C-\x7E]*$/u
 const CUSTOM_STYLE_FALLBACK = '/* Add mobile overrides in the DSH home mobile-access/mobile.css file. */\n'
 const CUSTOM_SCRIPT_FALLBACK = 'window.dshMobile?.register(() => undefined)\n'
@@ -1749,7 +1756,7 @@ export class MobileAccessGateway {
       if (!response.destroyed) response.destroy()
     }
     const abortDelay = Number.isFinite(authorization.expiresAt)
-      ? Math.max(1, authorization.expiresAt - Date.now())
+      ? Math.min(MAX_TIMER_DELAY_MS, Math.max(1, authorization.expiresAt - Date.now()))
       : 0
     const timer = abortDelay > 0 ? setTimeout(abort, abortDelay) : undefined
     if (timer !== undefined) timer.unref()
@@ -1955,7 +1962,7 @@ export class MobileAccessGateway {
     }
     client.on('error', closeBoth)
     upstream.on('error', closeBoth)
-    const timer = setTimeout(closeBoth, Math.max(1, authorization.expiresAt - Date.now()))
+    const timer = setTimeout(closeBoth, Math.min(MAX_TIMER_DELAY_MS, Math.max(1, authorization.expiresAt - Date.now())))
     timer.unref()
     const record: ActiveWebSocket = Object.freeze({ ...authorization, client, upstream, timer })
     this.activeWebSockets.set(id, record)
@@ -2102,8 +2109,10 @@ export class MobileAccessGateway {
       sessionKey: 'remote',
       deviceId: 'remote',
       // A finite far-future expiry: the allocateRequest abort timer derives
-      // from it, and setTimeout(abort, Infinity) would overflow to ~1ms and
-      // abort every operation immediately.
+      // from it, and a non-finite value would leave the deadline disabled.
+      // Note this is 30 days, which exceeds the 32-bit setTimeout range, so
+      // both timer sites clamp the derived delay to MAX_TIMER_DELAY_MS instead
+      // of letting setTimeout truncate the overflow to 1 ms.
       expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
     })
     return {
