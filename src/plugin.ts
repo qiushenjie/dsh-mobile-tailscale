@@ -8,7 +8,7 @@ import { createRequire } from 'node:module'
 import { readFile, rm } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { parseControlFile, parseGatewayConfig, type PluginConfig, type ResolvedGatewayConfig } from './config.js'
-import { assertSupportedDshVersion } from './compatibility.js'
+import { warnUnsupportedDshVersion } from './compatibility.js'
 import { collectConnectionDiagnostics } from './diagnostics.js'
 import { MOBILE_CUSTOMIZATION_GUIDE } from './mobile-guide.js'
 import {
@@ -185,7 +185,11 @@ function remoteControlPayload(
 /** Mount the resident control route and its optional authenticated LAN gateway. */
 export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
   const dshVersion = installedDshVersion() ?? 'unknown'
-  assertSupportedDshVersion(dshVersion)
+  // Advisory only: an unverified Host version must never abort activation, or
+  // the failed loader entry takes the whole plugin tree — and therefore the
+  // Host boot — down with it (DSH Desktop then falls back to its safe-mode
+  // profile with every third-party plugin disabled).
+  warnUnsupportedDshVersion(dshVersion)
   const loaded = await loadSetup(config)
   const mobileAccess: MobileAccessService = createMobileAccessService(ctx)
   const template = loopbackTemplate(loaded)
