@@ -35,7 +35,7 @@ export type {
   MobileAccessControlStore,
   MobileAccessRuntime,
 } from './control.js'
-export { MobileAccessGateway, rewriteMobileIndex } from './gateway.js'
+export { MobileAccessGateway, rewriteMobileIndex, rewriteRemoteMobileIndex } from './gateway.js'
 export {
   EXTENSION_LIMITS,
   MobileAccessService,

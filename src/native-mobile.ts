@@ -253,6 +253,94 @@ export function shouldAutoLoadEarlier(previousTop: number, currentTop: number): 
   return currentTop <= AUTO_HISTORY_THRESHOLD_PX && currentTop < previousTop - 0.5
 }
 
+/** Interactive roles that act inside a sidebar row instead of selecting it. */
+const ROW_CONTROL_SELECTOR = 'button,[role="button"],[role="menu"],[aria-haspopup]'
+
+/**
+ * Whether a programmatic focus is the composer editor this layer has to mute.
+ *
+ * The stock app focuses the composer when a session opens, which pops the iOS
+ * keyboard. Only that field is guarded: blurring any other programmatic focus
+ * broke the model menu, whose search field opens focused when the user drills
+ * into the model list — the blur fired the menu's own blur handler and closed
+ * the overlay the user had just opened.
+ * @param target - The element receiving focus.
+ * @returns Whether the focus should be dropped unless the user asked for it.
+ */
+export function isComposerEditorFocus(target: Element): boolean {
+  if (!target.matches('[contenteditable]:not([contenteditable="false"])')) return false
+  return target.closest('[data-composer-card]') !== null
+}
+
+/**
+ * Whether a sidebar click selected the row itself rather than one of the row's
+ * own controls.
+ *
+ * Collapsing the sidebar after a row selection is a portrait affordance, but a
+ * row also hosts its action controls (the ellipsis menu, add-session). Treating
+ * those as a selection collapsed the sidebar right after the menu opened, which
+ * tore the menu down and read as a jump into the conversation.
+ * @param target - Event target inside the row.
+ * @param row - The enclosing `role="treeitem"` row.
+ * @returns Whether the click should be treated as a row selection.
+ */
+export function selectsSidebarRow(target: Element, row: Element): boolean {
+  const action = target.closest(ROW_CONTROL_SELECTOR)
+  return action === null || action === row
+}
+
+/**
+ * Whether a press inside an open choice menu must keep focus where it is.
+ *
+ * The stock model menu autofocuses its search field and closes itself from the
+ * *container's* own blur handler. On touch, tapping a model row dispatches
+ * `mousedown`, whose default action moves focus out of the container, so the
+ * menu unmounts before `mouseup` — no `click` is ever dispatched, the row's
+ * handler never runs, and no request is sent. Picking a model on the phone
+ * therefore did nothing at all: no error, no toast, and an unchanged label,
+ * while the identical tap through a synthetic `click` (which never dispatches
+ * `mousedown`) selected the model correctly.
+ *
+ * Cancelling only the `mousedown` default keeps focus inside the container, so
+ * no blur fires and the menu stays mounted, while `click` still arrives.
+ * Cancelling `touchstart` or `pointerdown` instead would suppress the very
+ * click this is meant to deliver.
+ * @param menu - The enclosing `[role="menu"]`, or null when the press is outside every menu.
+ * @param row - The menu item under the press.
+ * @param active - The currently focused element.
+ * @returns Whether the press default must be cancelled.
+ */
+export function preservesMenuFocus(
+  menu: Element | null,
+  row: Element | null,
+  active: Element | null,
+): boolean {
+  if (menu === null || row === null) return false
+  return active !== null && menu.contains(active)
+}
+
+/** The menu item roles the stock model menu renders its rows with. */
+const MENU_ITEM_SELECTOR = '[role="menuitemradio"],[role="menuitem"]'
+
+/** The search field the stock model pane autofocuses when it opens. */
+const MENU_SEARCH_SELECTOR = 'input[type="search"],input[role="searchbox"]'
+
+/**
+ * Whether a focus belongs to the search field of an open choice menu.
+ *
+ * Drilling into the model list autofocuses this field, and on a phone that
+ * raises the soft keyboard, which shrinks the visual viewport from 796px to
+ * 516px and pushes the model rows out of easy reach. Suppressing the keyboard
+ * with `inputMode: none` keeps the focus — so the menu's own blur handler never
+ * fires and the overlay stays mounted — while leaving the list fully visible.
+ * @param target - The element receiving focus.
+ * @returns Whether this is the menu search field whose keyboard should be muted.
+ */
+export function isMenuSearchFocus(target: Element): boolean {
+  if (!target.matches(MENU_SEARCH_SELECTOR)) return false
+  return target.closest('[role="menu"]') !== null
+}
+
 /** Add mobile semantics without replacing feature trees. */
 export function installNativeMobileSurface(): () => void {
   document.documentElement.classList.add('dsh-native-mobile-active')
@@ -279,7 +367,7 @@ export function installNativeMobileSurface(): () => void {
   const onFocusIn = (event: FocusEvent): void => {
     const target = event.target
     if (!(target instanceof HTMLElement)) return
-    if (!target.matches('input,textarea,select,[contenteditable]')) return
+    if (!isComposerEditorFocus(target)) return
     if (document.documentElement.dataset.dshMobileInput !== 'touch') return
     const tapped = lastPointerTarget !== undefined
       && (target === lastPointerTarget || target.contains(lastPointerTarget))
@@ -291,6 +379,45 @@ export function installNativeMobileSurface(): () => void {
   }
   document.addEventListener('pointerdown', onPointerDownForFocus, true)
   document.addEventListener('focusin', onFocusIn, true)
+  // Keep focus inside an open choice menu so its own blur handler cannot tear
+  // the overlay down before the row's click is dispatched. See
+  // {@link preservesMenuFocus} for the failure this prevents.
+  const onMenuMouseDown = (event: MouseEvent): void => {
+    if (!(event.target instanceof Element)) return
+    const menu = event.target.closest('[role="menu"]')
+    if (menu === null) return
+    const row = event.target.closest(MENU_ITEM_SELECTOR)
+    if (!preservesMenuFocus(menu, row, document.activeElement)) return
+    event.preventDefault()
+  }
+  document.addEventListener('pointerdown', onMenuMouseDown, true)
+  // Mute the soft keyboard the model pane's autofocused search field would
+  // raise, without letting go of the focus that keeps the overlay mounted.
+  // Tapping the field on purpose restores normal input so search still works.
+  let lastSearchPointerTarget: Element | undefined
+  const onSearchPointerDown = (event: PointerEvent): void => {
+    lastSearchPointerTarget = event.target instanceof Element ? event.target : undefined
+  }
+  const onMenuSearchFocusIn = (event: FocusEvent): void => {
+    const target = event.target
+    if (!(target instanceof HTMLElement)) return
+    if (!isMenuSearchFocus(target)) return
+    // Only a phone raises a soft keyboard. On a desktop browser reaching this
+    // page over the LAN, the field must be left exactly as it is — the same
+    // touch-mode gate the composer guard above uses. Opening the menu is always
+    // a touch here, so the phone path is unaffected.
+    if (document.documentElement.dataset.dshMobileInput !== 'touch') return
+    const tapped = lastSearchPointerTarget !== undefined
+      && (target === lastSearchPointerTarget || target.contains(lastSearchPointerTarget))
+    lastSearchPointerTarget = undefined
+    if (tapped) {
+      if (target.inputMode === 'none') target.inputMode = ''
+      return
+    }
+    target.inputMode = 'none'
+  }
+  document.addEventListener('pointerdown', onSearchPointerDown, true)
+  document.addEventListener('focusin', onMenuSearchFocusIn, true)
   const backdrop = document.createElement('button')
   backdrop.type = 'button'
   backdrop.className = 'dsh-native-mobile-backdrop'
@@ -329,6 +456,7 @@ export function installNativeMobileSurface(): () => void {
     if (window.innerHeight <= window.innerWidth) return
     const tree = event.target.closest<HTMLElement>('[data-dsh-mobile-sidebar] [role="treeitem"]')
     if (tree === null) return
+    if (!selectsSidebarRow(event.target, tree)) return
     const sidebarEl = tree.closest<HTMLElement>('[data-dsh-mobile-sidebar]')
     if (sidebarEl === null || sidebarEl.getAttribute('data-open') !== 'true') return
     const sidebarToggle = document.querySelector<HTMLButtonElement>('[data-dsh-mobile-toggle]')
@@ -545,6 +673,9 @@ export function installNativeMobileSurface(): () => void {
     document.removeEventListener('click', onSidebarSessionSelect, true)
     document.removeEventListener('pointerdown', onPointerDownForFocus, true)
     document.removeEventListener('focusin', onFocusIn, true)
+    document.removeEventListener('mousedown', onMenuMouseDown, true)
+    document.removeEventListener('pointerdown', onSearchPointerDown, true)
+    document.removeEventListener('focusin', onMenuSearchFocusIn, true)
     if (branchToastTimer !== 0) window.clearTimeout(branchToastTimer)
     branchToast.remove()
     if (scheduled !== 0) cancelAnimationFrame(scheduled)

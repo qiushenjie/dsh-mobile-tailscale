@@ -50,6 +50,7 @@ import {
   WS_PATHS,
 } from './http-security.js'
 import {
+  DSH_MOBILE_MODULE_ID,
   DSH_MOBILE_VERSION,
   MINIMUM_ANDROID_APP_VERSION,
   MOBILE_METADATA_VERSION,
@@ -108,12 +109,14 @@ const MAX_TIMER_DELAY_MS = 2_147_483_647
 const UPSTREAM_COOKIE_PAIR = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+=[\x21-\x3A\x3C-\x7E]*$/u
 const CUSTOM_STYLE_FALLBACK = '/* Add mobile overrides in the DSH home mobile-access/mobile.css file. */\n'
 const CUSTOM_SCRIPT_FALLBACK = 'window.dshMobile?.register(() => undefined)\n'
-const MOBILE_CLIENT_MODULE = 'dsh-mobile'
+const MOBILE_CLIENT_MODULE = DSH_MOBILE_MODULE_ID
 const CONNECTION_MODULE = '@deepseek-ai/dsh-client-connection'
 const RUNTIME_MODULE = '@deepseek-ai/dsh-client-runtime'
 const RENDERER_MODULE = '@deepseek-ai/dsh-client-ui-renderer'
 const SIDEBAR_MODULE = '@deepseek-ai/dsh-client-ui-sidebar'
 const SETTINGS_MODULE = '@deepseek-ai/dsh-client-ui-settings'
+const API_GATEWAY_MODULE = '@deepseek-ai/dsh-api-gateway'
+const API_REMOTES_MODULE = '@deepseek-ai/dsh-api-remotes'
 const MOBILE_LAYOUT_DEPENDENCY_PROFILES = Object.freeze([
   Object.freeze({
     slots: RUNTIME_MODULE,
@@ -130,6 +133,44 @@ const MOBILE_LAYOUT_DEPENDENCY_PROFILES = Object.freeze([
   }),
 ])
 const MOBILE_CSRF_FETCH_BOOTSTRAP = `(()=>{const nativeFetch=window.fetch.bind(window);window.fetch=(input,init)=>{const source=input instanceof Request?input:undefined;const method=String(init?.method??source?.method??'GET').toUpperCase();if(method==='GET'||method==='HEAD')return nativeFetch(input,init);const raw=typeof input==='string'?input:input instanceof URL?input.href:source?.url;if(raw===undefined||new URL(raw,location.href).origin!==location.origin)return nativeFetch(input,init);const headers=new Headers(init?.headers??source?.headers);if(!headers.has(${JSON.stringify(CSRF_HEADER)})){const prefix=${JSON.stringify(`${CSRF_COOKIE}=`)};const token=document.cookie.split(';').map(value=>value.trim()).find(value=>value.startsWith(prefix))?.slice(prefix.length);if(token!==undefined)headers.set(${JSON.stringify(CSRF_HEADER)},token)}return nativeFetch(input,{...init,headers})};})();`
+
+/**
+ * Declare this page as the owner of its own transport, before ANY boot module
+ * runs.
+ *
+ * `@deepseek-ai/dsh-client-connection` builds its handle with
+ * `isLoopback: transport?.ownsHost === true || <loopback hostname>`. A phone
+ * page is never on a loopback hostname, so without this the handle is born
+ * `isLoopback: false`.
+ *
+ * Mutating `connection.isLoopback` later from the mobile client module is NOT
+ * equivalent, because `@deepseek-ai/dsh-api-gateway` memoizes the value:
+ *
+ * ```js
+ * get $host() {
+ *   const home = this.connection.generation.getSnapshot()?.host.home
+ *   if (this.hostFacts === void 0 || this.hostFacts.home !== home) this.hostFacts = {
+ *     home, isLoopback: this.connection.isLoopback,
+ *   }
+ *   return this.hostFacts
+ * }
+ * ```
+ *
+ * The cache is keyed on `home` alone. On the remote channel `home` is stable,
+ * so the first consumer of `ctx.remote.$host` freezes `isLoopback: false` for
+ * the life of the page — and `dsh-client-ui-settings`,
+ * `dsh-client-ui-settings-general`, `dsh-api-session-controller` and
+ * `dsh-client-ui-workspace` all read the cached `ctx.remote.$host`. That is why
+ * the trust must exist before the boot manifest is evaluated, not after a
+ * module activates.
+ *
+ * Deviation from upstream: upstream throws when `__DSH_TRANSPORT__` already
+ * exists. This statement shares a script block with the boot manifest
+ * assignment, so throwing would blank the whole mobile page — the failure mode
+ * this plugin has already been burned by. An existing override is therefore
+ * left untouched, and the client-side trust hint remains as the fallback.
+ */
+const MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP = `(()=>{if(window.__DSH_TRANSPORT__!==undefined)return;window.__DSH_TRANSPORT__={fetch:(input,init)=>window.fetch(input,init),ownsHost:true}})();`
 const PAIR_PAGE = `<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
@@ -207,22 +248,48 @@ function ensureMobileViewport(html: string): string {
   return `${html.slice(0, match.index)}${next}${html.slice(match.index + match[0].length)}`
 }
 
-function orderAuthenticatedSettings(entries: BootGraphEntry[], slotsProvider: string): void {
+function orderAuthenticatedSettings(entries: BootGraphEntry[], slotsProvider: string): boolean {
   const mobile = entries.filter(entry => entry !== null && typeof entry === 'object' && entry.id === MOBILE_CLIENT_MODULE)
   const settings = entries.filter(entry => entry !== null && typeof entry === 'object' && entry.id === SETTINGS_MODULE)
-  if (mobile.length === 0 || settings.length === 0) return
+  if (mobile.length === 0 || settings.length === 0) return false
   if (mobile.length !== 1 || settings.length !== 1) throw new Error('upstream DSH mobile settings graph is ambiguous')
   if (!Array.isArray(mobile[0]?.inject)
     || !mobile[0].inject.includes(CONNECTION_MODULE)
     || !mobile[0].inject.includes(SIDEBAR_MODULE)) {
     throw new Error('dsh-mobile client has unsupported dependencies')
   }
-  if (!Array.isArray(settings[0]?.inject)
-    || !settings[0].inject.includes(CONNECTION_MODULE)) {
+  // The settings module has to expose a dependency list we can extend, so that
+  // it activates *after* this plugin has claimed the loopback trust hint that
+  // settings reads exactly once while choosing its persistence backend.
+  //
+  // This used to also demand a `connection` dependency, which rejected a
+  // healthy DSH 0.1.2 graph: settings moved to `remote.$host.isLoopback` and its
+  // declared dependencies became `['@deepseek-ai/dsh-api-remotes']`. Requiring
+  // the old edge would now fail the whole mobile page closed.
+  if (!Array.isArray(settings[0]?.inject)) {
     throw new Error('upstream DSH settings module has unsupported dependencies')
+  }
+  // DSH 0.1.2 moved settings behind the Remote namespace. On that shape the
+  // API gateway is what memoizes `$host` (see
+  // MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP), so it must also arrive after
+  // this plugin's client module instead of racing it.
+  //
+  // Applied opportunistically rather than as a validated requirement: the
+  // pre-boot transport override above is what makes the trust correct on every
+  // graph, so a DSH release that reshapes these entries should lose this extra
+  // ordering edge, not fail the whole mobile page.
+  const remoteSettings = !settings[0].inject.includes(CONNECTION_MODULE)
+  if (remoteSettings) {
+    for (const gateway of entries) {
+      if (gateway === null || typeof gateway !== 'object' || gateway.id !== API_GATEWAY_MODULE) continue
+      if (!Array.isArray(gateway.inject)) continue
+      if (!gateway.inject.includes(CONNECTION_MODULE)) continue
+      if (!gateway.inject.includes(MOBILE_CLIENT_MODULE)) gateway.inject = [...gateway.inject, MOBILE_CLIENT_MODULE]
+    }
   }
   mobile[0].inject = [CONNECTION_MODULE, slotsProvider]
   if (!settings[0].inject.includes(MOBILE_CLIENT_MODULE)) settings[0].inject = [...settings[0].inject, MOBILE_CLIENT_MODULE]
+  return remoteSettings
 }
 
 function revisionedMobileBatchPath(entries: readonly MobileBootBatchEntry[]): { readonly key: string; readonly path: string } {
@@ -233,19 +300,38 @@ function revisionedMobileBatchPath(entries: readonly MobileBootBatchEntry[]): { 
   return { key, path: `${MOBILE_BOOT_BATCH_PREFIX}${key}.js` }
 }
 
-function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
-  const assignment = /(?:window\.__DSH_BOOT__|globalThis\["__DSH_BOOT__"\])\s*=\s*/u.exec(html)
+const BOOT_ASSIGNMENT = /(?:window\.__DSH_BOOT__|globalThis\["__DSH_BOOT__"\])\s*=\s*/u
+
+/**
+ * Marker the plugin injects only into pages it serves itself, so the mobile
+ * client claims the loopback trust hint for its own channels and never for a
+ * page reached through somebody else's reverse proxy.
+ */
+const MOBILE_TRUST_FLAG = 'window.__DSH_MOBILE_TRUSTED_GATEWAY__=true;'
+
+interface BootManifestSite {
+  readonly start: number
+  readonly assignment: string
+  readonly scriptEnd: number
+  readonly parsed: { rev?: unknown; entries?: unknown; batches?: unknown }
+}
+
+/** Locate and validate the boot manifest literal inside an upstream DSH index. */
+function locateBootManifest(html: string): BootManifestSite {
+  const assignment = BOOT_ASSIGNMENT.exec(html)
   if (assignment?.index === undefined) throw new Error('upstream DSH index has no boot manifest')
-  const start = assignment.index
-  const valueStart = start + assignment[0].length
+  const valueStart = assignment.index + assignment[0].length
   const scriptEnd = html.indexOf('</script>', valueStart)
   if (scriptEnd < 0) throw new Error('upstream DSH boot manifest script is incomplete')
-  const source = html.slice(valueStart, scriptEnd).trim().replace(/;$/u, '')
-  const parsed = JSON.parse(source) as { rev?: unknown; entries?: unknown; batches?: unknown }
+  const parsed = JSON.parse(html.slice(valueStart, scriptEnd).trim().replace(/;$/u, '')) as BootManifestSite['parsed']
   if (typeof parsed.rev !== 'string' || !Array.isArray(parsed.entries)) {
     throw new Error('upstream DSH boot manifest is malformed')
   }
-  const entries = parsed.entries as BootGraphEntry[]
+  return { start: assignment.index, assignment: assignment[0], scriptEnd, parsed }
+}
+
+/** Resolve the unique stock layout module and its supported dependency profile. */
+function requireLayoutModule(entries: BootGraphEntry[]): { readonly slots: string; readonly entry: BootGraphEntry } {
   const layout = entries.filter(entry => entry !== null && typeof entry === 'object' && entry.id === MOBILE_LAYOUT_MODULE)
   if (layout.length !== 1 || typeof layout[0]?.url !== 'string' || typeof layout[0].rev !== 'string') {
     throw new Error('upstream DSH boot manifest has no unique layout module')
@@ -257,9 +343,17 @@ function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
     profile.dependencies.every(dependency => layout[0]?.inject?.includes(dependency))
   ))
   if (dependencyProfile === undefined) throw new Error('upstream DSH layout module has unsupported dependencies')
-  layout[0].url = MOBILE_LAYOUT_PATH
-  layout[0].rev = `dsh-mobile-layout-${DSH_MOBILE_VERSION}`
-  orderAuthenticatedSettings(entries, dependencyProfile.slots)
+  return { slots: dependencyProfile.slots, entry: layout[0] }
+}
+
+function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
+  const site = locateBootManifest(html)
+  const parsed = site.parsed
+  const entries = parsed.entries as BootGraphEntry[]
+  const layout = requireLayoutModule(entries)
+  layout.entry.url = MOBILE_LAYOUT_PATH
+  layout.entry.rev = `dsh-mobile-layout-${DSH_MOBILE_VERSION}`
+  const remoteSettings = orderAuthenticatedSettings(entries, layout.slots)
 
   let mobileBatch: MobileBootBatchPlan | undefined
   if (parsed.batches !== undefined) {
@@ -295,9 +389,12 @@ function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
     mobileBatch = Object.freeze({ ...revision, entries: Object.freeze(planEntries) })
     parsed.rev = createHash('sha256').update(JSON.stringify({ entries, batches })).digest('hex').slice(0, 16)
   }
-  const replacement = `${MOBILE_CSRF_FETCH_BOOTSTRAP}window.__DSH_MOBILE_FRONTEND__="dedicated";${assignment[0]}${JSON.stringify(parsed)};`
+  // The transport override is what upstream ships for the remote-backed
+  // settings graph; on every other graph the client-side trust hint covers it.
+  const transportBootstrap = remoteSettings ? MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP : ''
+  const replacement = `${transportBootstrap}${MOBILE_CSRF_FETCH_BOOTSTRAP}${MOBILE_TRUST_FLAG}window.__DSH_MOBILE_FRONTEND__="dedicated";${site.assignment}${JSON.stringify(parsed)};`
   return Object.freeze({
-    html: ensureMobileViewport(`${html.slice(0, start)}${replacement}${html.slice(scriptEnd)}`),
+    html: ensureMobileViewport(`${html.slice(0, site.start)}${replacement}${html.slice(site.scriptEnd)}`),
     ...(mobileBatch === undefined ? {} : { batch: mobileBatch }),
   })
 }
@@ -305,6 +402,33 @@ function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
 /** Replace only DSH's layout client module while retaining its complete plugin graph. */
 export function rewriteMobileIndex(html: string): string {
   return rewriteMobileIndexWithBatch(html).html
+}
+
+/**
+ * Rewrite the mobile index for the pairing-free remote (Tailscale Serve) channel.
+ *
+ * The passthrough proxy owns that origin rather than this gateway, so there is
+ * no boot batch to hand out and the stock layout module is left in place — the
+ * remote channel keeps DSH's own layout with the surface adaptation. Only the
+ * authenticated-transport override, the trusted-gateway flag and the settings
+ * ordering are applied here, because without them DSH resolves its settings to
+ * the in-memory backend and the phone cannot load the model provider directory
+ * at all.
+ *
+ * The transport override is injected unconditionally here, not only on the
+ * remote-backed settings graph: a page on a `*.ts.net` origin is never loopback,
+ * and this channel has no second chance to correct the value once
+ * `@deepseek-ai/dsh-api-gateway` has memoized `$host`. A DSH release that does
+ * not read `__DSH_TRANSPORT__` simply ignores the global.
+ * @param html - Upstream DSH index document.
+ * @returns The document with the mobile trust flag and the settings ordering applied.
+ */
+export function rewriteRemoteMobileIndex(html: string): string {
+  const site = locateBootManifest(html)
+  const entries = site.parsed.entries as BootGraphEntry[]
+  orderAuthenticatedSettings(entries, requireLayoutModule(entries).slots)
+  const replacement = `${MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP}${MOBILE_TRUST_FLAG}${site.assignment}${JSON.stringify(site.parsed)};`
+  return ensureMobileViewport(`${html.slice(0, site.start)}${replacement}${html.slice(site.scriptEnd)}`)
 }
 
 const PAIR_SCRIPT = `(() => {

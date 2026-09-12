@@ -30,6 +30,7 @@ import {
   sendFailure,
 } from './http-security.js'
 import {
+  rewriteRemoteMobileIndex,
   sanitizeRequestHeaders,
   sanitizeResponseHeaders,
   stripIpv6Brackets,
@@ -37,6 +38,10 @@ import {
 } from './gateway.js'
 
 const MAX_HEADER_BYTES = 16 * 1024
+/** Largest upstream document this proxy will buffer in order to rewrite it. */
+const MAX_REWRITABLE_INDEX_BYTES = 512 * 1024
+/** Absolute bound on a buffered HTML document before the proxy gives up. */
+const MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 /** Same shape as the gateway's upstream session-cookie validation. */
 const UPSTREAM_COOKIE_PAIR = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+=[\x21-\x3A\x3C-\x7E]*$/u
 const UPSTREAM_AUTH_REFRESH_MARGIN_MS = 30_000
@@ -177,6 +182,9 @@ export class RemotePassthroughProxy {
       : await this.readBoundedBody(request)
     const upstream = this.options.resolveUpstream()
     const upstreamHeaders = sanitizeRequestHeaders(request, upstream)
+    // The document is rewritten below, so it has to arrive uncompressed.
+    const document = method === 'GET' && target.decodedPathname === '/'
+    if (document) upstreamHeaders['accept-encoding'] = 'identity'
     const upstreamCookie = await this.upstreamCookieFor(upstream)
     if (upstreamCookie !== undefined) upstreamHeaders.cookie = upstreamCookie
     const proxied = await new Promise<IncomingMessage>((resolve, reject) => {
@@ -197,6 +205,7 @@ export class RemotePassthroughProxy {
       if (body.length > 0) upstreamRequest.write(body)
       upstreamRequest.end()
     })
+    if (document && await this.serveRewrittenDocument(proxied, response, upstream)) return
     const headers = sanitizeResponseHeaders(proxied.headers, upstream)
     response.writeHead(proxied.statusCode ?? 502, headers)
     if (method === 'HEAD') {
@@ -210,6 +219,58 @@ export class RemotePassthroughProxy {
       proxied.pipe(response)
       proxied.once('end', resolve)
     })
+  }
+
+  /**
+   * Serve the upstream document with the mobile settings ordering applied.
+   *
+   * DSH answers the document with `Transfer-Encoding: chunked` and no
+   * `Content-Length`, so the body is buffered up to a bound instead of being
+   * gated on a declared size — gating on one silently skipped every rewrite.
+   *
+   * The remote channel runs DSH's own layout, so only the trusted-gateway flag
+   * and the settings ordering are injected here: without them DSH resolves its
+   * settings to the in-memory backend, and the phone's model provider directory
+   * fails to load. A non-HTML body or a failed rewrite is passed straight
+   * through — a stock page still works, and failing closed would take the whole
+   * remote channel down with it.
+   * @returns Whether this response was already written.
+   */
+  private async serveRewrittenDocument(
+    proxied: IncomingMessage,
+    response: ServerResponse,
+    upstream: URL,
+  ): Promise<boolean> {
+    if ((proxied.statusCode ?? 502) !== 200) return false
+    const type = proxied.headers['content-type']
+    if (typeof type !== 'string' || !type.toLowerCase().includes('text/html')) return false
+    const chunks: Buffer[] = []
+    let total = 0
+    for await (const chunk of proxied) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
+      total += buffer.length
+      // The application document is tens of kilobytes; a runaway body is not
+      // the document this rewrite expects.
+      if (total > MAX_DOCUMENT_BYTES) throw new HttpError(502, 'upstream_document_too_large')
+      chunks.push(buffer)
+    }
+    const raw = Buffer.concat(chunks)
+    const encoded = proxied.headers['content-encoding']
+    const rewritable = raw.length <= MAX_REWRITABLE_INDEX_BYTES
+      && (encoded === undefined || encoded === 'identity')
+    let body = raw
+    if (rewritable) {
+      try {
+        body = Buffer.from(rewriteRemoteMobileIndex(raw.toString('utf8')))
+      } catch (error) {
+        process.stderr.write(`[dsh-mobile-tailscale] remote proxy served the stock document: ${error instanceof Error ? error.message : String(error)}\n`)
+      }
+    }
+    const headers = sanitizeResponseHeaders(proxied.headers, upstream)
+    headers['content-length'] = String(body.length)
+    response.writeHead(proxied.statusCode ?? 502, headers)
+    response.end(body)
+    return true
   }
 
   private async handleUpgrade(request: IncomingMessage, client: Socket, head: Buffer): Promise<void> {

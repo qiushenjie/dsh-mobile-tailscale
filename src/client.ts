@@ -61,6 +61,12 @@ declare global {
       define(definition: MobileClientDefinition): void
     }
     __DSH_MOBILE_FRONTEND__?: 'dedicated'
+    /**
+     * Set only by the plugin's own LAN gateway or remote proxy, never by a page
+     * reached through a third-party reverse proxy, so claiming the loopback
+     * trust hint stays limited to the channels this plugin authenticates.
+     */
+    __DSH_MOBILE_TRUSTED_GATEWAY__?: boolean
     __DSH_MOBILE_NATIVE__?: {
       capabilities(): Promise<readonly string[]> | readonly string[]
       invoke(action: string, input?: unknown): Promise<unknown>
@@ -97,6 +103,68 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, className?: stri
   const node = document.createElement(tag)
   if (className !== undefined) node.className = className
   return node
+}
+
+/** Viewport rectangle of the sidebar trigger that opens the control panel. */
+export interface PanelTriggerRect {
+  readonly left: number
+  readonly right: number
+  readonly bottom: number
+}
+
+/** Resolved placement for the floating control panel. */
+export interface PanelAnchor {
+  readonly left: number
+  readonly bottom: number
+  readonly width: number
+  readonly availableHeight: number
+}
+
+const PANEL_MAX_WIDTH = 380
+const PANEL_MIN_WIDTH = 240
+const PANEL_MIN_HEIGHT = 160
+const PANEL_MARGIN = 8
+const PANEL_GAP = 8
+/** Placement used before the trigger has been measured. */
+const PANEL_FALLBACK_BOTTOM = 112
+
+/**
+ * Anchor the floating control panel beside its sidebar trigger instead of a
+ * fixed viewport corner. The sidebar is user-resizable and collapses to a rail,
+ * so a hard-coded offset either detaches from the trigger or slips under the
+ * sidebar edge; deriving the placement from the live trigger rectangle keeps the
+ * two together at any width.
+ * @param trigger - Measured trigger rectangle, or undefined before first layout.
+ * @param viewport - Current viewport size in CSS pixels.
+ * @returns Clamped placement that keeps the panel inside the viewport.
+ */
+export function resolvePanelAnchor(
+  trigger: PanelTriggerRect | undefined,
+  viewport: { readonly width: number; readonly height: number },
+): PanelAnchor {
+  const width = Math.min(PANEL_MAX_WIDTH, Math.max(PANEL_MIN_WIDTH, viewport.width - PANEL_MARGIN * 4))
+  const maxLeft = Math.max(PANEL_MARGIN, viewport.width - width - PANEL_MARGIN)
+  const maxBottom = Math.max(PANEL_MARGIN, viewport.height - PANEL_MIN_HEIGHT)
+  if (trigger === undefined) {
+    const bottom = Math.max(PANEL_MARGIN, Math.min(PANEL_FALLBACK_BOTTOM, maxBottom))
+    return Object.freeze({
+      left: Math.min(PANEL_MARGIN, maxLeft),
+      bottom,
+      width,
+      availableHeight: Math.max(PANEL_MIN_HEIGHT, viewport.height - bottom - PANEL_MARGIN),
+    })
+  }
+  // Prefer the panel to the right of the trigger; fall back to its left edge when
+  // there is no room, then clamp so the panel never leaves the viewport.
+  const beside = trigger.right + PANEL_GAP
+  const left = Math.max(PANEL_MARGIN, Math.min(beside + width <= viewport.width - PANEL_MARGIN ? beside : trigger.left, maxLeft))
+  const bottom = Math.max(PANEL_MARGIN, Math.min(viewport.height - trigger.bottom, maxBottom))
+  return Object.freeze({
+    left,
+    bottom,
+    width,
+    availableHeight: Math.max(PANEL_MIN_HEIGHT, viewport.height - bottom - PANEL_MARGIN),
+  })
 }
 
 const CONTROL_REQUEST_TIMEOUT_MS = 15_000
@@ -228,9 +296,44 @@ function installControl(): { remove: () => void; toggle: () => void } {
   }
   lanTab.addEventListener('click', () => { selectView('lan') })
   remoteTab.addEventListener('click', () => { selectView('remote'); loadRemote() })
+  // The trigger is rendered by the host sidebar slot, so it is looked up live
+  // rather than captured: the panel then follows the sidebar as it resizes.
+  const panelTrigger = (): HTMLElement | undefined => {
+    const node = document.querySelector('.dsh-mobile-control__trigger')
+    return node instanceof HTMLElement ? node : undefined
+  }
+  const positionPanel = (): void => {
+    const rect = panelTrigger()?.getBoundingClientRect()
+    const anchor = resolvePanelAnchor(
+      rect === undefined ? undefined : { left: rect.left, right: rect.right, bottom: rect.bottom },
+      { width: window.innerWidth, height: window.innerHeight },
+    )
+    root.style.left = `${anchor.left}px`
+    root.style.bottom = `${anchor.bottom}px`
+    root.style.setProperty('--dsh-mobile-control-panel-width', `${anchor.width}px`)
+    root.style.setProperty('--dsh-mobile-control-panel-height', `${anchor.availableHeight}px`)
+  }
+  let panelObserver: ResizeObserver | undefined
+  const stopTrackingPanel = (): void => {
+    panelObserver?.disconnect()
+    panelObserver = undefined
+    window.removeEventListener('resize', positionPanel)
+  }
+  const startTrackingPanel = (): void => {
+    positionPanel()
+    window.addEventListener('resize', positionPanel)
+    const trigger = panelTrigger()
+    if (trigger === undefined || typeof ResizeObserver === 'undefined') return
+    // The trigger is width:100% inside the sidebar footer, so observing it also
+    // reports a sidebar drag-resize, which a window resize event never sees.
+    panelObserver = new ResizeObserver(() => { positionPanel() })
+    panelObserver.observe(trigger)
+  }
   const setOpen = (open: boolean): void => {
     panel.hidden = !open
     for (const trigger of document.querySelectorAll('.dsh-mobile-control__trigger')) trigger.setAttribute('aria-expanded', String(open))
+    if (open) startTrackingPanel()
+    else stopTrackingPanel()
   }
   const render = (data: Record<string, unknown>): void => {
     running = data.running === true
@@ -485,7 +588,7 @@ function installControl(): { remove: () => void; toggle: () => void } {
   void requestJson('/api/mobile-access/lan/control').then(render, error => { status.textContent = String(error) })
   loadRemote()
   const remotePoll = window.setInterval(() => { if (!panel.hidden && !remoteView.hidden) loadRemote() }, 1_500)
-  return { remove: () => { window.clearInterval(remotePoll); document.removeEventListener('pointerdown', dismiss); root.remove() }, toggle: () => { setOpen(panel.hidden !== false) } }
+  return { remove: () => { window.clearInterval(remotePoll); stopTrackingPanel(); document.removeEventListener('pointerdown', dismiss); root.remove() }, toggle: () => { setOpen(panel.hidden !== false) } }
 }
 
 function mobileRequest(path: string, init: RequestInit = {}): Promise<Response> {
@@ -816,7 +919,7 @@ async function refreshCssLegacy(style: HTMLStyleElement, signal?: AbortSignal): 
 
 const CONTROL_STYLES = `
 .dsh-mobile-control{position:fixed;z-index:1000;left:16px;bottom:112px;font:14px/1.45 system-ui;color:var(--dsw-alias-label-primary,#16181d)}
-.dsh-mobile-control__panel{box-sizing:border-box;width:min(380px,calc(100vw - 32px));max-height:calc(100vh - 140px);overflow-y:auto;padding:16px;border:1px solid var(--dsw-alias-border-subtle,#e1e5eb);border-radius:18px;background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:0 18px 50px rgb(15 23 42 / 18%)}
+.dsh-mobile-control__panel{box-sizing:border-box;width:min(var(--dsh-mobile-control-panel-width,380px),calc(100vw - 16px));max-height:var(--dsh-mobile-control-panel-height,calc(100vh - 140px));overflow-y:auto;padding:16px;border:1px solid var(--dsw-alias-border-subtle,#e1e5eb);border-radius:18px;background:var(--dsw-alias-bg-layer-2,#fff);box-shadow:0 18px 50px rgb(15 23 42 / 18%)}
 .dsh-mobile-control__header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.dsh-mobile-control__panel h2{margin:0;font-size:17px;line-height:24px}.dsh-mobile-control__header-actions{display:flex;align-items:center;gap:2px}.dsh-mobile-control__diagnostic-entry,.dsh-mobile-control__close{display:inline-flex;align-items:center;justify-content:center;min-width:44px;height:44px;padding:0;border:0;border-radius:10px;background:transparent;color:inherit;cursor:pointer}.dsh-mobile-control__diagnostic-entry{padding:0 9px;color:#2563eb;font:650 12px/1 system-ui}.dsh-mobile-control__close{font-size:24px;line-height:1}.dsh-mobile-control__diagnostic-entry:hover,.dsh-mobile-control__close:hover{background:var(--dsw-alias-interactive-bg-hover,#f1f3f6)}
 .dsh-mobile-control__app-download{display:flex;align-items:center;justify-content:space-between;box-sizing:border-box;min-height:38px;margin:0 0 10px;padding:8px 11px;border:1px solid var(--dsw-alias-border-subtle,#dbe1e8);border-radius:11px;background:var(--dsw-alias-bg-layer-1,#f7f8fa);color:var(--dsw-alias-label-primary,#16181d);font:600 12px/1.3 system-ui;text-decoration:none}.dsh-mobile-control__app-download[hidden]{display:none}.dsh-mobile-control__app-download::after{color:#2563eb;font-size:14px;content:"↗"}.dsh-mobile-control__app-download:hover{border-color:#9fb9e8;background:#f5f8ff;color:#1d4ed8}
 .dsh-mobile-control__switcher{display:grid;grid-template-columns:repeat(2,1fr);gap:4px;margin:0 0 14px;padding:4px;border-radius:12px;background:var(--dsw-alias-bg-layer-1,#f3f5f8)}.dsh-mobile-control__switcher[hidden]{display:none}.dsh-mobile-control__tab{min-height:36px;border:0;border-radius:9px;background:transparent;color:var(--dsw-alias-label-secondary,#606873);font:600 13px/1 system-ui;cursor:pointer}.dsh-mobile-control__tab.is-active{background:var(--dsw-alias-bg-layer-2,#fff);color:var(--dsw-alias-label-primary,#16181d);box-shadow:0 1px 3px rgb(15 23 42 / 10%)}.dsh-mobile-control__view[hidden]{display:none}.dsh-mobile-control__intro{margin:0 0 12px;color:var(--dsw-alias-label-secondary,#606873);font-size:12px;line-height:1.55}.dsh-mobile-control__view.is-remote .dsh-mobile-control__actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}.dsh-mobile-control__view.is-remote .dsh-mobile-control__actions button[hidden]{display:none}
@@ -834,7 +937,8 @@ const CONTROL_STYLES = `
 @keyframes dsh-diagnostic-spin{to{transform:rotate(360deg)}}@keyframes dsh-diagnostic-reveal{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 .dsh-mobile-control__actions{display:flex;flex-wrap:nowrap;gap:6px}.dsh-mobile-control__actions button{flex:1 1 0;min-width:0;min-height:40px;padding:8px 4px;border-radius:10px;font:12px/1.2 system-ui;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dsh-mobile-control__secondary{border:1px solid var(--dsw-alias-border-normal,#cfd5dd);background:transparent;color:inherit}.dsh-mobile-control__primary{border:1px solid #2563eb;background:#2563eb;color:#fff}.dsh-mobile-control__actions button:disabled{cursor:not-allowed;opacity:.45}
 .dsh-mobile-control button:focus-visible,.dsh-mobile-control a:focus-visible,.dsh-mobile-control input:focus-visible,.dsh-mobile-control summary:focus-visible{outline:3px solid rgb(37 99 235 / 28%);outline-offset:2px}
-.dsh-mobile-control__trigger{box-sizing:border-box;display:flex;align-items:center;gap:8px;width:calc(100% + 8px);height:34px;margin:4px -4px;padding:6px 2px 6px 10px;border:0;border-radius:12px;background:transparent;color:var(--dsw-alias-label-primary,#16181d);font:14px/22px system-ui;cursor:pointer}.dsh-mobile-control__trigger:hover{background:var(--dsw-alias-interactive-bg-hover,#f1f3f6)}.dsh-mobile-control__trigger.is-rail{width:36px;height:36px;margin:8px 0 10px;padding:0;justify-content:center;border-radius:50%}.dsh-mobile-control__trigger-icon{position:relative;box-sizing:border-box;flex:none;width:14px;height:19px;border:1.7px solid currentColor;border-radius:3px}.dsh-mobile-control__trigger-icon::after{position:absolute;right:4px;bottom:2px;width:4px;height:1.5px;border-radius:2px;background:currentColor;content:""}.dsh-mobile-control__trigger-label{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+div:has(.dsh-mobile-control__trigger){flex-wrap:wrap}
+.dsh-mobile-control__trigger{box-sizing:border-box;display:flex;flex:1 0 100%;align-items:center;justify-content:center;gap:8px;width:100%;min-width:0;height:34px;margin:4px 0;padding:6px 10px;border:0;border-radius:12px;background:transparent;color:var(--dsw-alias-label-primary,#16181d);font:14px/22px system-ui;cursor:pointer}.dsh-mobile-control__trigger:hover{background:var(--dsw-alias-interactive-bg-hover,#f1f3f6)}.dsh-mobile-control__trigger.is-rail{flex:0 0 auto;width:36px;height:36px;margin:8px 0 10px;padding:0;justify-content:center;border-radius:50%}.dsh-mobile-control__trigger-icon{position:relative;box-sizing:border-box;flex:none;width:14px;height:19px;border:1.7px solid currentColor;border-radius:3px}.dsh-mobile-control__trigger-icon::after{position:absolute;right:4px;bottom:2px;width:4px;height:1.5px;border-radius:2px;background:currentColor;content:""}.dsh-mobile-control__trigger-label{flex:0 1 auto;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .dsh-mobile-control__manage-row{display:flex;justify-content:space-between;gap:8px;margin-top:10px}.dsh-mobile-control__manage{flex:1 1 0;min-width:0;min-height:34px;padding:6px 8px;border:1px solid var(--dsw-alias-border-normal,#cfd5dd);border-radius:10px;background:transparent;color:inherit;font:12px/1.3 system-ui;cursor:pointer}.dsh-mobile-control__devices{margin-top:10px;border:1px solid var(--dsw-alias-border-subtle,#e1e5eb);border-radius:10px;padding:8px;max-height:220px;overflow-y:auto}.dsh-mobile-control__device-empty{color:var(--dsw-alias-label-secondary,#606873);font-size:12px;margin:0}.dsh-mobile-control__device{display:flex;align-items:center;gap:8px;padding:6px 2px}.dsh-mobile-control__device + .dsh-mobile-control__device{border-top:1px solid var(--dsw-alias-border-subtle,#e1e5eb)}.dsh-mobile-control__device-label{flex:1 1 0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}.dsh-mobile-control__device-meta{flex:none;color:var(--dsw-alias-label-secondary,#606873);font-size:11px;white-space:nowrap}.dsh-mobile-control__device-revoke{flex:none;min-height:28px;padding:4px 8px;border:1px solid #dc2626;border-radius:8px;background:transparent;color:#dc2626;font:12px/1.2 system-ui;cursor:pointer}
 @media (prefers-reduced-motion:reduce){.dsh-mobile-control__provider,.dsh-mobile-control__cpolar-connect{transition:none}.dsh-mobile-control__diagnostic-summary.is-running .dsh-mobile-control__diagnostic-summary-icon::before,.dsh-mobile-control__diagnostic-checks{animation:none}}
 `
@@ -842,7 +946,12 @@ const CONTROL_STYLES = `
 /** Mount the desktop control or mobile feature enhancements. */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
-    if (window.__DSH_MOBILE_FRONTEND__ !== 'dedicated') return
+    // Both plugin-served channels (LAN gateway and Tailscale Serve proxy) inject
+    // the trust flag; the frontend flag is kept as a fallback for a page cached
+    // from an earlier build. Without this the phone page is treated as an
+    // untrusted browser and DSH resolves settings to its in-memory backend.
+    const trusted = window.__DSH_MOBILE_TRUSTED_GATEWAY__ === true || window.__DSH_MOBILE_FRONTEND__ === 'dedicated'
+    if (!trusted) return
     return trustAuthenticatedGatewayConnection(ctx.get('connection'))
   }, 'dsh-mobile: authenticated gateway client trust')
 

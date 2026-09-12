@@ -128,7 +128,7 @@ npm pack           # 生成 dsh-mobile-tailscale-<version>.tgz
 **Windows（PowerShell）：**
 
 ```powershell
-dsh plugin --profile web add .\dsh-mobile-tailscale-0.3.2.tgz
+dsh plugin --profile web add .\dsh-mobile-tailscale-0.3.5.tgz
 dsh plugin --profile web exec dsh-mobile setup
 dsh --profile web
 ```
@@ -136,13 +136,16 @@ dsh --profile web
 **macOS（终端）：**
 
 ```bash
-TGZ=$(ls dsh-mobile-tailscale-*.tgz | head -1)
+# 目录里可能留有多个历史 tarball：取版本号最大的那个，不要用 head -1
+TGZ=$(ls -1 dsh-mobile-tailscale-*.tgz | sort -V | tail -1)
 dsh plugin --profile web add "$PWD/$TGZ"
 dsh plugin --profile web exec dsh-mobile setup
 dsh --profile web
 ```
 
-（tarball 文件名里的版本号以 `npm pack` 实际输出为准；`dsh` 命令不可用时参考方式一改用 Desktop 内置 CLI。）
+（tarball 文件名里的版本号以 `pnpm pack` 实际输出为准；`dsh` 命令不可用时参考方式一改用 Desktop 内置 CLI。）
+
+> **覆盖安装同一版本不会生效**：pnpm 会认为该版本已安装而跳过。升级到新版本号可直接 `add`；需要重装同一版本时先 `dsh plugin --profile web remove dsh-mobile-tailscale`。
 
 **开发迭代**：每次改动源码后，重新执行第 2、3 步（`build` + `pack` + `add`）覆盖安装即可。DSH Desktop 正在运行时，需要完全退出并重新打开才会加载新插件。
 
@@ -249,7 +252,7 @@ flowchart LR
 
 | dsh-mobile-tailscale | 已验证的 DeepSeek Harness                                               |
 | -------------------- | ------------------------------------------------------------------------- |
-| `0.3.4`、`0.3.3`     | `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1`、`0.1.2-rc.1` |
+| `0.3.5`、`0.3.4`、`0.3.3` | `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1`、`0.1.2-rc.1` |
 | `0.3.2`              | `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1` |
 | `0.3.1`              | `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1` |
 

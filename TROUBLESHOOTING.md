@@ -15,6 +15,8 @@
 | 日志刷 `TimeoutOverflowWarning` / `upstream_unavailable` | [5](#5-timeoutoverflowwarning--upstream_unavailable) |
 | 插件安装时报 `resolves outside the installation closure` | [6](#6-resolves-outside-the-installation-closure) |
 | 局域网网关起不来 / 3443 未监听 | [7](#7-局域网网关未监听) |
+| 手机端「设置 → 模型」报 `settings are unavailable in this browser`、会话里选不了模型 | [11](#11-手机端设置与模型不可用) |
+| 点开菜单（模型列表、会话行的三个点）却自己关掉或跳转走 | [12](#12-点开的菜单被自己关掉) |
 
 ## 0. 先确定日志与状态位置
 
@@ -378,3 +380,59 @@ dsh plugin --profile web remove dsh-mobile-tailscale
 ```
 
 `purge` 删除 `$DSH_HOME/mobile-access/`（设置、证书、设备、自定义文件、扩展）。注意其中 `tls/` 与 `devices.json` 含**凭据**，外发或打包前请先清除。
+
+## 11. 手机端设置与模型不可用
+
+**现象**：手机（局域网或 tailnet）上「设置 → 模型」报 `settings are unavailable in this browser` / `加载提供方目录失败`，会话里的模型选择器也拿不到模型列表。桌面端一切正常。
+
+**根因**：DSH 在插件激活时**只读一次**宿主信任提示来决定设置后端（`ctx.remote.$host.isLoopback ? "host" : "memory"`）。取值是 `memory` 时就没有宿主支持的设置面，模型目录随之加载失败。
+
+手机页要拿到 `host`，必须满足两件事，缺一不可：
+
+1. 页面带有本插件注入的信任标志（`window.__DSH_MOBILE_TRUSTED_GATEWAY__`），客户端才会把 `connection.isLoopback` 置真。
+2. **启动清单里 settings 模块的 `inject` 必须包含本插件**，本插件才会先于 settings 激活。
+
+第 2 条由 `orderAuthenticatedSettings` 写入。它曾用一个写死的模块 id `dsh-mobile` 去清单里找自己，而清单里的条目 id 是**包名** `dsh-mobile-tailscale`：找不到就 `return`，于是这段排序**静默失效**，客户端与宿主都没有任何报错。测试夹具当时也用了同一个过时 id，所以测试全绿而线上失效。
+
+同一处还有第二个漂移：它要求 settings 模块的 `inject` 含 `@deepseek-ai/dsh-client-connection`，而 DSH 0.1.2 的 settings 只声明 `@deepseek-ai/dsh-api-remotes`——**只修 id 会让它抛错并把移动端首页整体 502**，两处必须一起改。
+
+**判定命令**：直接对运行时首页跑一遍改写，看 settings 的 `inject` 有没有被追加：
+
+```bash
+node --input-type=module -e "
+import { rewriteMobileIndex } from '$DSH_HOME/profiles/web/node_modules/dsh-mobile-tailscale/lib/index.mjs'
+import { readFileSync } from 'node:fs'
+const out = rewriteMobileIndex(readFileSync('/tmp/dsh-index.html','utf8'))
+console.log(out.includes('\"inject\":[\"@deepseek-ai/dsh-api-remotes\",\"dsh-mobile-tailscale\"]') ? '排序已生效' : '排序未生效')
+"
+```
+
+取 `/tmp/dsh-index.html` 的方式见 [4](#4-远程通道显示-ready-但不可达) 的 token 交换步骤。
+
+**远程通道另有独立成因**：远程由回环直通代理服务，它必须自己对首页做同样的改写（`rewriteRemoteMobileIndex`）。该改写曾以 `Content-Length` 为前置条件，而 DSH 用 `Transfer-Encoding: chunked` 返回首页 → **每次请求都跳过改写**，远程通道上这套修复等于没生效。所以远程排查时，要确认改写真的执行了，而不是只看面板状态。
+
+**处置**：升级到 0.3.5+。若升级后远程仍失败，看启动日志里有没有 `remote proxy served the stock document: ...` —— 那是改写被跳过的证据。
+
+## 12. 点开的菜单被自己关掉
+
+**现象**：两个不同的表现，根因都在本插件的 stock 面适配层（`native-mobile.ts`）：
+
+- 会话里点底部模型控件 → 点「模型」那一行 → **弹窗直接关掉**（而「推理等级」那一行正常）。
+- 会话/项目行点「三个点」→ 选项闪一下 → **侧边栏收起 / 看着像跳进了会话**。
+
+**根因一（模型菜单）**：DSH 的模型菜单是两级的，钻入「模型」层时会**自动聚焦搜索框**，而它的失焦处理会关掉整个弹窗：
+
+```js
+useEffect(() => { if (open && pane === "model") searchRef.current?.focus() }, [open, pane])
+const onBlur = (event) => { if (rootRef.current?.contains(event.relatedTarget)) return; close() }
+```
+
+本插件有个守卫，本意是"会话打开时 DSH 会程序化聚焦 composer，手机上会弹 iOS 键盘"，但它当时会 blur **任何**非用户点出的聚焦字段——搜索框也是 `input`，于是被 blur → 焦点离开弹窗 → `onBlur` → 关闭。「推理等级」层没有搜索框，所以不受影响，这正是那个不对称的来源。守卫现已收窄为只管 composer 编辑器本身。
+
+**根因二（行内三个点）**：竖屏"选中会话后自动收起侧边栏"的监听用 `closest('[role="treeitem"]')` 判断，把**行内任何点击**都当成选中该行，于是 240ms 后收起侧边栏，刚打开的 portal 菜单随之消失。现已要求点击落在行体上（行内按钮不算），与专属布局里本来就有的守卫一致。
+
+**判定命令**：这两个都是本插件行为，不需要看宿主日志。若现象是"某个菜单点开即关"，先确认菜单里是否有自动聚焦的输入框——有，就是根因一这一类。
+
+**处置**：升级到 0.3.5+。
+
+> **注意**：修复后钻入模型列表时**键盘会弹出**，因为 DSH 的设计就是自动聚焦那个搜索框（桌面版同样如此）。这是预期行为，不要为消除它再去 blur 该字段——那正是把弹窗关掉的原因。

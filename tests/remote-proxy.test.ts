@@ -6,10 +6,41 @@ import {
   type Server as HttpServer,
   type ServerResponse,
 } from 'node:http'
+import { createRequire } from 'node:module'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RemotePassthroughProxy } from '../src/remote-proxy.js'
 import { websocketAccept } from '../src/gateway.js'
 import { resolveLiveUpstream } from '../src/upstream.js'
+
+const packageName = (createRequire(import.meta.url)('../package.json') as { name: string }).name
+
+/** A DSH-shaped document whose settings module declares only the remotes namespace. */
+function bootDocument(): string {
+  const entries = [
+    { id: '@deepseek-ai/dsh-client-connection', url: '/plugins/connection.js', rev: 'c', inject: [] },
+    { id: '@deepseek-ai/dsh-client-ui-renderer', url: '/plugins/renderer.js', rev: 'r', inject: [] },
+    {
+      id: '@deepseek-ai/dsh-client-ui-layout',
+      url: '/plugins/layout.js',
+      rev: 'l',
+      inject: [
+        '@deepseek-ai/dsh-client-locale',
+        '@deepseek-ai/dsh-client-ui-renderer',
+        '@deepseek-ai/dsh-client-ui-session',
+        '@deepseek-ai/dsh-client-ui-theme',
+      ],
+    },
+    { id: '@deepseek-ai/dsh-client-ui-settings', url: '/plugins/settings.js', rev: 's', inject: ['@deepseek-ai/dsh-api-remotes'] },
+    {
+      id: packageName,
+      url: '/plugins/mobile.js',
+      rev: 'm',
+      inject: ['@deepseek-ai/dsh-client-connection', '@deepseek-ai/dsh-client-ui-sidebar'],
+      immediately: true,
+    },
+  ]
+  return `<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({ rev: 'stock', entries })};</script></head><body>app</body></html>`
+}
 
 const proxies: RemotePassthroughProxy[] = []
 const servers: Array<{ close: () => Promise<void> }> = []
@@ -132,6 +163,59 @@ describe('RemotePassthroughProxy', () => {
     expect(await (await fetch(proxy.origin() + '/')).text()).toBe('A')
     current = new URL(upstreamB.origin)
     expect(await (await fetch(proxy.origin() + '/')).text()).toBe('B')
+  })
+
+  it('orders the mobile client before settings in the remote document', async () => {
+    // DSH answers the document with Transfer-Encoding: chunked and no
+    // Content-Length, so the rewrite must not be gated on a declared length.
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      response.write(bootDocument())
+      response.end()
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const response = await fetch(proxy.origin() + '/')
+    const body = await response.text()
+
+    expect(response.status).toBe(200)
+    expect(upstream.recorded[0]?.headers['content-length']).toBeUndefined()
+    expect(body).toContain('window.__DSH_MOBILE_TRUSTED_GATEWAY__=true')
+    expect(body).toContain(`"inject":["@deepseek-ai/dsh-api-remotes","${packageName}"]`)
+    // The remote channel keeps DSH's own layout.
+    expect(body).toContain('"/plugins/layout.js"')
+    // The document has to arrive uncompressed for the rewrite to apply.
+    expect(upstream.recorded[0]?.headers['accept-encoding']).toBe('identity')
+  })
+
+  it('passes a non-document response through untouched', async () => {
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('plain')
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    expect(await (await fetch(proxy.origin() + '/')).text()).toBe('plain')
+  })
+
+  it('serves the stock document when the upstream contract is unsupported', async () => {
+    const unsupported = '<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = {"rev":"x","entries":[]};</script></head><body>stock</body></html>'
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': String(Buffer.byteLength(unsupported)) })
+      response.end(unsupported)
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const response = await fetch(proxy.origin() + '/')
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe(unsupported)
   })
 
   it('forwards WebSocket upgrades to any path (plugin channels like /sidebar/ws/*)', async () => {
