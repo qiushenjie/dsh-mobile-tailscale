@@ -2,6 +2,18 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.3.4
+
+- Export `isSupportedDshVersion` and `warnUnsupportedDshVersion` from the package root alongside the existing `assertSupportedDshVersion`, so the whole compatibility gate is reachable from the public API. No behavior change: activation already used the non-throwing path added in 0.3.3.
+- Add `0.1.2-rc.1` to the `@deepseek-ai/*` peer ranges so the declared compatibility set matches `SUPPORTED_DSH_VERSIONS` (and `check:dsh-compatibility`, which reads those ranges as the verified set).
+- Add [TROUBLESHOOTING.md](TROUBLESHOOTING.md): the recorded diagnostic chain for the Safe Mode brick, the `ERR_PNPM_UNEXPECTED_STORE` / ignored `pnpm.overrides` install hazard, the `ready`-but-unreachable remote channel, and generation peer validation.
+
+## 0.3.3
+
+- **An unverified Host version no longer aborts activation.** `assertSupportedDshVersion` threw from the first statement of `apply()`, so a version outside the verified set failed its loader entry, failed the whole plugin tree, and made DSH Desktop stop the harness and fall back to its safe-mode profile with **every** third-party plugin disabled. Activation now warns (`DSH_MOBILE_UNVERIFIED_DSH_VERSION`) and continues; the strict assert remains available for callers that want it.
+- **Verified against DeepSeek Harness `0.1.2-rc.1`** (DSH Desktop 0.8.2). The frontend boot contract was unchanged: the bundled layout module's `dsh.client.inject` still matches the renderer-v2 dependency profile exactly.
+- **Fix a 30-day timer overflow on the remote channel.** The pairing-free remote guest authorization used a 30-day (`2 592 000 000 ms`) expiry, and the derived abort/close delays were passed straight to `setTimeout`, which truncates any delay above `2^31 - 1 ms` (~24.85 days) to **1 ms**. Every remote request and WebSocket was therefore aborted immediately, logging `TimeoutOverflowWarning` and `upstream_unavailable (socket hang up)` in the harness log. Session-derived delays are now clamped to `MAX_TIMER_DELAY_MS`.
+
 ## 0.3.2 - 2026-08-29
 
 - **Remote channel no longer hardcodes the web port.** Tailscale Serve now targets a plugin-owned loopback passthrough proxy that resolves the live upstream from the host `webServer` service per request (falling back to `DSH_WEB_URL`, then `upstreamOrigin`). The remote channel follows DSH Desktop's random per-launch web port automatically — no manual `tailscale serve` re-pointing after restarts.
