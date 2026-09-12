@@ -156,3 +156,14 @@ async function checkAndroid() {
     checkPng(`apps/mobile/android/app/src/main/res/mipmap-${density}/ic_launcher.png`, size, size, true)))
 }
 
+async function main() {
+  await checkBrandAndStoreIcon()
+  await checkAndroid()
+  console.log('mobile release assets ok: brand artwork, store icon, Android manifest, network security, and bridge contracts verified')
+}
+
+main().catch((error) => {
+  console.error(`mobile release check failed: ${error instanceof Error ? error.message : String(error)}`)
+  process.exitCode = 1
+})
+

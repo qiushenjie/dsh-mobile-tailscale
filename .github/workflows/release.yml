@@ -120,12 +120,20 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          package="$(find "$GITHUB_WORKSPACE/release-assets" -maxdepth 1 -type f -name 'dsh-mobile-*.tgz' -print -quit)"
+          # Read the published name out of the tarball instead of hardcoding it.
+          # The idempotence probe used to query `dsh-mobile`, the upstream
+          # package, while this package is `dsh-mobile-tailscale`. Upstream has
+          # published the same version numbers, so the probe matched, the step
+          # reported "already published", and this package was never published —
+          # while the GitHub release was still created.
+          package="$(find "$GITHUB_WORKSPACE/release-assets" -maxdepth 1 -type f -name '*.tgz' -print -quit)"
           test -n "$package"
+          name="$(tar xzOf "$package" package/package.json | node -pe 'JSON.parse(require("fs").readFileSync(0, "utf8")).name')"
+          test -n "$name"
           version="${GITHUB_REF_NAME#v}"
-          published="$(npm view "dsh-mobile@$version" version 2>/dev/null || true)"
+          published="$(npm view "$name@$version" version 2>/dev/null || true)"
           if [ "$published" = "$version" ]; then
-            echo "dsh-mobile@$version is already published; leaving the immutable npm release unchanged."
+            echo "$name@$version is already published; leaving the immutable npm release unchanged."
             exit 0
           fi
           if [ -n "$NODE_AUTH_TOKEN" ]; then
