@@ -198,7 +198,10 @@ function MobileAppFrame(props: MobileRootProps & { readonly controller: MobileLa
 
   const closeDrawerAfterSessionAction = (event: { readonly target: EventTarget | null }): void => {
     if (!(event.target instanceof Element)) return
-    const row = event.target.closest<HTMLElement>('[role="treeitem"][aria-selected]')
+    // `:not([aria-expanded])` keeps the Workspace (project) header out: it is a
+    // treeitem too, but its click toggles the nested session list in place and
+    // must leave the drawer open. Only a session row is a selection.
+    const row = event.target.closest<HTMLElement>('[role="treeitem"][aria-selected]:not([aria-expanded])')
     const action = event.target.closest('button,[role="button"]')
     const startsSession = action?.matches('button[class*="_newSession"],button[class*="_brand"]')
       || /新建会话|新会话|new session|new conversation/i.test(action?.getAttribute('aria-label') ?? '')

@@ -6,6 +6,13 @@ function fakeElement(closest: Element | null): Element {
   return { closest: () => closest } as unknown as Element
 }
 
+/** Stand-in for a sidebar row; `aria-expanded` is the only state the guard reads. */
+function fakeRow(ariaExpanded: string | null): Element {
+  return {
+    getAttribute: (name: string) => (name === 'aria-expanded' ? ariaExpanded : null),
+  } as unknown as Element
+}
+
 /** Stand-in for a focus target with fixed `matches` and configurable containment. */
 function fakeFocusTarget(matches: boolean, inComposer: boolean, inMenu = false): Element {
   return {
@@ -79,7 +86,7 @@ describe('native mobile presentation', () => {
   })
 
   it('treats a row control as a control, not as selecting the row', () => {
-    const row = {} as unknown as Element
+    const row = fakeRow(null)
     // A plain row body (no interactive ancestor) selects the row.
     expect(selectsSidebarRow(fakeElement(null), row)).toBe(true)
     // The row itself being the interactive element still selects it.
@@ -87,6 +94,23 @@ describe('native mobile presentation', () => {
     // The ellipsis menu button inside the row must not collapse the sidebar and
     // tear its own open menu down.
     expect(selectsSidebarRow(fakeElement({} as unknown as Element), row)).toBe(false)
+  })
+
+  it('keeps the sidebar open when a project header toggles its session list', () => {
+    // The Workspace (project) header is a `role="treeitem"` too, but it carries
+    // `aria-expanded` and no `aria-selected`: its click opens/closes the nested
+    // session list in place. Counting it as a selection closed the drawer over
+    // the list the user had just opened.
+    const expanded = fakeRow('true')
+    const collapsed = fakeRow('false')
+    // The title/folder spans resolve to no interactive ancestor, which is
+    // exactly the case the control check alone would have called a selection.
+    expect(selectsSidebarRow(fakeElement(null), expanded)).toBe(false)
+    expect(selectsSidebarRow(fakeElement(null), collapsed)).toBe(false)
+    // Nor may the header count as a selection when it is its own click target.
+    expect(selectsSidebarRow(fakeElement(expanded), expanded)).toBe(false)
+    // A session row never announces `aria-expanded`, so it still collapses.
+    expect(selectsSidebarRow(fakeElement(null), fakeRow(null))).toBe(true)
   })
 
   it('guards only the composer editor against programmatic focus', () => {

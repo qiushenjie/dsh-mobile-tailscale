@@ -274,17 +274,25 @@ export function isComposerEditorFocus(target: Element): boolean {
 
 /**
  * Whether a sidebar click selected the row itself rather than one of the row's
- * own controls.
+ * own controls or an expand/collapse toggle.
  *
  * Collapsing the sidebar after a row selection is a portrait affordance, but a
  * row also hosts its action controls (the ellipsis menu, add-session). Treating
  * those as a selection collapsed the sidebar right after the menu opened, which
  * tore the menu down and read as a jump into the conversation.
+ *
+ * A Workspace (project) header is also a `role="treeitem"`, but its click
+ * expands or collapses the session list nested beneath it instead of opening a
+ * session. Only an expandable row announces `aria-expanded`, and a session row
+ * never carries it, so that attribute is what separates a toggle from a
+ * selection. Without this check, opening a project collapsed the drawer 240ms
+ * later and read as jumping into one of its sessions.
  * @param target - Event target inside the row.
  * @param row - The enclosing `role="treeitem"` row.
  * @returns Whether the click should be treated as a row selection.
  */
 export function selectsSidebarRow(target: Element, row: Element): boolean {
+  if (row.getAttribute('aria-expanded') !== null) return false
   const action = target.closest(ROW_CONTROL_SELECTOR)
   return action === null || action === row
 }
