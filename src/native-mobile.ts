@@ -545,8 +545,17 @@ export function installNativeMobileSurface(): () => void {
 
   const sync = (): void => {
     scheduled = 0
-    frame = firstByClassSuffix(document, '_frame')
     const dedicatedCenter = document.querySelector<HTMLElement>('.dshm-main') ?? undefined
+    // Only the stock layout module ships `_frame` *and* `_centerCol`. Other DSH
+    // modules (chat TurnNavigator, attachment, plan-review, subagent) also ship
+    // `*_frame` classes, and inside the dedicated shell the conversation hosts
+    // one of them first — so a bare class probe picks that node, `_centerCol` is
+    // nowhere below it, and `center` falls into the `center === undefined` return
+    // that silently skips every DOM adaptation below (history paging included).
+    const stockFrame = dedicatedCenter === undefined ? firstByClassSuffix(document, '_frame') : undefined
+    frame = stockFrame !== undefined && firstByClassSuffix(stockFrame, '_centerCol') !== undefined
+      ? stockFrame
+      : undefined
     if (frame !== undefined) frame.dataset.dshMobileFrame = 'true'
     sidebar = frame === undefined
       ? document.querySelector<HTMLElement>('.dshm-drawer') ?? undefined
