@@ -2,6 +2,11 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.3.20
+
+- **The 移动访问 panel now shows a phone the address it needs and nothing else.** 下载 Android App is gone, and 局域网 keeps only the browser address: the 生成并复制密钥 / 复制配对链接 buttons, the pairing QR, the device list behind 管理配对设备 and 清除所有设备, the 扩展：N 个已加载 line and the 开启/关闭局域网访问 toggle were removed together with the request handlers, the render state and the now-dead styles behind them (108 lines removed, 9 added). The LAN gateway keeps the state it already persisted (`control.json`), so the address a phone already opens stays served, and 远程访问 / 诊断 are untouched. Pairing keys are no longer generated from the desktop panel, so the Android app's key/QR pairing has no desktop counterpart left — the LAN address is the supported path.
+- **The 移动访问 row in the sidebar footer is left-aligned with the rows above it.** The trigger was `justify-content: center` with a 10 px inset while 余额 / 今日 are drawn by `dsh-cost-meter` with an 8 px inset, so the row sat visibly inboard of them; it now uses `justify-content: flex-start` and the same 8 px inset. The collapsed rail keeps its centred icon.
+
 ## 0.3.19
 
 - **A dedicated layout for DSH 0.1.7's layout generation, behind an explicit switch.** The generation that ships `main` (keyed), `rightbar` and `shell.leading` replaced the `conversation`/`details` root this plugin's layout module implements, so since 0.3.11 a phone has rendered DSH's desktop frame with the plugin's surface adaptation on top. A CDP trace of one left-sidebar toggle on that frame measured 591 ms of main-thread work at 6x CPU throttling — 141 ms of React click handling, 99 ms of style recalculation, 106 ms of paint, 48 ms of layout — and none of it was this plugin's code (`MutationObserver` disabled: 634 ms; transitions disabled: 562 ms). `mobile-layout-next.js` implements the same contract for a phone: the sidebar and right panel become drawers, the keyed `main` slot renders the selected panel full width, and the service consumers call (`toggleSidebar`, `selectPanel`, `panelInfo`, `beginNavigation`, `openRightbar`, `closeRightbar`, `dispose`) is provided by this module. `/mobile-access/mobile-layout-next.js` is served by the gateway and by the remote proxy.
