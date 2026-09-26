@@ -2,6 +2,10 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.3.7
+
+- **The sidebar launcher's wrap rule reached every ancestor of the button.** `CONTROL_STYLES` scoped it as `div:has(.dsh-mobile-control__trigger)`, and `:has()` matches *any* div holding the trigger as a descendant — not just the immediate container. On DSH Desktop 2.0.10 that ancestor chain happened to be inert; on 2.0.15-next the sidebar was rebuilt (the footer slot is now a column flex box with its own height cap and scroller), so `flex-wrap: wrap` landed on unrelated ancestors and the layout jittered on every re-render — reported as the settings UI flickering on click. The selector now requires the trigger as a **direct child** (`div:has(> …)`), so only the launcher's own row is affected. This only became reachable once 0.3.6 let the plugin load on that runtime; the rule itself predates it.
+
 ## 0.3.6
 
 - **Support DeepSeek Harness `0.1.7-rc.2`** (DSH Desktop 2.0.15-next) by declaring it in the `@deepseek-ai/*` peer ranges and in `SUPPORTED_DSH_VERSIONS`. Every frontend contract this plugin depends on was checked against that runtime before declaring it:
