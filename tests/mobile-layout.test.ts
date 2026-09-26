@@ -545,3 +545,65 @@ describe('phone session window cap', () => {
     expect(dispatchedByBootstrap(String(output), other)).toBe(other)
   })
 })
+
+describe('current-generation dedicated layout', () => {
+  // DSH 0.1.7's layout injects `@deepseek-ai/dsh-client-shortcuts` and declares
+  // `main` (keyed), `rightbar` and `shell.leading`; this plugin ships a second
+  // layout module for that contract, served only on an explicit opt-in.
+  const markerEntries = [
+    { id: '@deepseek-ai/dsh-client-runtime', url: '/runtime.js', rev: 'runtime' },
+    {
+      id: '@deepseek-ai/dsh-client-ui-layout',
+      url: '/layout.js',
+      rev: 'layout',
+      inject: [
+        '@deepseek-ai/dsh-client-runtime',
+        '@deepseek-ai/dsh-client-ui-theme',
+        '@deepseek-ai/dsh-client-shortcuts',
+      ],
+    },
+    { id: packageName, url: '/mobile.js', rev: 'mobile' },
+  ]
+  const legacyEntries = [
+    { id: '@deepseek-ai/dsh-client-runtime', url: '/runtime.js', rev: 'runtime' },
+    {
+      id: '@deepseek-ai/dsh-client-ui-layout',
+      url: '/layout.js',
+      rev: 'layout',
+      inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-theme'],
+    },
+    { id: packageName, url: '/mobile.js', rev: 'mobile' },
+  ]
+  const layoutEntry = (html: string): { url?: string | undefined; rev?: string | undefined } => {
+    const match = /\{"id":"@deepseek-ai\/dsh-client-ui-layout","url":"([^"]*)","rev":"([^"]*)"/u.exec(html)
+    return match === null ? {} : { url: match[1], rev: match[2] }
+  }
+
+  it('keeps DSH own layout on the current generation unless mobileLayout is mobile', () => {
+    const source = currentIndex(markerEntries)
+    for (const output of [rewriteMobileIndex(source), rewriteMobileIndex(source, 'auto'), rewriteMobileIndex(source, 'stock')]) {
+      expect(layoutEntry(output).url).toBe('/layout.js')
+    }
+    const remote = rewriteRemoteMobileIndexWithBatches(source, 'auto')
+    expect(layoutEntry(remote.html).url).toBe('/layout.js')
+  })
+
+  it('serves the current-generation layout module when asked', () => {
+    const source = currentIndex(markerEntries)
+    for (const output of [
+      rewriteMobileIndex(source, 'mobile'),
+      rewriteRemoteMobileIndex(source, 'mobile'),
+      rewriteRemoteMobileIndexWithBatches(source, 'mobile').html,
+    ]) {
+      expect(layoutEntry(output).url).toBe('/mobile-access/mobile-layout-next.js')
+      expect(layoutEntry(output).rev).toMatch(/^dsh-mobile-layout-next-/u)
+    }
+  })
+
+  it('does not serve the current-generation module to an older manifest', () => {
+    const source = currentIndex(legacyEntries)
+    // `mobile` may replace only the generation the module implements: an older
+    // three-child root still needs the original dedicated layout.
+    expect(layoutEntry(rewriteMobileIndex(source, 'mobile')).url).toBe('/mobile-access/mobile-layout.js')
+  })
+})

@@ -63,4 +63,20 @@ export default defineConfig([{
     intro: 'var module = { exports: {} }; var exports = module.exports;',
     footer: 'return module.exports; } });',
   },
+}, {
+  entry: { 'mobile-layout-next': 'src/mobile-layout-next.ts' },
+  outDir: 'lib',
+  format: ['cjs'],
+  platform: 'browser',
+  target: 'es2022',
+  dts: false,
+  sourcemap: true,
+  clean: false,
+  deps: { neverBundle: ['react', '@deepseek-ai/dsh-client-store'] },
+  outputOptions: {
+    entryFileNames: 'mobile-layout-next.js',
+    banner: 'window.__ModuleLoader__.load({ id: "@deepseek-ai/dsh-client-ui-layout", factory: (require) => {',
+    intro: 'var module = { exports: {} }; var exports = module.exports;',
+    footer: 'return module.exports; } });',
+  },
 }])

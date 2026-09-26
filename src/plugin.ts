@@ -280,6 +280,8 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     upstreamTimeoutMs: template.upstreamTimeoutMs,
     maxBodyBytes: template.maxBodyBytes,
     maxWebSockets: template.maxWebSockets,
+    mobileLayoutNextFile: template.mobileLayoutNextFile,
+    mobileLayout: template.mobileLayout,
   })
   const remoteControllers = {
     tailscale: new TailscaleServeController({

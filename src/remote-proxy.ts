@@ -24,6 +24,7 @@ import {
   type ServerResponse,
 } from 'node:http'
 import { connect, type Socket } from 'node:net'
+import { readFile } from 'node:fs/promises'
 import {
   HttpError,
   LOCAL_ADMIN_PREFIX,
@@ -31,6 +32,7 @@ import {
   sendFailure,
 } from './http-security.js'
 import {
+  MOBILE_LAYOUT_NEXT_PATH,
   mobileBootBatchKey,
   MobileBootBatchStore,
   mobileHistoryRequestBody,
@@ -45,6 +47,7 @@ import {
   websocketAccept,
   type MobileBootBatchEntry,
   type MobileBootBatchPlan,
+  type MobileLayoutMode,
 } from './gateway.js'
 
 /**
@@ -90,6 +93,10 @@ export interface RemotePassthroughProxyOptions {
   readonly upstreamTimeoutMs?: number
   readonly maxBodyBytes?: number
   readonly maxWebSockets?: number
+  /** Dedicated layout bundle for the current DSH layout generation. */
+  readonly mobileLayoutNextFile?: string
+  /** Whether the served document may replace the upstream layout at all. */
+  readonly mobileLayout?: MobileLayoutMode
 }
 
 interface ActiveWebSocket {
@@ -243,6 +250,24 @@ export class RemotePassthroughProxy {
       await sendMobileBootBatch(request, response, payload, false)
       return
     }
+    // A rewritten document may point its layout entry at the dedicated module
+    // this plugin ships; the proxy owns that origin, so it answers the file
+    // itself instead of letting the request fall through to upstream, which
+    // only knows its own layout bundle.
+    if (target.decodedPathname === MOBILE_LAYOUT_NEXT_PATH) {
+      if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'method_not_allowed')
+      const file = this.options.mobileLayoutNextFile
+      if (file === undefined) throw new HttpError(404, 'not_found')
+      const body = await readFile(file, { signal: AbortSignal.timeout(this.upstreamTimeoutMs()) })
+      response.writeHead(200, {
+        'Content-Type': 'text/javascript; charset=utf-8',
+        'Content-Length': body.byteLength,
+        'Cache-Control': 'private, no-cache',
+      })
+      if (method === 'HEAD') response.end()
+      else response.end(body)
+      return
+    }
     // The page's module controller also syncs to the stock graph pushed over the
     // HMR event stream, which asks for a pruned module directly; see
     // {@link prunedClientModuleRequest}.
@@ -344,7 +369,7 @@ export class RemotePassthroughProxy {
     let body = raw
     if (rewritable) {
       try {
-        const rewritten = rewriteRemoteMobileIndexWithBatches(raw.toString('utf8'))
+        const rewritten = rewriteRemoteMobileIndexWithBatches(raw.toString('utf8'), this.options.mobileLayout ?? 'auto')
         for (const plan of rewritten.batches ?? []) this.bootBatches.remember(plan)
         body = Buffer.from(rewritten.html)
       } catch (error) {

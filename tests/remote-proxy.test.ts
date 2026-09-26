@@ -7,6 +7,9 @@ import {
   type ServerResponse,
 } from 'node:http'
 import { createRequire } from 'node:module'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RemotePassthroughProxy } from '../src/remote-proxy.js'
 import { websocketAccept } from '../src/gateway.js'
@@ -194,6 +197,41 @@ describe('RemotePassthroughProxy', () => {
     expect(body).toContain('"/plugins/layout.js"')
     // The document has to arrive uncompressed for the rewrite to apply.
     expect(upstream.recorded[0]?.headers['accept-encoding']).toBe('identity')
+  })
+
+  it('replaces the current-generation layout and serves that module itself when asked', async () => {
+    // The layout module for the generation DSH 0.1.7 ships is served from this
+    // proxy's own loopback listener: the request never reaches upstream, which
+    // only knows its own layout bundle.
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      response.write(bootDocument().replace(
+        '"inject":["@deepseek-ai/dsh-client-locale","@deepseek-ai/dsh-client-ui-renderer","@deepseek-ai/dsh-client-ui-session","@deepseek-ai/dsh-client-ui-theme"]',
+        '"inject":["@deepseek-ai/dsh-client-locale","@deepseek-ai/dsh-client-ui-renderer","@deepseek-ai/dsh-client-ui-session","@deepseek-ai/dsh-client-ui-theme","@deepseek-ai/dsh-client-shortcuts"]',
+      ))
+      response.end()
+    })
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-mobile-layout-'))
+    const layoutFile = join(directory, 'mobile-layout-next.js')
+    await writeFile(layoutFile, 'globalThis.__dedicatedMobileLayoutNext = true;\n', 'utf8')
+    const proxy = new RemotePassthroughProxy({
+      resolveUpstream: () => new URL(upstream.origin),
+      mobileLayout: 'mobile',
+      mobileLayoutNextFile: layoutFile,
+    })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const document = await (await fetch(proxy.origin() + '/')).text()
+    expect(document).toContain('"url":"/mobile-access/mobile-layout-next.js"')
+    expect(document).toContain('"rev":"dsh-mobile-layout-next-')
+
+    const module = await fetch(proxy.origin() + '/mobile-access/mobile-layout-next.js')
+    expect(module.status).toBe(200)
+    expect(module.headers.get('content-type')).toBe('text/javascript; charset=utf-8')
+    expect(await module.text()).toBe('globalThis.__dedicatedMobileLayoutNext = true;\n')
+    // Upstream never sees the layout request.
+    expect(upstream.recorded.some(record => record.path.includes('mobile-layout-next'))).toBe(false)
   })
 
   it('serves a pruned boot batch itself instead of the stock combined request', async () => {

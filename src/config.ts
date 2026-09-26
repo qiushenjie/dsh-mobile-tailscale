@@ -42,6 +42,15 @@ export interface PluginConfig {
   customScriptFile?: string
   /** Internal dedicated mobile layout browser bundle. */
   mobileLayoutFile?: string
+  /** Internal dedicated mobile layout bundle for the current DSH layout generation. */
+  mobileLayoutNextFile?: string
+  /**
+   * Which layout a phone gets: `auto` keeps DSH's own layout unless this plugin
+   * implements the generation the manifest was built for, `mobile` also serves
+   * the dedicated mobile layout on the current generation, `stock` never
+   * replaces the layout.
+   */
+  mobileLayout?: 'auto' | 'mobile' | 'stock'
   /** Stable public discovery identifier; it is not an authentication secret. */
   instanceId?: string
   /** Managed CA certificate offered to the Android installer after fingerprint binding. */
@@ -82,6 +91,9 @@ export interface ResolvedGatewayConfig {
   readonly customCssFile: string
   readonly customScriptFile: string
   readonly mobileLayoutFile: string
+  /** Dedicated layout bundle for the layout generation that DSH 0.1.7 ships. */
+  readonly mobileLayoutNextFile: string
+  readonly mobileLayout: 'auto' | 'mobile' | 'stock'
   readonly instanceId: string
   readonly pairingCaFile?: string
   readonly tls: TlsConfig
@@ -118,6 +130,8 @@ export const Config: z<PluginConfig> = z.object({
   customCssFile: z.string().hidden(),
   customScriptFile: z.string().hidden(),
   mobileLayoutFile: z.string().hidden(),
+  mobileLayoutNextFile: z.string().hidden(),
+  mobileLayout: z.union([z.const('auto'), z.const('mobile'), z.const('stock')]).default('auto'),
   instanceId: z.string().hidden(),
   pairingCaFile: z.string().hidden(),
   initiallyEnabled: z.boolean().hidden().required(),
@@ -293,6 +307,10 @@ export function parseGatewayConfig(raw: unknown): ResolvedGatewayConfig {
     mobileLayoutFile: value.mobileLayoutFile === undefined
       ? fileURLToPath(new URL('./mobile-layout.js', import.meta.url))
       : absoluteFile(value.mobileLayoutFile, 'mobileLayoutFile'),
+    mobileLayoutNextFile: value.mobileLayoutNextFile === undefined
+      ? fileURLToPath(new URL('./mobile-layout-next.js', import.meta.url))
+      : absoluteFile(value.mobileLayoutNextFile, 'mobileLayoutNextFile'),
+    mobileLayout: value.mobileLayout ?? 'auto',
     instanceId: value.instanceId === undefined
       ? createHash('sha256').update(absoluteFile(value.stateFile, 'stateFile')).digest('hex')
       : /^[a-f\d]{64}$/u.test(value.instanceId)

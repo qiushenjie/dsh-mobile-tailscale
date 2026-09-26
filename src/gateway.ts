@@ -117,6 +117,7 @@ const DISCOVERY_INTERVAL_MS = 3_000
 const MDNS_SERVICE_TYPE = 'dsh-mobile'
 const MOBILE_LAYOUT_MODULE = '@deepseek-ai/dsh-client-ui-layout'
 const MOBILE_LAYOUT_PATH = `${AUTH_PREFIX}/mobile-layout.js`
+export const MOBILE_LAYOUT_NEXT_PATH = `${AUTH_PREFIX}/mobile-layout-next.js`
 const MOBILE_BOOT_BATCH_PREFIX = `${AUTH_PREFIX}/mobile-boot/`
 const MAX_MOBILE_BOOT_BATCH_BYTES = 32 * 1024 * 1024
 const MAX_MOBILE_BOOT_ENTRY_BYTES = 8 * 1024 * 1024
@@ -372,6 +373,13 @@ export interface MobileBootBatchPlan {
   readonly upstream: { readonly url: string; readonly rev: string }
   readonly entries: readonly MobileBootBatchEntry[]
 }
+
+/**
+ * Which layout a phone page gets. `auto` replaces only the layout generations
+ * this plugin implements, `mobile` also replaces the current one, and `stock`
+ * never replaces the upstream layout.
+ */
+export type MobileLayoutMode = 'auto' | 'mobile' | 'stock'
 
 /** Result of a rewritten index: the document plus the batches it now points at. */
 export interface RewrittenMobileIndex {
@@ -672,6 +680,34 @@ function supportsDedicatedLayout(entry: BootGraphEntry): boolean {
 }
 
 /**
+ * Which dedicated layout the served manifest should activate, if any.
+ *
+ * Two generations are implemented: `mobile-layout.js` declares the root's
+ * children as `conversation`/`details`, which is what every DSH before the
+ * current one built, and `mobile-layout-next.js` declares the current
+ * generation's `main` (keyed), `rightbar` and `shell.leading`. Serving the wrong
+ * one renders a page whose conversation lands in a slot nobody declares, so the
+ * choice follows the upstream dependency profile and an explicit configuration
+ * decides whether the current generation is replaced at all.
+ * @param entry - Boot-manifest entry for the upstream layout module.
+ * @param mode - `auto` (only generations this plugin implements), `mobile`
+ * (also the current generation) or `stock` (never replace the layout).
+ * @returns The path and revision to activate, or undefined for the stock layout.
+ */
+function dedicatedLayoutTarget(
+  entry: BootGraphEntry,
+  mode: MobileLayoutMode,
+): { readonly path: string; readonly rev: string } | undefined {
+  if (mode === 'stock') return undefined
+  if (supportsDedicatedLayout(entry)) {
+    return { path: MOBILE_LAYOUT_PATH, rev: `dsh-mobile-layout-${DSH_MOBILE_VERSION}` }
+  }
+  return mode === 'mobile'
+    ? { path: MOBILE_LAYOUT_NEXT_PATH, rev: `dsh-mobile-layout-next-${DSH_MOBILE_VERSION}` }
+    : undefined
+}
+
+/**
  * Drop {@link DESKTOP_SHELL_ONLY_MODULES} and {@link MOBILE_BOOT_EXCLUDED_MODULES}
  * from the manifest before it is served.
  *
@@ -845,7 +881,7 @@ function planMobileBootBatches(entries: BootGraphEntry[], batches: BootGraphBatc
   return Object.freeze(plans)
 }
 
-export function rewriteMobileIndexWithBatches(html: string): RewrittenMobileIndex {
+export function rewriteMobileIndexWithBatches(html: string, layoutMode: MobileLayoutMode = 'auto'): RewrittenMobileIndex {
   const site = locateBootManifest(html)
   const parsed = site.parsed
   const entries = parsed.entries as BootGraphEntry[]
@@ -863,10 +899,10 @@ export function rewriteMobileIndexWithBatches(html: string): RewrittenMobileInde
   // keeps the native surface adaptation, which is what the remote channel has
   // always done — substituting an unimplemented contract renders a page with no
   // conversation in it.
-  const dedicatedLayout = supportsDedicatedLayout(layout.entry)
-  if (dedicatedLayout) {
-    layout.entry.url = MOBILE_LAYOUT_PATH
-    layout.entry.rev = `dsh-mobile-layout-${DSH_MOBILE_VERSION}`
+  const dedicatedLayout = dedicatedLayoutTarget(layout.entry, layoutMode)
+  if (dedicatedLayout !== undefined) {
+    layout.entry.url = dedicatedLayout.path
+    layout.entry.rev = dedicatedLayout.rev
   }
   const remoteSettings = orderAuthenticatedSettings(entries, layout.slots)
 
@@ -888,8 +924,8 @@ export function rewriteMobileIndexWithBatches(html: string): RewrittenMobileInde
 }
 
 /** Replace only DSH's layout client module while retaining its complete plugin graph. */
-export function rewriteMobileIndex(html: string): string {
-  return rewriteMobileIndexWithBatches(html).html
+export function rewriteMobileIndex(html: string, layoutMode: MobileLayoutMode = 'auto'): string {
+  return rewriteMobileIndexWithBatches(html, layoutMode).html
 }
 
 /**
@@ -911,12 +947,21 @@ export function rewriteMobileIndex(html: string): string {
  * @param html - Upstream DSH index document.
  * @returns The document plus the batch plans the caller has to serve itself.
  */
-export function rewriteRemoteMobileIndexWithBatches(html: string): RewrittenMobileIndex {
+export function rewriteRemoteMobileIndexWithBatches(html: string, layoutMode: MobileLayoutMode = 'auto'): RewrittenMobileIndex {
   const site = locateBootManifest(html)
   const entries = site.parsed.entries as BootGraphEntry[]
   const batches = Array.isArray(site.parsed.batches) ? site.parsed.batches as BootGraphBatch[] : undefined
   pruneUnavailableClientModules(entries, batches)
-  orderAuthenticatedSettings(entries, requireLayoutModule(entries).slots)
+  const layout = requireLayoutModule(entries)
+  // This channel has always kept DSH's own layout for the generation it already
+  // replaced on the gateway (the proxy owns this origin and only started serving
+  // a layout bundle for the current generation), so `auto` stays out of the way
+  // and only the explicit opt-in replaces the current generation's frame.
+  if (layoutMode === 'mobile' && !supportsDedicatedLayout(layout.entry)) {
+    layout.entry.url = MOBILE_LAYOUT_NEXT_PATH
+    layout.entry.rev = `dsh-mobile-layout-next-${DSH_MOBILE_VERSION}`
+  }
+  orderAuthenticatedSettings(entries, layout.slots)
   const mobileBatches = batches === undefined ? Object.freeze([]) : planMobileBootBatches(entries, batches)
   if (mobileBatches.length > 0) {
     site.parsed.rev = createHash('sha256').update(JSON.stringify({ entries, batches })).digest('hex').slice(0, 16)
@@ -934,8 +979,8 @@ export function rewriteRemoteMobileIndexWithBatches(html: string): RewrittenMobi
  * @param html - Upstream DSH index document.
  * @returns The rewritten document.
  */
-export function rewriteRemoteMobileIndex(html: string): string {
-  return rewriteRemoteMobileIndexWithBatches(html).html
+export function rewriteRemoteMobileIndex(html: string, layoutMode: MobileLayoutMode = 'auto'): string {
+  return rewriteRemoteMobileIndexWithBatches(html, layoutMode).html
 }
 
 const PAIR_SCRIPT = `(() => {
@@ -1881,6 +1926,12 @@ export class MobileAccessGateway {
                 contentType: 'text/javascript; charset=utf-8',
                 fallback: undefined,
               }
+          : target.decodedPathname === MOBILE_LAYOUT_NEXT_PATH
+            ? {
+                file: this.config.mobileLayoutNextFile,
+                contentType: 'text/javascript; charset=utf-8',
+                fallback: undefined,
+              }
           : undefined
       : undefined
     if (customAsset === undefined && requestedMobileBootBatch === undefined && !computerImages && !computerImage
@@ -2263,7 +2314,7 @@ export class MobileAccessGateway {
       }
       let body: Buffer
       try {
-        const rewritten = rewriteMobileIndexWithBatches(Buffer.concat(chunks).toString('utf8'))
+        const rewritten = rewriteMobileIndexWithBatches(Buffer.concat(chunks).toString('utf8'), this.config.mobileLayout)
         for (const plan of rewritten.batches ?? []) this.mobileBootBatches.remember(plan)
         body = Buffer.from(rewritten.html)
       } catch {
@@ -2790,6 +2841,12 @@ export class MobileAccessGateway {
                 : target.decodedPathname === MOBILE_LAYOUT_PATH
                   ? {
                       file: this.config.mobileLayoutFile,
+                      contentType: 'text/javascript; charset=utf-8',
+                      fallback: undefined,
+                    }
+                : target.decodedPathname === MOBILE_LAYOUT_NEXT_PATH
+                  ? {
+                      file: this.config.mobileLayoutNextFile,
                       contentType: 'text/javascript; charset=utf-8',
                       fallback: undefined,
                     }
