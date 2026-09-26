@@ -926,11 +926,11 @@ describe('HTTP gateway', () => {
       'content-type': 'application/json',
       'accept-encoding': 'gzip',
     }
-    const historyRequest = (maxMessages: number): string => JSON.stringify({
+    const historyRequest = (maxMessages: number, turnWindow?: { minMessages: number; minTurns: number }): string => JSON.stringify({
       type: 'client-request',
       rpcId: crypto.randomUUID(),
       method: 'session.history',
-      payload: { sessionId: 'session-example', maxMessages },
+      payload: { sessionId: 'session-example', maxMessages, ...(turnWindow === undefined ? {} : { turnWindow }) },
     })
 
     const compressed = await request(instance.address().port, SESSION_HISTORY_PATH, {
@@ -953,6 +953,17 @@ describe('HTTP gateway', () => {
       body: historyRequest(5),
     })
     expect(JSON.parse(inner.observations.at(-1)?.body ?? '{}')).toMatchObject({ payload: { maxMessages: 5 } })
+
+    // The browser client asks for a Turn window wider than the mobile page;
+    // narrowing only maxMessages would make the request invalid upstream.
+    await request(instance.address().port, SESSION_HISTORY_PATH, {
+      method: 'POST',
+      headers: { ...headers, 'accept-encoding': 'identity' },
+      body: historyRequest(500, { minMessages: 200, minTurns: 2 }),
+    })
+    expect(JSON.parse(inner.observations.at(-1)?.body ?? '{}')).toMatchObject({
+      payload: { maxMessages: 10, turnWindow: { minMessages: 10, minTurns: 2 } },
+    })
   })
 
   it('renews, logs out, and revokes without exposing the persistent credential to the app path', async () => {

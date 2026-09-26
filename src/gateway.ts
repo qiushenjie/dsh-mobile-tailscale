@@ -1053,7 +1053,11 @@ function isJsonRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function mobileHistoryRequestBody(request: IncomingMessage, body: Buffer): Buffer {
+export function mobileHistoryRequestBody(
+  request: IncomingMessage,
+  body: Buffer,
+  pageMessages: number = MOBILE_HISTORY_PAGE_MESSAGES,
+): Buffer {
   if (request.method !== 'POST' || request.url?.split('?', 1)[0] !== SESSION_HISTORY_PATH) return body
   let parsed: unknown
   try {
@@ -1063,13 +1067,18 @@ function mobileHistoryRequestBody(request: IncomingMessage, body: Buffer): Buffe
   }
   if (!isJsonRecord(parsed) || parsed.method !== 'session.history' || !isJsonRecord(parsed.payload)) return body
   const requested = parsed.payload.maxMessages
-  if (typeof requested === 'number' && Number.isInteger(requested) && requested > 0 && requested <= MOBILE_HISTORY_PAGE_MESSAGES) {
+  if (typeof requested === 'number' && Number.isInteger(requested) && requested > 0 && requested <= pageMessages) {
     return body
   }
-  return Buffer.from(JSON.stringify({
-    ...parsed,
-    payload: { ...parsed.payload, maxMessages: MOBILE_HISTORY_PAGE_MESSAGES },
-  }))
+  const payload: Record<string, unknown> = { ...parsed.payload, maxMessages: pageMessages }
+  // The client's Turn window is a preference rather than a server requirement,
+  // but a window that demands more messages than the page we ask for makes the
+  // request invalid (`turnWindow.minMessages` must not exceed `maxMessages`).
+  const window = parsed.payload.turnWindow
+  if (isJsonRecord(window) && typeof window.minMessages === 'number' && window.minMessages > pageMessages) {
+    payload.turnWindow = { ...window, minMessages: pageMessages }
+  }
+  return Buffer.from(JSON.stringify({ ...parsed, payload }))
 }
 
 function addVaryAcceptEncoding(headers: OutgoingHttpHeaders): void {

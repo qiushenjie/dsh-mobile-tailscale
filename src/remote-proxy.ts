@@ -33,6 +33,7 @@ import {
 import {
   mobileBootBatchKey,
   MobileBootBatchStore,
+  mobileHistoryRequestBody,
   rewriteRemoteMobileIndexWithBatches,
   sanitizeRequestHeaders,
   sanitizeResponseHeaders,
@@ -43,6 +44,13 @@ import {
   type MobileBootBatchPlan,
 } from './gateway.js'
 
+/**
+ * History page a tailnet client receives. DSH's browser client asks for up to
+ * 500 messages per page, which the plugin's LAN channel already trims; the
+ * remote channel used to forward that verbatim, so a phone opened a long
+ * session by downloading and rendering the entire page at once.
+ */
+const REMOTE_HISTORY_PAGE_MESSAGES = 50
 const MAX_HEADER_BYTES = 16 * 1024
 /**
  * Whether a pathname belongs to this plugin's loopback-only administration
@@ -235,11 +243,17 @@ export class RemotePassthroughProxy {
     const body = method === 'GET' || method === 'HEAD'
       ? Buffer.alloc(0)
       : await this.readBoundedBody(request)
+    // A tailnet client is always a phone, so the history page it receives is
+    // trimmed here for the same reason the LAN gateway trims it: the browser
+    // asks for 500 messages per page, and rendering that many on a phone is
+    // what makes opening and scrolling a long session feel stuck.
+    const forwardedBody = mobileHistoryRequestBody(request, body, REMOTE_HISTORY_PAGE_MESSAGES)
     const upstream = this.options.resolveUpstream()
     const upstreamHeaders = sanitizeRequestHeaders(request, upstream)
     // The document is rewritten below, so it has to arrive uncompressed.
     const document = method === 'GET' && target.decodedPathname === '/'
     if (document) upstreamHeaders['accept-encoding'] = 'identity'
+    if (forwardedBody !== body) upstreamHeaders['content-length'] = String(forwardedBody.byteLength)
     const upstreamCookie = await this.upstreamCookieFor(upstream)
     if (upstreamCookie !== undefined) upstreamHeaders.cookie = upstreamCookie
     const proxied = await new Promise<IncomingMessage>((resolve, reject) => {
@@ -257,7 +271,7 @@ export class RemotePassthroughProxy {
       })
       upstreamRequest.once('response', resolve)
       upstreamRequest.once('error', reject)
-      if (body.length > 0) upstreamRequest.write(body)
+      if (forwardedBody.length > 0) upstreamRequest.write(forwardedBody)
       upstreamRequest.end()
     })
     if (document && await this.serveRewrittenDocument(proxied, response, upstream)) return

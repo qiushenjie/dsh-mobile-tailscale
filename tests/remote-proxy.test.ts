@@ -69,6 +69,7 @@ interface RecordedRequest {
   readonly method: string
   readonly path: string
   readonly headers: IncomingMessage['headers']
+  readonly body: string
 }
 
 async function startUpstream(
@@ -76,13 +77,18 @@ async function startUpstream(
 ): Promise<{ origin: string; recorded: RecordedRequest[] }> {
   const recorded: RecordedRequest[] = []
   const server = createHttpServer((request, response) => {
-    const record: RecordedRequest = {
-      method: request.method ?? 'GET',
-      path: request.url ?? '/',
-      headers: request.headers,
-    }
-    recorded.push(record)
-    onRequest(record, response)
+    const chunks: Buffer[] = []
+    request.on('data', (chunk: Buffer) => chunks.push(chunk))
+    request.on('end', () => {
+      const record: RecordedRequest = {
+        method: request.method ?? 'GET',
+        path: request.url ?? '/',
+        headers: request.headers,
+        body: Buffer.concat(chunks).toString('utf8'),
+      }
+      recorded.push(record)
+      onRequest(record, response)
+    })
   })
   const port = await listen(server)
   trackServer(server)
@@ -335,6 +341,57 @@ describe('RemotePassthroughProxy', () => {
     await proxy.start()
 
     expect(await (await fetch(proxy.origin() + '/')).text()).toBe('plain')
+  })
+
+  it('trims the history page a tailnet client asks for', async () => {
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end('{"records":[]}')
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const historyRequest = (payload: Record<string, unknown>): string => JSON.stringify({
+      type: 'client-request',
+      rpcId: 'rpc-example',
+      method: 'session.history',
+      payload: { sessionId: 'session-example', ...payload },
+    })
+    const post = (body: string): Promise<Response> => fetch(proxy.origin() + '/api/session.history', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+    })
+
+    // The stock browser client asks for 500 messages per page; a phone gets 50.
+    const large = await post(historyRequest({ maxMessages: 500, turnWindow: { minMessages: 50, minTurns: 2 } }))
+    expect(large.status).toBe(200)
+    const forwarded = upstream.recorded.at(-1)
+    expect(JSON.parse(forwarded?.body ?? '{}')).toMatchObject({
+      method: 'session.history',
+      payload: { sessionId: 'session-example', maxMessages: 50, turnWindow: { minMessages: 50, minTurns: 2 } },
+    })
+    expect(forwarded?.headers['content-length']).toBe(String(Buffer.byteLength(forwarded?.body ?? '')))
+
+    // A page the client already bounded stays untouched.
+    await post(historyRequest({ maxMessages: 10 }))
+    expect(JSON.parse(upstream.recorded.at(-1)?.body ?? '{}')).toMatchObject({ payload: { maxMessages: 10 } })
+
+    // A Turn window wider than the page we ask for is narrowed with it.
+    await post(historyRequest({ maxMessages: 500, turnWindow: { minMessages: 200, minTurns: 2 } }))
+    expect(JSON.parse(upstream.recorded.at(-1)?.body ?? '{}')).toMatchObject({
+      payload: { maxMessages: 50, turnWindow: { minMessages: 50, minTurns: 2 } },
+    })
+
+    // Anything that is not a history request is forwarded byte for byte.
+    const other = await fetch(proxy.origin() + '/api/session.list', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: '{"type":"client-request"}',
+    })
+    expect(other.status).toBe(200)
+    expect(upstream.recorded.at(-1)?.body).toBe('{"type":"client-request"}')
   })
 
   it('serves the stock document when the upstream contract is unsupported', async () => {

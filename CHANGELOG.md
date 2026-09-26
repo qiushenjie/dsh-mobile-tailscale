@@ -2,6 +2,11 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.3.13
+
+- **The remote (Tailscale) channel forwarded the browser's largest history page untouched.** DSH's browser client opens a session with `maxMessages: 500` and a Turn window of 50 messages, and one page of this session's log measured 1.33 MB against 0.16 MB for 50 messages — downloaded and rendered in one go on a phone, which is what makes opening a long conversation crawl and scrolling it stutter. The local-network gateway has trimmed history pages for the mobile layout since 0.1.7; the remote proxy did not, so the Tailscale channel received the full page. It now asks for 50 messages per page through the same rewrite, and `hasMore` keeps paging by 50 as the user scrolls up.
+- **A Turn window wider than the page is narrowed with it.** `turnWindow.minMessages` must not exceed `maxMessages`, so trimming the page alone would have made the request invalid upstream (`gateway/bad-request`) — and could have produced exactly the empty-history symptom reported against the local-network channel. Both channels now clamp the window to the page size they ask for.
+
 ## 0.3.12
 
 - **A 5.3 MB client module was downloaded and executed on every phone page.** Measured from the live 0.1.7 manifest, the mobile boot graph is 76 entries / 74 packages — 13.61 MB raw, 5.80 MB gzipped — and `@deepseek-ai/dsh-client-ui-settings-account` alone is 5,281,067 bytes raw / 3,775 KB gzipped: 65% of the transfer, and by far the largest single script a phone has to parse and execute while the first screen is already interactive. Nothing injects it (verified against the served graph itself: zero `require()` references outside its own body; the only cross-module mentions are plugin-inventory documentation strings), so the phone no longer receives it at all. The account and billing pages inside settings are the price; the desktop window keeps them.
