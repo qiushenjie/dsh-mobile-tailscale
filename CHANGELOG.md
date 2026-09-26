@@ -2,6 +2,11 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.3.10
+
+- **The mobile DOM layer re-ran itself on every animation frame.** `installNativeMobileSurface` drives its `sync()` pass from a `MutationObserver` over `document.body`, filtered to `class`/`style`/`disabled` — and DSH rewrites class tokens continuously while streaming, animating, or resizing the composer, so the observer fired on nearly every frame. `sync()` is not cheap: it scans the document for the layout roots and re-tags the center column, composer, settings dialog and sidebar. On a phone that saturated the main thread, so scrolling, typing and tapping all stuttered. The pass is now coalesced to at most one run per 150 ms, which is below the spacing at which a structure change is still visible. Covered by a test.
+  - This became reachable when 0.3.6 fixed the layout probe: before that `sync()` returned early and the layer was effectively dormant, which is why the stutter appeared only then. The observer's filter is left as it was — `sync()` reads the details column's inline `grid-template-columns`, so dropping `style` would need that read replaced first.
+
 ## 0.3.9
 
 - **A stopped Tailscale backend reported itself as a network problem.** With Tailscale installed but not connected, every `tailscale serve` invocation prints `Tailscale is stopped.` and exits non-zero. That wording matched none of the classifier's patterns, so the panel fell through to the generic `serve_failed`, whose guidance is "Check the network, then click Reconnect", and the diagnostic report repeated it — pointing the user at connectivity for a service they only had to switch on. A stopped backend now classifies as `tailscale_not_running`, with actionable guidance in both the control panel and the diagnostic report. Found on DSH Desktop NEXT once 0.3.8 fixed the `tailscale_missing` case: the CLI was reachable, the backend simply was not running. Covered by a test.

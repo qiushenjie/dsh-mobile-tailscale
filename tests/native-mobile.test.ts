@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { NATIVE_MOBILE_STYLES, isComposerEditorFocus, isMenuSearchFocus, preservesMenuFocus, selectsSidebarRow, shouldAutoLoadEarlier } from '../src/native-mobile.js'
+import { NATIVE_MOBILE_STYLES, isComposerEditorFocus, isMenuSearchFocus, nextSyncDelay, preservesMenuFocus, selectsSidebarRow, shouldAutoLoadEarlier } from '../src/native-mobile.js'
 
 /** Minimal stand-in for an element whose `closest` resolves to a fixed match. */
 function fakeElement(closest: Element | null): Element {
@@ -83,6 +83,16 @@ describe('native mobile presentation', () => {
     expect(shouldAutoLoadEarlier(64, 64)).toBe(false)
     expect(shouldAutoLoadEarlier(40, 48)).toBe(false)
     expect(shouldAutoLoadEarlier(180, 80)).toBe(false)
+  })
+
+  it('coalesces the DOM-following pass instead of running it every frame', () => {
+    // An unthrottled sync() ran once per animation frame while DSH streamed and
+    // animated, and its document-wide scans saturated the phone's main thread.
+    const interval = 150
+    expect(nextSyncDelay(1000, 0, interval)).toBe(0)          // first pass: immediate
+    expect(nextSyncDelay(1000, 900, interval)).toBe(50)       // mid-window: wait the remainder
+    expect(nextSyncDelay(1000, 850, interval)).toBe(0)        // window elapsed: run now
+    expect(nextSyncDelay(5000, 1000, interval)).toBe(0)       // long idle: run now
   })
 
   it('treats a row control as a control, not as selecting the row', () => {

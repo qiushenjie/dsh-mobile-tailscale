@@ -253,6 +253,31 @@ export function shouldAutoLoadEarlier(previousTop: number, currentTop: number): 
   return currentTop <= AUTO_HISTORY_THRESHOLD_PX && currentTop < previousTop - 0.5
 }
 
+/**
+ * Minimum spacing between two DOM-following `sync()` passes.
+ *
+ * The observer that drives `sync()` fires on nearly every frame: DSH rewrites
+ * class tokens continuously while streaming, animating, or resizing the
+ * composer. `sync()` is not cheap — it scans the document for the layout roots
+ * and re-tags the center column, composer, settings dialog and sidebar — so
+ * running it once per animation frame saturated the main thread on a phone and
+ * read as the entire UI stuttering. Structure changes are imperceptible at this
+ * spacing, so coalescing them costs nothing a user can see.
+ */
+const SYNC_MIN_INTERVAL_MS = 150
+
+/**
+ * Delay before the next coalesced `sync()` pass.
+ * @param now - Current timestamp in milliseconds.
+ * @param lastSyncAt - Timestamp of the previous pass, or 0 when none has run yet.
+ * @param minIntervalMs - Minimum spacing to enforce between passes.
+ * @returns Milliseconds to wait; 0 when the window has already elapsed.
+ */
+export function nextSyncDelay(now: number, lastSyncAt: number, minIntervalMs: number): number {
+  if (lastSyncAt === 0) return 0
+  return Math.max(0, minIntervalMs - (now - lastSyncAt))
+}
+
 /** Interactive roles that act inside a sidebar row instead of selecting it. */
 const ROW_CONTROL_SELECTOR = 'button,[role="button"],[role="menu"],[aria-haspopup]'
 
@@ -480,6 +505,7 @@ export function installNativeMobileSurface(): () => void {
   let toggle: HTMLButtonElement | undefined
   let viewArea: HTMLElement | undefined
   let scheduled = 0
+  let lastSyncAt = 0
   let transitionFrame = 0
   let transitionRestartFrame = 0
   let transitionTimer = 0
@@ -679,11 +705,23 @@ export function installNativeMobileSurface(): () => void {
     sidebar.dataset.open = String(!collapsed)
     backdrop.hidden = collapsed
   }
-  const schedule = (): void => { if (scheduled === 0) scheduled = requestAnimationFrame(sync) }
+  const runSync = (): void => {
+    scheduled = 0
+    lastSyncAt = performance.now()
+    sync()
+  }
+  // Coalesced rather than rAF-per-frame: the observer fires continuously while
+  // DSH streams and animates, and an unthrottled sync() saturated the main
+  // thread. See nextSyncDelay.
+  const schedule = (): void => {
+    if (scheduled !== 0) return
+    scheduled = window.setTimeout(runSync, nextSyncDelay(performance.now(), lastSyncAt, SYNC_MIN_INTERVAL_MS))
+  }
   const observer = new MutationObserver(schedule)
   observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'disabled'] })
   backdrop.addEventListener('click', () => { if (sidebar?.dataset.open === 'true') toggle?.click() })
   sync()
+  lastSyncAt = performance.now()
   return () => {
     observer.disconnect()
     document.removeEventListener('click', onBranchClick, true)
@@ -695,7 +733,7 @@ export function installNativeMobileSurface(): () => void {
     document.removeEventListener('focusin', onMenuSearchFocusIn, true)
     if (branchToastTimer !== 0) window.clearTimeout(branchToastTimer)
     branchToast.remove()
-    if (scheduled !== 0) cancelAnimationFrame(scheduled)
+    if (scheduled !== 0) window.clearTimeout(scheduled)
     if (transitionFrame !== 0) cancelAnimationFrame(transitionFrame)
     if (transitionRestartFrame !== 0) cancelAnimationFrame(transitionRestartFrame)
     if (transitionTimer !== 0) clearTimeout(transitionTimer)
