@@ -135,6 +135,40 @@ describe('Tailscale Serve lifecycle', () => {
     expect(closes()).toBeGreaterThan(0)
   })
 
+  it('leaves a serve entry another process registered alone when this one shuts down', async () => {
+    // A relaunch starts the next process before this one is done tearing down,
+    // and the next process registers its own proxy. `serve --https=443 off` is
+    // node-global, so clearing here deleted the live registration: `serve
+    // status` was empty while the panel still reported `ready`, and the
+    // tailnet address refused connections until someone toggled the switch.
+    const { bin, calls } = await fakeTailscale({
+      Self: { DNSName: 'node.tailnet.ts.net.' },
+      Web: { 'node.tailnet.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:60000' } } } },
+    })
+    const { proxy, closes } = fakeProxy()
+    const controller = new TailscaleServeController({ store: store(true), proxy, bin })
+
+    await controller.initialize()
+    await controller.close()
+
+    expect(await calls()).not.toContain('serve --https=443 off')
+    expect(closes()).toBeGreaterThan(0)
+  })
+
+  it('clears the entry it registered itself when it shuts down', async () => {
+    const { bin, calls } = await fakeTailscale({
+      Self: { DNSName: 'node.tailnet.ts.net.' },
+      Web: { 'node.tailnet.ts.net:443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:54321' } } } },
+    })
+    const { proxy } = fakeProxy()
+    const controller = new TailscaleServeController({ store: store(true), proxy, bin })
+
+    await controller.initialize()
+    await controller.close()
+
+    expect(await calls()).toContain('serve --https=443 off')
+  })
+
   it('reports a port conflict as serve_port_conflict, not the generic serve_failed', async () => {
     // The recovery path raises these errors itself, and their wording matched
     // none of the message patterns the classifier looks for, so the panel used

@@ -214,7 +214,7 @@ export class TailscaleServeController {
   async close(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
-    await this.enqueue(() => this.stopServe())
+    await this.enqueue(() => this.stopServeIfOwned())
   }
 
   private enqueue(operation: () => Promise<void>): Promise<void> {
@@ -251,8 +251,8 @@ export class TailscaleServeController {
       // MagicDNS name back, so a failure after the registration would otherwise
       // leave `serve` pointing at a proxy we are about to close — the phone
       // then sees connection-refused while the panel reports an error. Clear
-      // the entry we just created, then report.
-      try { await this.stopServe() } catch {
+      // the entry we just created (and only it), then report.
+      try { await this.stopServeIfOwned() } catch {
         // The proxy must not mask the serve error reported below.
       }
       this.publish({ enabled: true, state: 'error', errorCode: classifyServeError(error) })
@@ -318,6 +318,50 @@ export class TailscaleServeController {
       // Turning serve off when nothing is configured is harmless.
     }
     await this.closeProxy()
+  }
+
+  /**
+   * Tear down the 443 entry only while it still points at this instance's
+   * proxy. A relaunch can start the next process — which registers its own
+   * proxy and reports `ready` — before this one finishes shutting down;
+   * `serve --https=443 off` is node-global, so an unconditional clear would
+   * then delete the live registration and leave the tailnet address refused
+   * while both processes believe serve is on. Observed on this machine: after
+   * a restart `serve status` was empty while the panel reported `ready`.
+   */
+  private async stopServeIfOwned(): Promise<void> {
+    const registered = await this.registeredProxyTarget()
+    if (registered !== undefined && registered !== this.options.proxy.origin()) {
+      // Another process owns the current entry: close our own listener and
+      // leave `serve` alone.
+      await this.closeProxy()
+      return
+    }
+    await this.stopServe()
+  }
+
+  /**
+   * The proxy the current 443 entry forwards to, or undefined when it cannot
+   * be read (nothing registered, unreachable CLI, unexpected JSON).
+   * `tailscale serve status --json` reports it at
+   * `Web["<host>.ts.net:443"].Handlers["/"].Proxy`.
+   */
+  private async registeredProxyTarget(): Promise<string | undefined> {
+    try {
+      const { stdout } = await execFileAsync(this.bin(), ['serve', 'status', '--json'], {
+        windowsHide: true,
+        timeout: 30_000,
+      })
+      const status = JSON.parse(stdout) as { Web?: Record<string, { Handlers?: Record<string, { Proxy?: unknown }> }> }
+      for (const entry of Object.values(status.Web ?? {})) {
+        const proxy = entry?.Handlers?.['/']?.Proxy
+        if (typeof proxy === 'string' && proxy !== '') return proxy
+      }
+    } catch {
+      // Unreadable status: fall back to clearing, which is what this
+      // controller did before it could tell registrations apart.
+    }
+    return undefined
   }
 
   /** Stop the loopback proxy if it is running. Never touches `tailscale serve`. */
