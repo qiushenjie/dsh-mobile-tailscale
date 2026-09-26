@@ -34,10 +34,12 @@ import {
   mobileBootBatchKey,
   MobileBootBatchStore,
   mobileHistoryRequestBody,
+  prunedClientModuleRequest,
   rewriteRemoteMobileIndexWithBatches,
   sanitizeRequestHeaders,
   sanitizeResponseHeaders,
   sendMobileBootBatch,
+  sendPrunedClientModule,
   stripIpv6Brackets,
   websocketAccept,
   type MobileBootBatchEntry,
@@ -238,6 +240,15 @@ export class RemotePassthroughProxy {
       if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'method_not_allowed')
       const payload = await this.bootBatches.render(batchKey, AbortSignal.timeout(this.upstreamTimeoutMs()))
       await sendMobileBootBatch(request, response, payload, false)
+      return
+    }
+    // The page's module controller also syncs to the stock graph pushed over the
+    // HMR event stream, which asks for a pruned module directly; see
+    // {@link prunedClientModuleRequest}.
+    const prunedModule = prunedClientModuleRequest(request.url)
+    if (prunedModule !== undefined) {
+      if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'method_not_allowed')
+      sendPrunedClientModule(request, response, prunedModule, false)
       return
     }
     const body = method === 'GET' || method === 'HEAD'

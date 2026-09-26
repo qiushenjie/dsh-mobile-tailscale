@@ -592,8 +592,7 @@ function supportsDedicatedLayout(entry: BootGraphEntry): boolean {
  * @returns Whether anything was removed.
  */
 function pruneUnavailableClientModules(entries: BootGraphEntry[], batches: BootGraphBatch[] | undefined): boolean {
-  const pruned: readonly string[] = [...DESKTOP_SHELL_ONLY_MODULES, ...MOBILE_BOOT_EXCLUDED_MODULES]
-  const isPruned = (id: unknown): boolean => typeof id === 'string' && pruned.includes(id)
+  const isPruned = (id: unknown): boolean => typeof id === 'string' && PRUNED_CLIENT_MODULES.includes(id)
   if (!entries.some(entry => entry !== null && typeof entry === 'object' && isPruned(entry.id))) return false
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     if (isPruned(entries[index]?.id)) entries.splice(index, 1)
@@ -606,6 +605,104 @@ function pruneUnavailableClientModules(entries: BootGraphEntry[], batches: BootG
     if (batch.entries.length === 0) batches.splice(index, 1)
   }
   return true
+}
+
+/**
+ * Every client module the mobile channels refuse to ship, for any reason.
+ */
+const PRUNED_CLIENT_MODULES: readonly string[] = Object.freeze([
+  ...DESKTOP_SHELL_ONLY_MODULES,
+  ...MOBILE_BOOT_EXCLUDED_MODULES,
+])
+
+/**
+ * The single pruned module a request asks for, when that is all it asks for.
+ *
+ * The served document names the pruned graph, but the page's module controller
+ * is not driven by the document alone: `@deepseek-ai/dsh-client-hmr` subscribes
+ * to the host's `/plugins/events` stream and applies every `{"type":"graph"}`
+ * frame to its entry controller, which then loads whatever the stock graph lists
+ * that the page has not loaded yet. On DSH 0.1.7 that pull measured 5,281,132
+ * bytes for `@deepseek-ai/dsh-client-ui-settings-account` — the module this
+ * plugin prunes from the document — arriving 526 ms after first paint, so
+ * pruning the document did not stop the download by itself.
+ *
+ * A stock phase request combines many ids (`plugins/??id/client.js,…`) and the
+ * upstream answers only the exact combination it built, so only requests naming a
+ * single module are recognised here. No batch this plugin serves can contain a
+ * pruned id, which leaves this the only spelling that can still reach upstream.
+ * @param target - Raw request target, query and all.
+ * @returns The pruned module id, when the target asks for exactly that module.
+ */
+export function prunedClientModuleRequest(target: string | undefined): string | undefined {
+  if (target === undefined || !target.startsWith('/plugins/')) return undefined
+  const ids = new Set<string>()
+  for (const match of target.matchAll(/(?:@[^/,?&]+\/)?[^/,?&]+\/client\.js/gu)) {
+    ids.add(match[0].slice(0, -'/client.js'.length))
+    if (ids.size > 1) return undefined
+  }
+  const [id] = ids
+  return id !== undefined && PRUNED_CLIENT_MODULES.includes(id) ? id : undefined
+}
+
+/**
+ * Answer {@link prunedClientModuleRequest} with an inert registration instead of
+ * the module itself.
+ *
+ * A bundle that never registers its id is a thrown import to the module
+ * controller, so the module is registered as an empty namespace and exports
+ * nothing. That keeps the controller's sync satisfied without the bytes.
+ * @param request - Incoming request, for HEAD handling.
+ * @param response - Response to write.
+ * @param id - Pruned module id to register.
+ * @param tlsEnabled - Whether the response must carry HSTS.
+ */
+export function sendPrunedClientModule(
+  request: IncomingMessage,
+  response: ServerResponse,
+  id: string,
+  tlsEnabled: boolean,
+): void {
+  const body = Buffer.from(
+    `window.__ModuleLoader__.load({ id: ${JSON.stringify(id)}, factory: () => ({}) });\n`,
+    'utf8',
+  )
+  setSecurityHeaders(response, tlsEnabled)
+  response.writeHead(200, {
+    'Content-Type': 'text/javascript; charset=utf-8',
+    'Content-Length': body.byteLength,
+    'Cache-Control': 'private, no-cache',
+  })
+  if (request.method === 'HEAD') response.end()
+  else response.end(body)
+}
+
+/**
+ * Drop the document's preload hints for the stock combined boot requests.
+ *
+ * Upstream ships one `<link rel="preload" as="script">` per boot phase pointing at
+ * the combination DSH itself built (`plugins/??id/client.js,…&rev=…`), next to the
+ * manifest that names the batches to activate. Once this plugin serves its own
+ * batches the two no longer agree, and the browser still fetches the hint: on DSH
+ * 0.1.7 the two application-phase hints measured 18.8 MB of decoded script through
+ * this plugin's own remote origin — including the 5,281,067-byte
+ * `@deepseek-ai/dsh-client-ui-settings-account` module the served manifest no
+ * longer lists. That is the whole pruned payload fetched a second time, which is
+ * why pruning the manifest alone left a phone page just as heavy to load.
+ *
+ * The hints are dropped rather than rewritten: the client activates
+ * `__DSH_BOOT__.batches`, whose urls this plugin answers from its own in-memory
+ * store on a request that never leaves the machine, so there is nothing left for a
+ * hint to warm.
+ * @param html - Document slice that may contain stock boot preload hints.
+ * @returns The slice without hints for a stock combined boot request.
+ */
+function dropStockBootPreloads(html: string): string {
+  return html.replace(/<link\b[^>]*>/giu, (tag) => {
+    if (!/\brel\s*=\s*["']?(?:module)?preload["']?/iu.test(tag)) return tag
+    if (!/\bhref\s*=\s*["'][^"']*plugins\/\?\?[^"']*["']/iu.test(tag)) return tag
+    return ''
+  })
 }
 
 /**
@@ -695,7 +792,7 @@ export function rewriteMobileIndexWithBatches(html: string): RewrittenMobileInde
   const transportBootstrap = remoteSettings ? MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP : ''
   const replacement = `${transportBootstrap}${MOBILE_CSRF_FETCH_BOOTSTRAP}${MOBILE_TRUST_FLAG}window.__DSH_MOBILE_FRONTEND__="dedicated";${site.assignment}${JSON.stringify(parsed)};`
   return Object.freeze({
-    html: ensureMobileViewport(`${html.slice(0, site.start)}${replacement}${html.slice(site.scriptEnd)}`),
+    html: ensureMobileViewport(`${dropStockBootPreloads(html.slice(0, site.start))}${replacement}${dropStockBootPreloads(html.slice(site.scriptEnd))}`),
     ...(mobileBatches.length === 0 ? {} : { batches: mobileBatches }),
   })
 }
@@ -736,7 +833,7 @@ export function rewriteRemoteMobileIndexWithBatches(html: string): RewrittenMobi
   }
   const replacement = `${MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP}${MOBILE_TRUST_FLAG}${site.assignment}${JSON.stringify(site.parsed)};`
   return Object.freeze({
-    html: ensureMobileViewport(`${html.slice(0, site.start)}${replacement}${html.slice(site.scriptEnd)}`),
+    html: ensureMobileViewport(`${dropStockBootPreloads(html.slice(0, site.start))}${replacement}${dropStockBootPreloads(html.slice(site.scriptEnd))}`),
     ...(mobileBatches.length === 0 ? {} : { batches: mobileBatches }),
   })
 }
@@ -2201,6 +2298,14 @@ export class MobileAccessGateway {
     const declared = request.headers['content-length']
     if (declared !== undefined && (!/^\d+$/u.test(declared) || Number(declared) > this.config.maxBodyBytes)) {
       throw new HttpError(413, 'payload_too_large')
+    }
+    // A pruned module can still be asked for by the page's module controller
+    // after it syncs to a graph pushed over the HMR stream; answering it here
+    // keeps its bytes from reaching a phone on this channel too.
+    const prunedModule = prunedClientModuleRequest(request.url)
+    if (prunedModule !== undefined) {
+      sendPrunedClientModule(request, response, prunedModule, this.tlsEnabled)
+      return
     }
     const holder: { request?: ClientRequest } = {}
     const operation = this.allocateRequest(authorization, response, holder)

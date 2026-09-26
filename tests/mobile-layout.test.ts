@@ -408,3 +408,38 @@ describe('remote mobile index rewrite', () => {
     expect(output).not.toContain('throw new Error')
   })
 })
+
+describe('stock boot preload hints', () => {
+  const entries = [
+    { id: '@deepseek-ai/dsh-client-runtime', url: '/runtime.js', rev: 'runtime' },
+    {
+      id: '@deepseek-ai/dsh-client-ui-layout',
+      url: '/layout.js',
+      rev: 'layout',
+      inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-theme'],
+    },
+    { id: 'feature', url: '/feature.js', rev: 'feature' },
+  ]
+  const source = '<!doctype html><html><head>'
+    + '<link rel="preload" as="script" href="plugins/??feature/client.js&amp;rev=554112994f82">'
+    + '<link rel="modulepreload" crossorigin href="plugins/??feature/client.js&amp;rev=9e00d36ccee1">'
+    + '<link rel="preload" as="script" href="./assets/vendor-CCJJTK99.js">'
+    + '<link rel="stylesheet" crossorigin href="./assets/index-DUvMhLle.css">'
+    + '<script src="plugins/??@deepseek-ai/dsh-client-modules/client.js&amp;rev=31537f9b310b"></script>'
+    + `<script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({ rev: 'stock', entries, batches: [{ phase: 'application', url: '/plugins/application.js?rev=stock', rev: 'stock', entries: entries.map(entry => entry.id) }] })};</script>`
+    + '</head><body></body></html>'
+
+  // A hint still fetches the combination DSH built, which is the whole unpruned
+  // graph — including the module the served manifest no longer activates.
+  it('drops hints for a stock combined boot request on both channels', () => {
+    for (const output of [rewriteMobileIndex(source), rewriteRemoteMobileIndex(source)]) {
+      expect(output).not.toContain('rel="preload" as="script" href="plugins/??')
+      expect(output).not.toContain('rel="modulepreload" crossorigin href="plugins/??')
+      // Only the boot hints go: every other head resource and the bootstrap script
+      // tag that loads the client module loader stay untouched.
+      expect(output).toContain('href="./assets/vendor-CCJJTK99.js"')
+      expect(output).toContain('rel="stylesheet" crossorigin href="./assets/index-DUvMhLle.css"')
+      expect(output).toContain('src="plugins/??@deepseek-ai/dsh-client-modules/client.js&amp;rev=31537f9b310b"')
+    }
+  })
+})

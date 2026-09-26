@@ -9,7 +9,7 @@ import { connect, type AddressInfo, type Socket } from 'node:net'
 import { gunzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parseGatewayConfig } from '../src/config.js'
-import { MobileAccessGateway } from '../src/gateway.js'
+import { MobileAccessGateway, prunedClientModuleRequest } from '../src/gateway.js'
 import { CSRF_HEADER, DEVICE_COOKIE, SESSION_COOKIE } from '../src/http-security.js'
 import { MemoryDeviceStore } from '../src/storage.js'
 import { DSH_MOBILE_VERSION, MINIMUM_ANDROID_APP_VERSION } from '../src/version.js'
@@ -1243,5 +1243,30 @@ describe('WebSocket gateway', () => {
     await vi.waitFor(() => {
       expect(() => instance.access.authorizeSession(paired.session)).toThrow()
     })
+  })
+})
+
+describe('prunedClientModuleRequest', () => {
+  it('recognises the single-module spelling of a pruned module', () => {
+    expect(prunedClientModuleRequest(
+      '/plugins/??@deepseek-ai/dsh-client-ui-settings-account/client.js&rev=15a7f5ec2ebc',
+    )).toBe('@deepseek-ai/dsh-client-ui-settings-account')
+    expect(prunedClientModuleRequest(
+      '/plugins/@deepseek-ai/dsh-client-ui-settings-account/client.js?rev=15a7f5ec2ebc',
+    )).toBe('@deepseek-ai/dsh-client-ui-settings-account')
+  })
+
+  it('leaves stock phase requests, other modules and other paths alone', () => {
+    // A phase request names many ids and is answered by the upstream's own
+    // combination, so it must never be rewritten here.
+    expect(prunedClientModuleRequest(
+      '/plugins/??@deepseek-ai/dsh-client-ui-settings-account/client.js,dsh-mobile-tailscale/client.js&rev=abc',
+    )).toBeUndefined()
+    expect(prunedClientModuleRequest('/plugins/??dsh-mobile-tailscale/client.js&rev=abc')).toBeUndefined()
+    expect(prunedClientModuleRequest(
+      '/plugins/@deepseek-ai/dsh-client-ui-settings-account/assets/logo.svg?rev=abc',
+    )).toBeUndefined()
+    expect(prunedClientModuleRequest('/assets/index-Q6zc2uHV.js')).toBeUndefined()
+    expect(prunedClientModuleRequest(undefined)).toBeUndefined()
   })
 })

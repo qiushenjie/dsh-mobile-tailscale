@@ -540,6 +540,38 @@ describe('RemotePassthroughProxy', () => {
     expect(neighbour.status).toBe(200)
     expect(upstream.recorded).toHaveLength(1)
   })
+
+  it('answers a directly requested pruned module without fetching its bytes', async () => {
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
+      response.end('window.__ModuleLoader__.load({ id: "@deepseek-ai/dsh-client-ui-conversation", factory: () => ({}) });')
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    await proxy.start()
+    try {
+      // The module controller asks for the stock spelling once it has synced to a
+      // graph pushed over the HMR event stream, which lists the pruned module.
+      const pruned = await fetch(
+        proxy.origin() + '/plugins/??@deepseek-ai/dsh-client-ui-settings-account/client.js&rev=15a7f5ec2ebc',
+      )
+      expect(pruned.status).toBe(200)
+      expect(pruned.headers.get('content-type')).toContain('text/javascript')
+      expect(await pruned.text()).toBe(
+        'window.__ModuleLoader__.load({ id: "@deepseek-ai/dsh-client-ui-settings-account", factory: () => ({}) });\n',
+      )
+      expect(upstream.recorded).toHaveLength(0)
+
+      // A module the phone is meant to run still comes from the upstream, so the
+      // rewrite cannot swallow a legitimate single-module request.
+      const stock = await fetch(
+        proxy.origin() + '/plugins/??@deepseek-ai/dsh-client-ui-conversation/client.js&rev=abc123',
+      )
+      expect(stock.status).toBe(200)
+      expect(upstream.recorded).toHaveLength(1)
+    } finally {
+      await proxy.close()
+    }
+  })
 })
 
 describe('resolveLiveUpstream', () => {
