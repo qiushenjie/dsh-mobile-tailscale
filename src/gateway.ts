@@ -180,6 +180,32 @@ const MOBILE_LAYOUT_DEPENDENCY_PROFILES = Object.freeze([
 const DESKTOP_SHELL_ONLY_MODULES: readonly string[] = Object.freeze(['dsh-desktop-next'])
 
 /**
+ * Third-party client modules that cannot work on a DSH 0.1.7 page at all.
+ *
+ * Measured on this machine, live:
+ *
+ * - `dsh-better-sidebar` renders the right sidebar's panes. Its client calls
+ *   `require("@deepseek-ai/dsh-client-ui-primitives")`, a module DSH 0.1.7 no
+ *   longer puts in the client graph (the served manifest carries 71 entries and
+ *   none of them is it), so the import resolves to `undefined` and every pane it
+ *   renders dies with `Minified React error #130` — the phone's 文件 pane shows
+ *   only its 重试 button, which fails again on every retry. Its host half also
+ *   fails to activate (`sctx.settings.register is not a function`).
+ * - `dsh-rewind-plugin` reads `snapshot.queue` from a session snapshot that
+ *   0.1.7 no longer sends, and throws `TypeError: Cannot read properties of
+ *   undefined (reading 'filter')` from `collectPendingTargets` inside
+ *   `conversation.session.header.actions`, crashing that slot on every render.
+ *
+ * Neither is injected by another entry (checked against the served manifest), so
+ * dropping them costs the phone only UI that already fails to render there and
+ * returns the stock sidebar and message actions; the desktop keeps both.
+ */
+const MOBILE_BROKEN_ON_DSH_017_MODULES: readonly string[] = Object.freeze([
+  'dsh-better-sidebar',
+  'dsh-rewind-plugin',
+])
+
+/**
  * Client modules pruned from the served boot graph even though the phone would
  * otherwise activate them, because their download cost dwarfs their value on a
  * phone.
@@ -196,7 +222,9 @@ const DESKTOP_SHELL_ONLY_MODULES: readonly string[] = Object.freeze(['dsh-deskto
  */
 const MOBILE_BOOT_EXCLUDED_MODULES: readonly string[] = Object.freeze([
   '@deepseek-ai/dsh-client-ui-settings-account',
+  ...MOBILE_BROKEN_ON_DSH_017_MODULES,
 ])
+
 
 /**
  * A module injected by the layout generation that replaced the root's

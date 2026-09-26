@@ -253,6 +253,29 @@ describe('dedicated mobile layout boot', () => {
     expect(output).not.toContain('/plugins/application.js?rev=stock')
   })
 
+  it('drops the third-party modules that cannot render on DSH 0.1.7', () => {
+    // `dsh-better-sidebar` requires `@deepseek-ai/dsh-client-ui-primitives`, which
+    // 0.1.7 keeps out of the client graph, so its panes die with React #130; and
+    // `dsh-rewind-plugin` reads a `snapshot.queue` the host no longer sends and
+    // crashes `conversation.session.header.actions`. Neither is injected by
+    // another entry, so both leave the phone graph on both channels.
+    const entries = [
+      { id: '@deepseek-ai/dsh-client-ui-layout', url: '/layout.js', rev: 'layout', inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-theme'] },
+      { id: 'dsh-better-sidebar', url: '/better-sidebar.js', rev: 'better' },
+      { id: 'dsh-rewind-plugin', url: '/rewind.js', rev: 'rewind' },
+      { id: packageName, url: '/mobile.js', rev: 'mobile' },
+    ]
+    const source = currentIndex(entries)
+
+    for (const output of [rewriteMobileIndex(source), rewriteRemoteMobileIndex(source)]) {
+      expect(output).not.toContain('dsh-better-sidebar')
+      expect(output).not.toContain('dsh-rewind-plugin')
+      // The remaining graph still activates, including this plugin's own client.
+      expect(output).toContain(packageName)
+      expect(output).toContain('@deepseek-ai/dsh-client-ui-layout')
+    }
+  })
+
   it('does not activate desktop-shell-only modules on a phone page', () => {
     // `dsh-desktop-next` installs two document-wide MutationObservers, one of them
     // unthrottled. Removing the entry keeps it in the combined request but stops it
