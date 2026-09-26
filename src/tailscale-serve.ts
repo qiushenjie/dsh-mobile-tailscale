@@ -115,6 +115,11 @@ function classifyServeError(error: unknown): string {
   if (/funnel/i.test(message)) return 'funnel_unavailable'
   if (/EACCES|EPERM/i.test(message)) return 'permission_denied'
   if (/ENOENT/i.test(message)) return 'tailscale_missing'
+  // A stopped backend makes every `tailscale serve` invocation print
+  // "Tailscale is stopped." and exit non-zero. Without this the classifier fell
+  // through to `serve_failed`, whose guidance is "check the network" — sending
+  // the user to debug connectivity for a service they only had to switch on.
+  if (/tailscale is stopped|backend(?:state)?[^.]*stopped/i.test(message)) return 'tailscale_not_running'
   if (isServePortConflict(error)) return 'serve_port_conflict'
   return 'serve_failed'
 }

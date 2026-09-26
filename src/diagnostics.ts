@@ -71,6 +71,7 @@ const REMOTE_ERROR_GUIDANCE: Readonly<Record<string, string>> = Object.freeze({
   component_missing: 'Reinstall the complete plugin package.',
   tailscale_not_logged_in: 'Confirm Tailscale is logged in and on the same tailnet, then reconnect.',
   tailscale_missing: 'Install Tailscale and retry.',
+  tailscale_not_running: 'Connect Tailscale (its backend is stopped), then reconnect.',
   funnel_unavailable: 'Confirm Funnel is enabled in the Tailscale admin console, then retry.',
   permission_denied: 'Run DSH as administrator and retry.',
   serve_failed: 'Check the network, then click Reconnect.',

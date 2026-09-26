@@ -161,4 +161,29 @@ describe('Tailscale Serve lifecycle', () => {
 
     expect(controller.status()).toMatchObject({ state: 'error', errorCode: 'serve_port_conflict' })
   })
+
+  it('reports a stopped Tailscale backend as tailscale_not_running, not the generic serve_failed', async () => {
+    // Every `tailscale serve` invocation prints this and exits non-zero while the
+    // backend is stopped. The generic code's guidance is "check the network",
+    // which sent the user to debug connectivity for a service they only had to
+    // switch on. Reproduced on DSH 0.1.7 with Tailscale installed but stopped.
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-tailscale-stopped-'))
+    const bin = join(directory, 'tailscale')
+    await writeFile(bin, [
+      '#!/bin/sh',
+      'case "$*" in',
+      '  *"serve --bg"*) echo "Tailscale is stopped." >&2; exit 1 ;;',
+      'esac',
+      'exit 0',
+      '',
+    ].join('\n'), 'utf8')
+    await chmod(bin, 0o755)
+
+    const { proxy } = await fakeProxy()
+    const controller = new TailscaleServeController({ store: store(true), proxy, bin })
+
+    await controller.initialize()
+
+    expect(controller.status()).toMatchObject({ state: 'error', errorCode: 'tailscale_not_running' })
+  })
 })

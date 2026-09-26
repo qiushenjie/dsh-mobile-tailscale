@@ -2,6 +2,10 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.3.9
+
+- **A stopped Tailscale backend reported itself as a network problem.** With Tailscale installed but not connected, every `tailscale serve` invocation prints `Tailscale is stopped.` and exits non-zero. That wording matched none of the classifier's patterns, so the panel fell through to the generic `serve_failed`, whose guidance is "Check the network, then click Reconnect", and the diagnostic report repeated it — pointing the user at connectivity for a service they only had to switch on. A stopped backend now classifies as `tailscale_not_running`, with actionable guidance in both the control panel and the diagnostic report. Found on DSH Desktop NEXT once 0.3.8 fixed the `tailscale_missing` case: the CLI was reachable, the backend simply was not running. Covered by a test.
+
 ## 0.3.8
 
 - **The desktop window was read as a phone page, so the sidebar launcher never existed.** The client decided "desktop or phone" with `isLoopbackHost(location.hostname)`, which only accepts `localhost`/`127.0.0.1`/`::1`. DSH Desktop serves its window from a private scheme — `dsh-app://app/` in DSH Desktop NEXT — so `hostname` is `app`, the test failed, and the plugin took the *phone* branch on the desktop: `installControl()` never ran, and with it the `sidebar.footer.action` registration that renders the "移动访问" entry. That entry was simply absent, which is why the remote switch could not be found.

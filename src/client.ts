@@ -470,6 +470,7 @@ function installControl(): { remove: () => void; toggle: () => void } {
     const errorLabels: Record<string, string> = {
       tailscale_not_logged_in: 'Tailscale 未登录或未加入 tailnet，请登录后重试。',
       tailscale_missing: '未找到 tailscale 命令，请安装 Tailscale。',
+      tailscale_not_running: 'Tailscale 未运行（后端已停止）。请在 Tailscale 应用里连接，然后点「重新连接」。',
       funnel_unavailable: 'Tailscale 未启用 Funnel（Serve 需要），请在 Tailscale 管理后台确认。',
       permission_denied: '权限不足，请以管理员身份运行后重试。',
       serve_failed: 'Tailscale Serve 启动失败，请检查网络后重新连接。',
