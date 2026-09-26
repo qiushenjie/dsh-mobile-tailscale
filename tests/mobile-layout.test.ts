@@ -191,6 +191,60 @@ describe('dedicated mobile layout boot', () => {
     expect(output).toContain(`"entries":${JSON.stringify(entries.map(entry => entry.id))}`)
   })
 
+  it('leaves the stock layout in place for a layout generation it does not implement', () => {
+    // DSH 0.1.7 declares `main` (keyed), `rightbar` and `shell.leading` on the root
+    // slot instead of `conversation`/`details`, so substituting the dedicated
+    // layout — which declares the old contract — serves a page whose conversation
+    // is rendered into a slot nothing declares. The layout module's own dependency
+    // list is the only generation marker reachable from the manifest.
+    const entries = [
+      {
+        id: '@deepseek-ai/dsh-client-ui-layout',
+        url: '/layout.js',
+        rev: 'layout',
+        inject: [
+          '@deepseek-ai/dsh-client-locale',
+          '@deepseek-ai/dsh-client-ui-renderer',
+          '@deepseek-ai/dsh-client-ui-session',
+          '@deepseek-ai/dsh-client-ui-theme',
+          '@deepseek-ai/dsh-client-shortcuts',
+        ],
+      },
+      { id: packageName, url: '/mobile.js', rev: 'mobile', inject: ['@deepseek-ai/dsh-client-connection', '@deepseek-ai/dsh-client-ui-sidebar'] },
+      { id: '@deepseek-ai/dsh-client-ui-settings', url: '/settings.js', rev: 'settings', inject: ['@deepseek-ai/dsh-api-remotes'] },
+    ]
+    const source = `<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({
+      rev: 'stock',
+      entries,
+      batches: [{ phase: 'application', url: '/plugins/application.js?rev=stock', rev: 'stock-batch', entries: entries.map(entry => entry.id) }],
+    })};</script></head><body></body></html>`
+    const output = rewriteMobileIndex(source)
+
+    expect(output).toContain('"url":"/layout.js"')
+    expect(output).not.toContain('/mobile-access/mobile-layout.js')
+    // That generation already serves one combined request per phase, so this
+    // plugin's own batch would add nothing and is not built.
+    expect(output).toContain('/plugins/application.js?rev=stock')
+  })
+
+  it('does not activate desktop-shell-only modules on a phone page', () => {
+    // `dsh-desktop-next` installs two document-wide MutationObservers, one of them
+    // unthrottled. Removing the entry keeps it in the combined request but stops it
+    // from being activated, so none of its code runs on the phone.
+    const entries = [
+      { id: '@deepseek-ai/dsh-client-ui-layout', url: '/layout.js', rev: 'layout', inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-theme'] },
+      { id: 'dsh-desktop-next', url: '/desktop-next.js', rev: 'next', inject: ['@deepseek-ai/dsh-client-ui-layout'] },
+    ]
+    const source = `<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({
+      rev: 'stock',
+      entries,
+      batches: [{ phase: 'application', url: '/plugins/application.js?rev=stock', rev: 'stock-batch', entries: entries.map(entry => entry.id) }],
+    })};</script></head><body></body></html>`
+
+    expect(rewriteMobileIndex(source)).not.toContain('dsh-desktop-next')
+    expect(rewriteRemoteMobileIndex(source)).not.toContain('dsh-desktop-next')
+  })
+
   it('accepts the DSH 0.1.1 global injection syntax', () => {
     const output = rewriteMobileIndex(currentIndex([
       {

@@ -132,6 +132,37 @@ const MOBILE_LAYOUT_DEPENDENCY_PROFILES = Object.freeze([
     ]),
   }),
 ])
+
+/**
+ * Client modules that exist only for the desktop shell, and must not activate on
+ * a phone page.
+ *
+ * DSH Desktop NEXT supplies `dsh-desktop-next` (1.1 MB raw, 628 KB gzipped) to
+ * every client graph, where it draws the shell's own chrome: desktop settings
+ * pages, the remote-control surface, native window materials. None of that
+ * applies on a phone, and it is not merely dead weight — it installs two
+ * `MutationObserver`s on `document.body` with `subtree: true`, one of which runs
+ * its handler for every mutation batch without coalescing. Measured on the phone
+ * channel that is a direct competitor for the main thread against everything
+ * else the page does.
+ *
+ * Dropping the entry keeps the module inside the graph's combined request but
+ * stops it from being activated, so none of its code runs. It is safe to drop:
+ * no other entry declares it as a dependency, so removing it cannot displace
+ * anything else in the graph.
+ */
+const DESKTOP_SHELL_ONLY_MODULES: readonly string[] = Object.freeze(['dsh-desktop-next'])
+
+/**
+ * A module injected by the layout generation that replaced the root's
+ * `conversation`/`details` children with `main` (keyed), `rightbar` and
+ * `shell.leading`, and which the previous generation did not inject.
+ *
+ * The boot manifest exposes no slot declarations, so the layout module's own
+ * dependency list is the only generation marker reachable from here.
+ */
+const LAYOUT_GENERATION_MARKER = '@deepseek-ai/dsh-client-shortcuts'
+
 const MOBILE_CSRF_FETCH_BOOTSTRAP = `(()=>{const nativeFetch=window.fetch.bind(window);window.fetch=(input,init)=>{const source=input instanceof Request?input:undefined;const method=String(init?.method??source?.method??'GET').toUpperCase();if(method==='GET'||method==='HEAD')return nativeFetch(input,init);const raw=typeof input==='string'?input:input instanceof URL?input.href:source?.url;if(raw===undefined||new URL(raw,location.href).origin!==location.origin)return nativeFetch(input,init);const headers=new Headers(init?.headers??source?.headers);if(!headers.has(${JSON.stringify(CSRF_HEADER)})){const prefix=${JSON.stringify(`${CSRF_COOKIE}=`)};const token=document.cookie.split(';').map(value=>value.trim()).find(value=>value.startsWith(prefix))?.slice(prefix.length);if(token!==undefined)headers.set(${JSON.stringify(CSRF_HEADER)},token)}return nativeFetch(input,{...init,headers})};})();`
 
 /**
@@ -346,19 +377,80 @@ function requireLayoutModule(entries: BootGraphEntry[]): { readonly slots: strin
   return { slots: dependencyProfile.slots, entry: layout[0] }
 }
 
+/**
+ * Whether this plugin's dedicated layout module implements the upstream layout
+ * generation the served manifest is built for.
+ *
+ * `mobile-layout.js` declares its own root children (`conversation`, `details`).
+ * The generation marked by {@link LAYOUT_GENERATION_MARKER} replaced those with
+ * `main` (keyed), `rightbar` and `shell.leading`, so substituting our module
+ * there serves a page whose conversation is rendered into a slot nothing
+ * declares — the phone shows no conversation at all. When the marker is present
+ * the stock layout is left in place and the native surface adaptation carries the
+ * phone, which is the arrangement the remote channel has always used.
+ * @param entry - Boot-manifest entry for the upstream layout module.
+ * @returns Whether replacing that entry with the dedicated layout is safe.
+ */
+function supportsDedicatedLayout(entry: BootGraphEntry): boolean {
+  return !(Array.isArray(entry.inject) && entry.inject.includes(LAYOUT_GENERATION_MARKER))
+}
+
+/**
+ * Drop {@link DESKTOP_SHELL_ONLY_MODULES} from the manifest before it is served.
+ *
+ * A batch whose entries are all pruned is dropped along with them, so a caller's
+ * batch validation never sees an empty batch.
+ * @param entries - Manifest entries, mutated in place.
+ * @param batches - Manifest batches, mutated in place when present.
+ * @returns Whether anything was removed.
+ */
+function pruneDesktopShellModules(entries: BootGraphEntry[], batches: BootGraphBatch[] | undefined): boolean {
+  const isShellOnly = (id: unknown): boolean => typeof id === 'string' && DESKTOP_SHELL_ONLY_MODULES.includes(id)
+  if (!entries.some(entry => entry !== null && typeof entry === 'object' && isShellOnly(entry.id))) return false
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    if (isShellOnly(entries[index]?.id)) entries.splice(index, 1)
+  }
+  if (batches === undefined) return true
+  for (let index = batches.length - 1; index >= 0; index -= 1) {
+    const batch = batches[index]
+    if (batch === null || typeof batch !== 'object' || !Array.isArray(batch.entries)) continue
+    batch.entries = batch.entries.filter(id => !isShellOnly(id))
+    if (batch.entries.length === 0) batches.splice(index, 1)
+  }
+  return true
+}
+
 function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
   const site = locateBootManifest(html)
   const parsed = site.parsed
   const entries = parsed.entries as BootGraphEntry[]
+  if (parsed.batches !== undefined && !Array.isArray(parsed.batches)) {
+    throw new Error('upstream DSH boot manifest batches are malformed')
+  }
+  const batches = parsed.batches as BootGraphBatch[] | undefined
   const layout = requireLayoutModule(entries)
-  layout.entry.url = MOBILE_LAYOUT_PATH
-  layout.entry.rev = `dsh-mobile-layout-${DSH_MOBILE_VERSION}`
+  // Prune before anything validates the batch shape, so a batch left empty by the
+  // removal is dropped with it instead of being reported as malformed.
+  pruneDesktopShellModules(entries, batches)
+
+  // Only a layout generation this plugin's own layout module implements may be
+  // substituted. On any other one the stock layout stays in place and the phone
+  // keeps the native surface adaptation, which is what the remote channel has
+  // always done — substituting an unimplemented contract renders a page with no
+  // conversation in it.
+  const dedicatedLayout = supportsDedicatedLayout(layout.entry)
+  if (dedicatedLayout) {
+    layout.entry.url = MOBILE_LAYOUT_PATH
+    layout.entry.rev = `dsh-mobile-layout-${DSH_MOBILE_VERSION}`
+  }
   const remoteSettings = orderAuthenticatedSettings(entries, layout.slots)
 
   let mobileBatch: MobileBootBatchPlan | undefined
-  if (parsed.batches !== undefined) {
-    if (!Array.isArray(parsed.batches)) throw new Error('upstream DSH boot manifest batches are malformed')
-    const batches = parsed.batches as BootGraphBatch[]
+  // The newer generation already serves one combined request per phase
+  // (`plugins/??…`), so this plugin's own batch adds nothing there. It exists for
+  // the generation that fetched every module separately — and only while the
+  // layout module it substitutes is the one this plugin implements.
+  if (dedicatedLayout && batches !== undefined) {
     const entryById = new Map(entries.map(entry => [entry.id, entry]))
     if (entryById.size !== entries.length) throw new Error('upstream DSH boot manifest has duplicate entries')
     const layoutBatches: BootGraphBatch[] = []
@@ -426,6 +518,8 @@ export function rewriteMobileIndex(html: string): string {
 export function rewriteRemoteMobileIndex(html: string): string {
   const site = locateBootManifest(html)
   const entries = site.parsed.entries as BootGraphEntry[]
+  const batches = Array.isArray(site.parsed.batches) ? site.parsed.batches as BootGraphBatch[] : undefined
+  pruneDesktopShellModules(entries, batches)
   orderAuthenticatedSettings(entries, requireLayoutModule(entries).slots)
   const replacement = `${MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP}${MOBILE_TRUST_FLAG}${site.assignment}${JSON.stringify(site.parsed)};`
   return ensureMobileViewport(`${html.slice(0, site.start)}${replacement}${html.slice(site.scriptEnd)}`)
