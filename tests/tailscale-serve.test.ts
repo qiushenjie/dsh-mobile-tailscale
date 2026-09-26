@@ -4,7 +4,25 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import type { MobileAccessControlStore } from '../src/control.js'
 import type { RemotePassthroughProxy } from '../src/remote-proxy.js'
-import { TailscaleServeController } from '../src/tailscale-serve.js'
+import { TailscaleServeController, resolveTailscaleBin } from '../src/tailscale-serve.js'
+
+describe('tailscale CLI resolution', () => {
+  it('does not depend on the Host PATH', () => {
+    // The Host process DSH Desktop launches runs with `/usr/bin:/bin:/usr/sbin:/sbin`,
+    // which omits where macOS actually installs the CLI. A bare `tailscale` lookup
+    // therefore failed with ENOENT and reported `tailscale_missing` on a machine
+    // where the CLI was installed and working.
+    expect(resolveTailscaleBin(path => path === '/usr/local/bin/tailscale')).toBe('/usr/local/bin/tailscale')
+    expect(resolveTailscaleBin(path => path === '/Applications/Tailscale.app/Contents/MacOS/Tailscale'))
+      .toBe('/Applications/Tailscale.app/Contents/MacOS/Tailscale')
+  })
+
+  it('falls back to the bare command when nothing is installed at a known location', () => {
+    // Undefined lets the controller keep `tailscale` as the last resort, so a
+    // PATH-provided binary (or a Windows install outside the candidates) still works.
+    expect(resolveTailscaleBin(() => false)).toBeUndefined()
+  })
+})
 
 /**
  * Install a fake `tailscale` executable that records every invocation and

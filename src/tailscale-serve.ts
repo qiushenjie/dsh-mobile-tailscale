@@ -17,9 +17,40 @@
  */
 
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { promisify } from 'node:util'
 import type { MobileAccessControlStore } from './control.js'
 import type { RemotePassthroughProxy } from './remote-proxy.js'
+
+/**
+ * Absolute locations the Tailscale CLI is installed at when it is not reachable
+ * through `PATH`.
+ *
+ * The Host process DSH Desktop launches runs with a minimal `PATH`
+ * (`/usr/bin:/bin:/usr/sbin:/sbin`), while macOS installs the CLI at
+ * `/usr/local/bin/tailscale` (a shim into `Tailscale.app`) or, under Homebrew on
+ * Apple Silicon, `/opt/homebrew/bin/tailscale`. Resolving the bare command
+ * through that `PATH` therefore failed with ENOENT and surfaced as
+ * `tailscale_missing` on a machine where the CLI was installed and working.
+ */
+const TAILSCALE_BIN_CANDIDATES = Object.freeze([
+  '/usr/local/bin/tailscale',
+  '/opt/homebrew/bin/tailscale',
+  '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+  '/usr/bin/tailscale',
+  '/usr/sbin/tailscale',
+  'C:\\Program Files\\Tailscale\\tailscale.exe',
+  'C:\\Program Files (x86)\\Tailscale\\tailscale.exe',
+])
+
+/**
+ * First installed Tailscale CLI among the known locations.
+ * @param exists - File probe, injectable so the search is testable without a filesystem.
+ * @returns The absolute path, or undefined when none of the candidates exist.
+ */
+export function resolveTailscaleBin(exists: (path: string) => boolean = existsSync): string | undefined {
+  return TAILSCALE_BIN_CANDIDATES.find(candidate => exists(candidate))
+}
 
 /** Status of the Tailscale Serve remote transport, matching the Funnel shape. */
 export interface TailscaleServeStatus {
@@ -101,6 +132,7 @@ export class TailscaleServeController {
   private disposed = false
   private latest: TailscaleServeStatus = Object.freeze({ enabled: false, state: 'off' })
   private queue: Promise<void> = Promise.resolve()
+  private resolvedBin: string | undefined
 
   constructor(private readonly options: TailscaleServeControllerOptions) {}
 
@@ -196,7 +228,11 @@ export class TailscaleServeController {
   }
 
   private bin(): string {
-    return this.options.bin ?? 'tailscale'
+    if (this.options.bin !== undefined) return this.options.bin
+    // Resolved once: the search probes the filesystem, and the answer cannot
+    // change while this controller lives.
+    this.resolvedBin ??= resolveTailscaleBin() ?? 'tailscale'
+    return this.resolvedBin
   }
 
   private async start(): Promise<void> {

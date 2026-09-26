@@ -88,6 +88,27 @@ function isLoopbackHost(hostname: string): boolean {
 }
 
 /**
+ * Whether this page is the desktop application's own window rather than a
+ * phone-facing channel.
+ *
+ * DSH Desktop serves its window from a private scheme — `dsh-app://app/` in DSH
+ * Desktop NEXT — so `location.hostname` is `app` and a loopback-only test reads
+ * the desktop window as a remote page. The plugin then installed the *phone*
+ * adaptation there: the sidebar launcher was never registered (the "移动访问"
+ * entry simply did not exist), while the mobile surface replayed its view
+ * transition on every settings click.
+ *
+ * Phone channels are always plain http(s) — through the LAN gateway or the
+ * passthrough proxy — so any other scheme is the desktop shell. Matching on the
+ * scheme rather than the literal `dsh-app:` keeps this working if the desktop
+ * renames its private origin.
+ * @returns Whether the page runs on the desktop application's own origin.
+ */
+function isDesktopShellOrigin(): boolean {
+  return location.protocol !== 'http:' && location.protocol !== 'https:'
+}
+
+/**
  * Match DSH's client-side privilege hint to the authenticated mobile gateway.
  * The gateway authenticates the paired device and forwards allowed requests to
  * DSH's loopback listener, so settings RPCs receive the same Host-side checks
@@ -956,12 +977,13 @@ export function apply(ctx: ClientContext): void {
   }, 'dsh-mobile: authenticated gateway client trust')
 
   ctx.effect(() => {
-    const loopback = isLoopbackHost(location.hostname) && !new URLSearchParams(location.search).has('dsh-mobile-preview')
-    const style = element('style'); style.dataset.plugin = 'dsh-mobile'; style.textContent = loopback
+    const desktopSurface = isDesktopShellOrigin()
+      || (isLoopbackHost(location.hostname) && !new URLSearchParams(location.search).has('dsh-mobile-preview'))
+    const style = element('style'); style.dataset.plugin = 'dsh-mobile'; style.textContent = desktopSurface
       ? CONTROL_STYLES
       : NATIVE_MOBILE_STYLES
     document.head.append(style)
-    if (!loopback) {
+    if (!desktopSurface) {
       const removeCustom = installCustomAssets()
       const removeSurface = installNativeMobileSurface()
       return () => { removeCustom(); removeSurface(); style.remove() }
