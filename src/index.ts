@@ -35,7 +35,22 @@ export type {
   MobileAccessControlStore,
   MobileAccessRuntime,
 } from './control.js'
-export { MobileAccessGateway, rewriteMobileIndex, rewriteRemoteMobileIndex } from './gateway.js'
+export {
+  MobileAccessGateway,
+  MobileBootBatchStore,
+  mobileBootBatchKey,
+  rewriteMobileIndex,
+  rewriteMobileIndexWithBatches,
+  rewriteRemoteMobileIndex,
+  rewriteRemoteMobileIndexWithBatches,
+  sendMobileBootBatch,
+} from './gateway.js'
+export type {
+  MobileBootBatchEntry,
+  MobileBootBatchPayload,
+  MobileBootBatchPlan,
+  RewrittenMobileIndex,
+} from './gateway.js'
 export {
   EXTENSION_LIMITS,
   MobileAccessService,

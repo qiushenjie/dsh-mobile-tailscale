@@ -17,3 +17,4 @@ apps/mobile/android/**/build/
 apps/mobile/ios/
 apps/mobile/store/ios/
 .probe-compiled/
+.pnpm-store/

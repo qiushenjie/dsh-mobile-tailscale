@@ -31,11 +31,16 @@ import {
   sendFailure,
 } from './http-security.js'
 import {
-  rewriteRemoteMobileIndex,
+  mobileBootBatchKey,
+  MobileBootBatchStore,
+  rewriteRemoteMobileIndexWithBatches,
   sanitizeRequestHeaders,
   sanitizeResponseHeaders,
+  sendMobileBootBatch,
   stripIpv6Brackets,
   websocketAccept,
+  type MobileBootBatchEntry,
+  type MobileBootBatchPlan,
 } from './gateway.js'
 
 const MAX_HEADER_BYTES = 16 * 1024
@@ -59,6 +64,11 @@ const UPSTREAM_AUTH_REFRESH_MARGIN_MS = 30_000
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 30_000
 const DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024
 const DEFAULT_MAX_WEB_SOCKETS = 32
+/** Per-module bound while assembling a boot batch, matching the LAN gateway's. */
+const MAX_BOOT_ENTRY_BYTES = 8 * 1024 * 1024
+/** Bounds while assembling a whole batch, matching the LAN gateway's. */
+const MAX_BOOT_BATCHES = 8
+const MAX_BOOT_BATCH_BYTES = 32 * 1024 * 1024
 
 /** Construction inputs for one remote passthrough proxy lifecycle. */
 export interface RemotePassthroughProxyOptions {
@@ -101,6 +111,22 @@ export class RemotePassthroughProxy {
   private upstreamCookieOrigin: string | undefined
   private upstreamCookieExpiresAt = 0
   private upstreamCookieTask: Promise<string | undefined> | undefined
+  /**
+   * Batches this proxy assembles and serves itself.
+   *
+   * The rewritten document points the phone at `…/mobile-boot/<key>.js` instead
+   * of the stock combined request, so that a pruned module's bytes are never
+   * fetched. The LAN gateway keeps its own store: this one must work with LAN
+   * access off, and it reaches the upstream with the remote channel's cookie.
+   * The fingerprint is the upstream origin, so moving DSH to a new port rebuilds
+   * the cached bodies.
+   */
+  private readonly bootBatches = new MobileBootBatchStore(
+    (entry, signal) => this.loadBootEntry(entry, signal),
+    async () => this.options.resolveUpstream().origin,
+    MAX_BOOT_BATCHES,
+    (plan, signal) => this.loadStockBatch(plan, signal),
+  )
 
   constructor(private readonly options: RemotePassthroughProxyOptions) {}
 
@@ -197,6 +223,15 @@ export class RemotePassthroughProxy {
     if (!['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
       throw new HttpError(405, 'method_not_allowed')
     }
+    // A rewritten document asks for the pruned boot graph here rather than from
+    // upstream, which only answers the exact combinations it built itself.
+    const batchKey = mobileBootBatchKey(target.decodedPathname)
+    if (batchKey !== undefined) {
+      if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'method_not_allowed')
+      const payload = await this.bootBatches.render(batchKey, AbortSignal.timeout(this.upstreamTimeoutMs()))
+      await sendMobileBootBatch(request, response, payload, false)
+      return
+    }
     const body = method === 'GET' || method === 'HEAD'
       ? Buffer.alloc(0)
       : await this.readBoundedBody(request)
@@ -281,7 +316,9 @@ export class RemotePassthroughProxy {
     let body = raw
     if (rewritable) {
       try {
-        body = Buffer.from(rewriteRemoteMobileIndex(raw.toString('utf8')))
+        const rewritten = rewriteRemoteMobileIndexWithBatches(raw.toString('utf8'))
+        for (const plan of rewritten.batches ?? []) this.bootBatches.remember(plan)
+        body = Buffer.from(rewritten.html)
       } catch (error) {
         process.stderr.write(`[dsh-mobile-tailscale] remote proxy served the stock document: ${error instanceof Error ? error.message : String(error)}\n`)
       }
@@ -291,6 +328,96 @@ export class RemotePassthroughProxy {
     response.writeHead(proxied.statusCode ?? 502, headers)
     response.end(body)
     return true
+  }
+
+  /** Fetch one module of an assembled batch, with the remote channel's cookie. */
+  private async loadBootEntry(entry: MobileBootBatchEntry, signal: AbortSignal): Promise<Buffer> {
+    const upstream = this.options.resolveUpstream()
+    const upstreamCookie = await this.upstreamCookieFor(upstream)
+    return await this.readUpstreamClientBundle(entry.url, upstream, upstreamCookie, signal)
+  }
+
+  /** Fall back to the upstream's own combined request for a plan that cannot be assembled. */
+  private async loadStockBatch(plan: MobileBootBatchPlan, signal: AbortSignal): Promise<Buffer> {
+    const upstream = this.options.resolveUpstream()
+    const upstreamCookie = await this.upstreamCookieFor(upstream)
+    return await this.readUpstreamClientBundle(
+      plan.upstream.url,
+      upstream,
+      upstreamCookie,
+      signal,
+      MAX_BOOT_BATCH_BYTES,
+    )
+  }
+
+  /**
+   * Fetch one module's client bundle from the upstream.
+   *
+   * Entry urls are the relative single-module combo spellings
+   * (`plugins/??id/client.js&rev=…`), so they are resolved against the upstream
+   * origin rather than required absolute; the origin and the `/plugins/` path are
+   * re-checked after resolution so a hostile manifest cannot aim this proxy at
+   * another host or at DSH's own admin routes.
+   * @param source - Entry url from the rewritten manifest.
+   * @param upstream - Live DSH web origin.
+   * @param upstreamCookie - Session cookie pair for that origin, when known.
+   * @param signal - Aborts the fetch.
+   * @returns The module body.
+   */
+  private async readUpstreamClientBundle(
+    source: string,
+    upstream: URL,
+    upstreamCookie: string | undefined,
+    signal: AbortSignal,
+    maxBytes: number = MAX_BOOT_ENTRY_BYTES,
+  ): Promise<Buffer> {
+    if (source.includes('#')) throw new HttpError(502, 'upstream_unavailable')
+    const target = new URL(source, upstream)
+    if (target.origin !== upstream.origin || !target.pathname.startsWith('/plugins/')) {
+      throw new HttpError(502, 'upstream_unavailable')
+    }
+    let upstreamRequest: ClientRequest | undefined
+    const aborted = (): void => { upstreamRequest?.destroy(new Error('request aborted')) }
+    signal.addEventListener('abort', aborted, { once: true })
+    try {
+      const proxied = await new Promise<IncomingMessage>((resolve, reject) => {
+        upstreamRequest = requestHttp({
+          protocol: 'http:',
+          hostname: stripIpv6Brackets(upstream.hostname),
+          port: Number(upstream.port),
+          method: 'GET',
+          path: `${target.pathname}${target.search}`,
+          headers: {
+            host: upstream.host,
+            accept: 'text/javascript',
+            'accept-encoding': 'identity',
+            ...(upstreamCookie === undefined ? {} : { cookie: upstreamCookie }),
+          },
+          agent: false,
+        })
+        upstreamRequest.setTimeout(this.upstreamTimeoutMs(), () => {
+          upstreamRequest?.destroy(new Error('upstream timeout'))
+        })
+        upstreamRequest.once('response', resolve)
+        upstreamRequest.once('error', reject)
+        upstreamRequest.end()
+      })
+      if ((proxied.statusCode ?? 502) !== 200) throw new HttpError(502, 'upstream_unavailable')
+      const chunks: Buffer[] = []
+      let bytes = 0
+      for await (const chunk of proxied) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string)
+        bytes += buffer.byteLength
+        if (bytes > maxBytes) throw new HttpError(502, 'upstream_unavailable')
+        chunks.push(buffer)
+      }
+      return Buffer.concat(chunks)
+    } catch (error) {
+      if (error instanceof HttpError) throw error
+      throw new HttpError(502, 'upstream_unavailable')
+    } finally {
+      signal.removeEventListener('abort', aborted)
+    }
   }
 
   private async handleUpgrade(request: IncomingMessage, client: Socket, head: Buffer): Promise<void> {

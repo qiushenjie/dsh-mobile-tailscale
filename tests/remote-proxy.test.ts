@@ -190,6 +190,141 @@ describe('RemotePassthroughProxy', () => {
     expect(upstream.recorded[0]?.headers['accept-encoding']).toBe('identity')
   })
 
+  it('serves a pruned boot batch itself instead of the stock combined request', async () => {
+    // DSH asks for the whole graph in one combined request per phase and only
+    // serves the exact combinations it built, so dropping the 5.3 MB account
+    // module means this proxy has to assemble and serve that batch itself.
+    const entries = [
+      {
+        id: '@deepseek-ai/dsh-client-ui-layout',
+        url: 'plugins/??@deepseek-ai/dsh-client-ui-layout/client.js&rev=l',
+        rev: 'l',
+        inject: [
+          '@deepseek-ai/dsh-client-locale',
+          '@deepseek-ai/dsh-client-ui-renderer',
+          '@deepseek-ai/dsh-client-ui-session',
+          '@deepseek-ai/dsh-client-ui-theme',
+        ],
+      },
+      {
+        id: '@deepseek-ai/dsh-client-ui-settings-account',
+        url: 'plugins/??@deepseek-ai/dsh-client-ui-settings-account/client.js&rev=a',
+        rev: 'a',
+        inject: ['@deepseek-ai/dsh-client-ui-settings'],
+      },
+      {
+        id: '@deepseek-ai/dsh-client-ui-settings',
+        url: 'plugins/??@deepseek-ai/dsh-client-ui-settings/client.js&rev=s',
+        rev: 's',
+        inject: ['@deepseek-ai/dsh-api-remotes'],
+      },
+      {
+        id: packageName,
+        url: 'plugins/??dsh-mobile-tailscale/client.js&rev=m',
+        rev: 'm',
+        inject: ['@deepseek-ai/dsh-client-connection', '@deepseek-ai/dsh-client-ui-sidebar'],
+      },
+    ]
+    const document = `<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({
+      rev: 'stock',
+      entries,
+      batches: [{ phase: 'application', url: 'plugins/??application.js&rev=stock', rev: 'stock', entries: entries.map(entry => entry.id) }],
+    })};</script></head><body>app</body></html>`
+    const upstream = await startUpstream((record, response) => {
+      if (record.path === '/') {
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        response.end(document)
+        return
+      }
+      response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
+      response.end(`/* module ${record.path} */`)
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const documentResponse = await fetch(proxy.origin() + '/')
+    const html = await documentResponse.text()
+    const batchPath = /"url":"(\/mobile-access\/mobile-boot\/[a-f\d]{64}\.js)"/u.exec(html)?.[1]
+
+    // The pruned module is gone from the manifest itself: entry and batch entry.
+    expect(batchPath).toBeDefined()
+    expect(html).not.toContain('settings-account')
+    expect(html).not.toContain('plugins/??application.js&rev=stock')
+
+    const batchResponse = await fetch(proxy.origin() + String(batchPath))
+    const batch = await batchResponse.text()
+
+    expect(batchResponse.status).toBe(200)
+    expect(batchResponse.headers.get('content-type')).toBe('text/javascript; charset=utf-8')
+    expect(batch).toContain('@deepseek-ai/dsh-client-ui-layout/client.js')
+    expect(batch).toContain('@deepseek-ai/dsh-client-ui-settings/client.js')
+    expect(batch).toContain('dsh-mobile-tailscale/client.js')
+    // The bytes never came from the stock combined request, and never included
+    // the pruned module.
+    expect(batch).not.toContain('settings-account')
+    expect(upstream.recorded.some(record => record.path.includes('??application.js'))).toBe(false)
+
+    const cached = await fetch(proxy.origin() + String(batchPath), {
+      headers: { 'if-none-match': batchResponse.headers.get('etag') ?? '' },
+    })
+    expect(cached.status).toBe(304)
+  })
+
+  it('falls back to the stock combined request when a module cannot be fetched', async () => {
+    // Pruning must never cost the page: if a module cannot be fetched, the
+    // upstream's own combined request still serves the complete graph.
+    const entries = [
+      {
+        id: '@deepseek-ai/dsh-client-ui-layout',
+        url: 'plugins/??@deepseek-ai/dsh-client-ui-layout/client.js&rev=l',
+        rev: 'l',
+        inject: [
+          '@deepseek-ai/dsh-client-locale',
+          '@deepseek-ai/dsh-client-ui-renderer',
+          '@deepseek-ai/dsh-client-ui-session',
+          '@deepseek-ai/dsh-client-ui-theme',
+        ],
+      },
+      {
+        id: '@deepseek-ai/dsh-client-ui-settings',
+        url: 'plugins/??@deepseek-ai/dsh-client-ui-settings/client.js&rev=s',
+        rev: 's',
+        inject: ['@deepseek-ai/dsh-api-remotes'],
+      },
+    ]
+    const document = `<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({
+      rev: 'stock',
+      entries,
+      batches: [{ phase: 'application', url: 'plugins/??application.js&rev=stock', rev: 'stock', entries: entries.map(entry => entry.id) }],
+    })};</script></head><body>app</body></html>`
+    const upstream = await startUpstream((record, response) => {
+      if (record.path === '/') {
+        response.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+        response.end(document)
+        return
+      }
+      if (record.path.includes('??application.js')) {
+        response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8' })
+        response.end('/* stock combined graph */')
+        return
+      }
+      response.writeHead(500, { 'content-type': 'text/plain' })
+      response.end('nope')
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const html = await (await fetch(proxy.origin() + '/')).text()
+    const batchPath = /"url":"(\/mobile-access\/mobile-boot\/[a-f\d]{64}\.js)"/u.exec(html)?.[1]
+    const batchResponse = await fetch(proxy.origin() + String(batchPath))
+
+    expect(batchResponse.status).toBe(200)
+    expect(await batchResponse.text()).toBe('/* stock combined graph */')
+    expect(upstream.recorded.some(record => record.path.includes('??application.js'))).toBe(true)
+  })
+
   it('passes a non-document response through untouched', async () => {
     const upstream = await startUpstream((_record, response) => {
       response.writeHead(200, { 'content-type': 'text/plain' })

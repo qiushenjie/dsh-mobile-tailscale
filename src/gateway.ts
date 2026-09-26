@@ -146,12 +146,34 @@ const MOBILE_LAYOUT_DEPENDENCY_PROFILES = Object.freeze([
  * channel that is a direct competitor for the main thread against everything
  * else the page does.
  *
- * Dropping the entry keeps the module inside the graph's combined request but
- * stops it from being activated, so none of its code runs. It is safe to drop:
- * no other entry declares it as a dependency, so removing it cannot displace
- * anything else in the graph.
+ * Dropping the entry stops it from being activated, so none of its code runs.
+ * On a manifest that ships combined batches the module's bytes go away with it
+ * (see {@link pruneUnavailableClientModules}), because the plugin serves those
+ * batches itself; on the generation that fetched every module separately the
+ * bytes are still downloaded but never executed. It is safe to drop: no other
+ * entry declares it as a dependency, so removing it cannot displace anything
+ * else in the graph.
  */
 const DESKTOP_SHELL_ONLY_MODULES: readonly string[] = Object.freeze(['dsh-desktop-next'])
+
+/**
+ * Client modules pruned from the served boot graph even though the phone would
+ * otherwise activate them, because their download cost dwarfs their value on a
+ * phone.
+ *
+ * `@deepseek-ai/dsh-client-ui-settings-account` bundles the DeepSeek login and
+ * Platform billing pages and measured 5,281,067 bytes raw / ~3.7 MB gzip — 65%
+ * of the whole phone boot payload (5.8 MB gzip) on DSH 0.1.7. Nothing injects it
+ * (searching its id across the app and profile `node_modules` only finds its own
+ * manifest), so pruning it removes that single settings page and leaves every
+ * other page, the layout and the conversation untouched.
+ *
+ * Only list a module here after proving nothing injects it: an entry some other
+ * entry requires cannot be dropped without breaking its consumer.
+ */
+const MOBILE_BOOT_EXCLUDED_MODULES: readonly string[] = Object.freeze([
+  '@deepseek-ai/dsh-client-ui-settings-account',
+])
 
 /**
  * A module injected by the layout generation that replaced the root's
@@ -235,21 +257,36 @@ interface BootGraphBatch {
   entries: string[]
 }
 
-interface MobileBootBatchEntry {
+/** One client module inside a plugin-served boot batch. */
+export interface MobileBootBatchEntry {
   readonly id: string
   readonly url: string
   readonly rev: string
 }
 
-interface MobileBootBatchPlan {
+/**
+ * One boot batch this plugin serves itself, at
+ * `/mobile-access/mobile-boot/<key>.js`, instead of letting the phone download
+ * the upstream combined request unchanged.
+ */
+export interface MobileBootBatchPlan {
+  /** Revision key of the plan; reused as the rewritten batch's manifest `rev`. */
   readonly key: string
+  /** Path the phone requests for this batch. */
   readonly path: string
+  /**
+   * The upstream combined request this plan replaced. Serving it unchanged is
+   * the fallback when assembling the pruned batch fails, so pruning can never
+   * cost the phone its boot payload.
+   */
+  readonly upstream: { readonly url: string; readonly rev: string }
   readonly entries: readonly MobileBootBatchEntry[]
 }
 
-interface RewrittenMobileIndex {
+/** Result of a rewritten index: the document plus the batches it now points at. */
+export interface RewrittenMobileIndex {
   readonly html: string
-  readonly batch?: MobileBootBatchPlan
+  readonly batches?: readonly MobileBootBatchPlan[]
 }
 
 interface StoredMobileBootBatch {
@@ -257,10 +294,159 @@ interface StoredMobileBootBatch {
   body?: Buffer
   gzipBody?: Buffer
   etag?: string
-  layoutMtimeMs?: number
+  fingerprint?: string
 }
 
 const gzipBuffer = promisify(gzip)
+
+/**
+ * Assemble and cache the combined boot batches a rewritten manifest points at.
+ *
+ * DSH asks for the whole graph in one request per phase (`plugins/??id/client.js,…`)
+ * and the upstream server only answers the exact combinations it built, so a
+ * batch that drops a module has to be assembled here instead. Both faces of the
+ * plugin keep their own store — the LAN gateway and the remote passthrough proxy
+ * reach upstream with different credentials and either may be the only one
+ * enabled.
+ */
+export class MobileBootBatchStore {
+  private readonly batches = new Map<string, StoredMobileBootBatch>()
+  private readonly loadEntry: (entry: MobileBootBatchEntry, signal: AbortSignal) => Promise<Buffer>
+  private readonly fingerprint: () => Promise<string>
+  private readonly maxBatches: number
+  private readonly loadFallback: ((plan: MobileBootBatchPlan, signal: AbortSignal) => Promise<Buffer>) | undefined
+
+  /**
+   * @param loadEntry - Fetches one module's client bundle.
+   * @param fingerprint - Changes whenever the stored bodies must be rebuilt.
+   * @param maxBatches - How many plans to keep before evicting the oldest.
+   * @param loadFallback - Serves the upstream's own combined request when a module cannot be fetched.
+   */
+  constructor(
+    loadEntry: (entry: MobileBootBatchEntry, signal: AbortSignal) => Promise<Buffer>,
+    fingerprint: () => Promise<string>,
+    maxBatches: number = MAX_MOBILE_BOOT_BATCHES,
+    loadFallback?: (plan: MobileBootBatchPlan, signal: AbortSignal) => Promise<Buffer>,
+  ) {
+    this.loadEntry = loadEntry
+    this.fingerprint = fingerprint
+    this.maxBatches = maxBatches
+    this.loadFallback = loadFallback
+  }
+
+  /**
+   * Remember a plan, most recently planned last, evicting the oldest over the cap.
+   * @param plan - Plan produced while rewriting a manifest.
+   */
+  remember(plan: MobileBootBatchPlan): void {
+    const existing = this.batches.get(plan.key)
+    this.batches.delete(plan.key)
+    this.batches.set(plan.key, existing === undefined ? { plan } : { ...existing, plan })
+    while (this.batches.size > this.maxBatches) {
+      const oldest = this.batches.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      this.batches.delete(oldest)
+    }
+  }
+
+  /**
+   * Assemble the batch for a key, reusing the cached body while the fingerprint holds.
+   * @param key - Batch key taken from `…/mobile-boot/<key>.js`.
+   * @param signal - Aborts the upstream fetches.
+   * @returns The body, its entity tag and a lazily built gzip view.
+   */
+  async render(key: string, signal: AbortSignal): Promise<MobileBootBatchPayload> {
+    const stored = this.batches.get(key)
+    if (stored === undefined) throw new HttpError(404, 'not_found')
+    const fingerprint = await this.fingerprint()
+    if (stored.body === undefined || stored.etag === undefined || stored.fingerprint !== fingerprint) {
+      try {
+        const assembled = await this.assemble(stored.plan, signal)
+        stored.body = assembled
+        delete stored.gzipBody
+        stored.etag = createHash('sha256').update(assembled).digest('hex')
+        stored.fingerprint = fingerprint
+      } catch (error) {
+        // A batch this plugin cannot assemble would otherwise cost the phone the
+        // whole page, so the upstream's own combined request stands in for it —
+        // complete, pruned modules included. It is deliberately not cached, so
+        // the next request still tries to prune.
+        if (this.loadFallback === undefined) throw error
+        const body = await this.loadFallback(stored.plan, signal)
+        return {
+          body,
+          etag: createHash('sha256').update(body).digest('hex'),
+          gzipBody: async (): Promise<Buffer> => await gzipBuffer(body),
+        }
+      }
+    }
+    const body = stored.body
+    return {
+      body,
+      etag: stored.etag,
+      gzipBody: async (): Promise<Buffer> => stored.gzipBody ??= await gzipBuffer(body),
+    }
+  }
+
+  private async assemble(plan: MobileBootBatchPlan, signal: AbortSignal): Promise<Buffer> {
+    const bodies = new Array<Buffer>(plan.entries.length)
+    let cursor = 0
+    const worker = async (): Promise<void> => {
+      while (cursor < plan.entries.length) {
+        const index = cursor++
+        const entry = plan.entries[index]!
+        bodies[index] = await this.loadEntry(entry, signal)
+        if (bodies[index]!.byteLength > MAX_MOBILE_BOOT_ENTRY_BYTES) throw new HttpError(502, 'upstream_unavailable')
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(8, plan.entries.length) }, worker))
+    const total = bodies.reduce((bytes, body) => bytes + body.byteLength + 2, 0)
+    if (total > MAX_MOBILE_BOOT_BATCH_BYTES) throw new HttpError(502, 'upstream_unavailable')
+    return Buffer.concat(bodies.flatMap(body => [body, Buffer.from('\n;\n')]))
+  }
+}
+
+/** An assembled batch, as handed back by {@link MobileBootBatchStore.render}. */
+export interface MobileBootBatchPayload {
+  readonly body: Buffer
+  readonly etag: string
+  readonly gzipBody: () => Promise<Buffer>
+}
+
+/**
+ * Answer one `…/mobile-boot/<key>.js` request with an assembled batch.
+ * @param request - Incoming request, already authorized by the caller.
+ * @param response - Response to write.
+ * @param payload - Assembled batch.
+ * @param tlsEnabled - Whether the security headers may assume HTTPS.
+ */
+export async function sendMobileBootBatch(
+  request: IncomingMessage,
+  response: ServerResponse,
+  payload: MobileBootBatchPayload,
+  tlsEnabled: boolean,
+): Promise<void> {
+  const compressed = acceptsGzip(request.headers['accept-encoding'])
+  const body = compressed ? await payload.gzipBody() : payload.body
+  const etag = compressed ? `${payload.etag}-gzip` : payload.etag
+  const headers: OutgoingHttpHeaders = {
+    'Content-Type': 'text/javascript; charset=utf-8',
+    'Content-Length': body.byteLength,
+    'Cache-Control': 'private, no-cache',
+    ETag: etag,
+  }
+  if (compressed) headers['Content-Encoding'] = 'gzip'
+  addVaryAcceptEncoding(headers)
+  setSecurityHeaders(response, tlsEnabled)
+  if (headerValue(request.headers, 'if-none-match') === etag) {
+    response.writeHead(304, { ETag: etag, 'Cache-Control': 'private, no-cache', Vary: String(headers.vary) })
+    response.end()
+    return
+  }
+  response.writeHead(200, headers)
+  if (request.method === 'HEAD') response.end()
+  else response.end(body)
+}
 
 function ensureMobileViewport(html: string): string {
   const viewport = /<meta\b(?=[^>]*\bname\s*=\s*["']viewport["'])[^>]*>/iu
@@ -396,7 +582,8 @@ function supportsDedicatedLayout(entry: BootGraphEntry): boolean {
 }
 
 /**
- * Drop {@link DESKTOP_SHELL_ONLY_MODULES} from the manifest before it is served.
+ * Drop {@link DESKTOP_SHELL_ONLY_MODULES} and {@link MOBILE_BOOT_EXCLUDED_MODULES}
+ * from the manifest before it is served.
  *
  * A batch whose entries are all pruned is dropped along with them, so a caller's
  * batch validation never sees an empty batch.
@@ -404,23 +591,74 @@ function supportsDedicatedLayout(entry: BootGraphEntry): boolean {
  * @param batches - Manifest batches, mutated in place when present.
  * @returns Whether anything was removed.
  */
-function pruneDesktopShellModules(entries: BootGraphEntry[], batches: BootGraphBatch[] | undefined): boolean {
-  const isShellOnly = (id: unknown): boolean => typeof id === 'string' && DESKTOP_SHELL_ONLY_MODULES.includes(id)
-  if (!entries.some(entry => entry !== null && typeof entry === 'object' && isShellOnly(entry.id))) return false
+function pruneUnavailableClientModules(entries: BootGraphEntry[], batches: BootGraphBatch[] | undefined): boolean {
+  const pruned: readonly string[] = [...DESKTOP_SHELL_ONLY_MODULES, ...MOBILE_BOOT_EXCLUDED_MODULES]
+  const isPruned = (id: unknown): boolean => typeof id === 'string' && pruned.includes(id)
+  if (!entries.some(entry => entry !== null && typeof entry === 'object' && isPruned(entry.id))) return false
   for (let index = entries.length - 1; index >= 0; index -= 1) {
-    if (isShellOnly(entries[index]?.id)) entries.splice(index, 1)
+    if (isPruned(entries[index]?.id)) entries.splice(index, 1)
   }
   if (batches === undefined) return true
   for (let index = batches.length - 1; index >= 0; index -= 1) {
     const batch = batches[index]
     if (batch === null || typeof batch !== 'object' || !Array.isArray(batch.entries)) continue
-    batch.entries = batch.entries.filter(id => !isShellOnly(id))
+    batch.entries = batch.entries.filter(id => !isPruned(id))
     if (batch.entries.length === 0) batches.splice(index, 1)
   }
   return true
 }
 
-function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
+/**
+ * Replace every combined batch in the manifest with one this plugin serves
+ * itself, so the pruned modules never reach the phone.
+ *
+ * DSH fetches one combined request per phase (`plugins/??id/client.js,…`) and the
+ * upstream server only answers the exact combinations it built, so a pruned
+ * module cannot be dropped from a stock batch from the outside: the whole batch
+ * has to be assembled and served here instead. Each plan keeps the stock request
+ * it replaced so a caller can fall back to it.
+ *
+ * A batch that does not line up with the manifest is left alone rather than
+ * failing the document: the phone keeps the stock batch and only loses the
+ * pruning for it.
+ * @param entries - Manifest entries, urls already final.
+ * @param batches - Manifest batches, mutated in place.
+ * @returns Plans to remember; empty when nothing could be planned.
+ */
+function planMobileBootBatches(entries: BootGraphEntry[], batches: BootGraphBatch[]): readonly MobileBootBatchPlan[] {
+  const entryById = new Map<string, BootGraphEntry>()
+  for (const entry of entries) {
+    if (entry === null || typeof entry !== 'object' || typeof entry.id !== 'string') return Object.freeze([])
+    if (entryById.has(entry.id)) return Object.freeze([])
+    entryById.set(entry.id, entry)
+  }
+  const plans: MobileBootBatchPlan[] = []
+  for (const batch of batches) {
+    if (batch === null || typeof batch !== 'object'
+      || (batch.phase !== 'bootstrap' && batch.phase !== 'application')
+      || typeof batch.url !== 'string' || typeof batch.rev !== 'string'
+      || !Array.isArray(batch.entries) || batch.entries.length === 0) continue
+    const planEntries: MobileBootBatchEntry[] = []
+    let usable = true
+    for (const id of batch.entries) {
+      const entry = typeof id === 'string' ? entryById.get(id) : undefined
+      if (entry === undefined || typeof entry.url !== 'string' || typeof entry.rev !== 'string') {
+        usable = false
+        break
+      }
+      planEntries.push(Object.freeze({ id: entry.id, url: entry.url, rev: entry.rev }))
+    }
+    if (!usable) continue
+    const upstream = Object.freeze({ url: batch.url, rev: batch.rev })
+    const revision = revisionedMobileBatchPath(planEntries)
+    batch.url = revision.path
+    batch.rev = revision.key
+    plans.push(Object.freeze({ ...revision, upstream, entries: Object.freeze(planEntries) }))
+  }
+  return Object.freeze(plans)
+}
+
+export function rewriteMobileIndexWithBatches(html: string): RewrittenMobileIndex {
   const site = locateBootManifest(html)
   const parsed = site.parsed
   const entries = parsed.entries as BootGraphEntry[]
@@ -429,9 +667,9 @@ function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
   }
   const batches = parsed.batches as BootGraphBatch[] | undefined
   const layout = requireLayoutModule(entries)
-  // Prune before anything validates the batch shape, so a batch left empty by the
-  // removal is dropped with it instead of being reported as malformed.
-  pruneDesktopShellModules(entries, batches)
+  // Prune before anything plans the batches, so a batch left empty by the removal
+  // is dropped with it instead of being reported as unusable.
+  pruneUnavailableClientModules(entries, batches)
 
   // Only a layout generation this plugin's own layout module implements may be
   // substituted. On any other one the stock layout stays in place and the phone
@@ -445,40 +683,11 @@ function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
   }
   const remoteSettings = orderAuthenticatedSettings(entries, layout.slots)
 
-  let mobileBatch: MobileBootBatchPlan | undefined
-  // The newer generation already serves one combined request per phase
-  // (`plugins/??…`), so this plugin's own batch adds nothing there. It exists for
-  // the generation that fetched every module separately — and only while the
-  // layout module it substitutes is the one this plugin implements.
-  if (dedicatedLayout && batches !== undefined) {
-    const entryById = new Map(entries.map(entry => [entry.id, entry]))
-    if (entryById.size !== entries.length) throw new Error('upstream DSH boot manifest has duplicate entries')
-    const layoutBatches: BootGraphBatch[] = []
-    for (const batch of batches) {
-      if (batch === null || typeof batch !== 'object'
-        || (batch.phase !== 'bootstrap' && batch.phase !== 'application')
-        || typeof batch.url !== 'string' || typeof batch.rev !== 'string'
-        || !Array.isArray(batch.entries) || batch.entries.length === 0
-        || batch.entries.some(id => typeof id !== 'string' || !entryById.has(id))) {
-        throw new Error('upstream DSH boot manifest batches are malformed')
-      }
-      if (batch.entries.includes(MOBILE_LAYOUT_MODULE)) layoutBatches.push(batch)
-    }
-    if (layoutBatches.length !== 1 || layoutBatches[0]?.phase !== 'application') {
-      throw new Error('upstream DSH boot manifest has no unique application layout batch')
-    }
-    const layoutBatch = layoutBatches[0]
-    const planEntries = layoutBatch.entries.map((id): MobileBootBatchEntry => {
-      const entry = entryById.get(id)
-      if (entry === undefined || typeof entry.url !== 'string' || typeof entry.rev !== 'string') {
-        throw new Error('upstream DSH boot manifest batches are malformed')
-      }
-      return Object.freeze({ id, url: entry.url, rev: entry.rev })
-    })
-    const revision = revisionedMobileBatchPath(planEntries)
-    layoutBatch.url = revision.path
-    layoutBatch.rev = revision.key
-    mobileBatch = Object.freeze({ ...revision, entries: Object.freeze(planEntries) })
+  // Every combined batch is served by this plugin from here on, so the pruned
+  // modules are never downloaded. The layout substitution above must run first:
+  // a plan captures the final entry urls.
+  const mobileBatches = batches === undefined ? Object.freeze([]) : planMobileBootBatches(entries, batches)
+  if (mobileBatches.length > 0) {
     parsed.rev = createHash('sha256').update(JSON.stringify({ entries, batches })).digest('hex').slice(0, 16)
   }
   // The transport override is what upstream ships for the remote-backed
@@ -487,25 +696,25 @@ function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
   const replacement = `${transportBootstrap}${MOBILE_CSRF_FETCH_BOOTSTRAP}${MOBILE_TRUST_FLAG}window.__DSH_MOBILE_FRONTEND__="dedicated";${site.assignment}${JSON.stringify(parsed)};`
   return Object.freeze({
     html: ensureMobileViewport(`${html.slice(0, site.start)}${replacement}${html.slice(site.scriptEnd)}`),
-    ...(mobileBatch === undefined ? {} : { batch: mobileBatch }),
+    ...(mobileBatches.length === 0 ? {} : { batches: mobileBatches }),
   })
 }
 
 /** Replace only DSH's layout client module while retaining its complete plugin graph. */
 export function rewriteMobileIndex(html: string): string {
-  return rewriteMobileIndexWithBatch(html).html
+  return rewriteMobileIndexWithBatches(html).html
 }
 
 /**
  * Rewrite the mobile index for the pairing-free remote (Tailscale Serve) channel.
  *
- * The passthrough proxy owns that origin rather than this gateway, so there is
- * no boot batch to hand out and the stock layout module is left in place — the
- * remote channel keeps DSH's own layout with the surface adaptation. Only the
- * authenticated-transport override, the trusted-gateway flag and the settings
- * ordering are applied here, because without them DSH resolves its settings to
- * the in-memory backend and the phone cannot load the model provider directory
- * at all.
+ * The passthrough proxy owns that origin rather than this gateway, so the batch
+ * plans are returned for the proxy to serve instead of going into the gateway's
+ * own batch store. The stock layout module is left in place here — the remote
+ * channel keeps DSH's own layout with the surface adaptation. The authenticated
+ * -transport override, the trusted-gateway flag and the settings ordering are
+ * applied because without them DSH resolves its settings to the in-memory
+ * backend and the phone cannot load the model provider directory at all.
  *
  * The transport override is injected unconditionally here, not only on the
  * remote-backed settings graph: a page on a `*.ts.net` origin is never loopback,
@@ -513,16 +722,33 @@ export function rewriteMobileIndex(html: string): string {
  * `@deepseek-ai/dsh-api-gateway` has memoized `$host`. A DSH release that does
  * not read `__DSH_TRANSPORT__` simply ignores the global.
  * @param html - Upstream DSH index document.
- * @returns The document with the mobile trust flag and the settings ordering applied.
+ * @returns The document plus the batch plans the caller has to serve itself.
  */
-export function rewriteRemoteMobileIndex(html: string): string {
+export function rewriteRemoteMobileIndexWithBatches(html: string): RewrittenMobileIndex {
   const site = locateBootManifest(html)
   const entries = site.parsed.entries as BootGraphEntry[]
   const batches = Array.isArray(site.parsed.batches) ? site.parsed.batches as BootGraphBatch[] : undefined
-  pruneDesktopShellModules(entries, batches)
+  pruneUnavailableClientModules(entries, batches)
   orderAuthenticatedSettings(entries, requireLayoutModule(entries).slots)
+  const mobileBatches = batches === undefined ? Object.freeze([]) : planMobileBootBatches(entries, batches)
+  if (mobileBatches.length > 0) {
+    site.parsed.rev = createHash('sha256').update(JSON.stringify({ entries, batches })).digest('hex').slice(0, 16)
+  }
   const replacement = `${MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP}${MOBILE_TRUST_FLAG}${site.assignment}${JSON.stringify(site.parsed)};`
-  return ensureMobileViewport(`${html.slice(0, site.start)}${replacement}${html.slice(site.scriptEnd)}`)
+  return Object.freeze({
+    html: ensureMobileViewport(`${html.slice(0, site.start)}${replacement}${html.slice(site.scriptEnd)}`),
+    ...(mobileBatches.length === 0 ? {} : { batches: mobileBatches }),
+  })
+}
+
+/**
+ * Document-only view of {@link rewriteRemoteMobileIndexWithBatches} for callers
+ * that do not serve the rewritten batches themselves.
+ * @param html - Upstream DSH index document.
+ * @returns The rewritten document.
+ */
+export function rewriteRemoteMobileIndex(html: string): string {
+  return rewriteRemoteMobileIndexWithBatches(html).html
 }
 
 const PAIR_SCRIPT = `(() => {
@@ -911,7 +1137,12 @@ function extensionTarget(pathname: string):
   return undefined
 }
 
-function mobileBootBatchKey(pathname: string): string | undefined {
+/**
+ * Batch key of a `…/mobile-boot/<key>.js` pathname.
+ * @param pathname - Decoded request pathname.
+ * @returns The 64-hex key, or undefined for any other path.
+ */
+export function mobileBootBatchKey(pathname: string): string | undefined {
   const match = new RegExp(`^${MOBILE_BOOT_BATCH_PREFIX.replaceAll('/', '\\/')}([a-f\\d]{64})\\.js$`, 'u').exec(pathname)
   return match?.[1]
 }
@@ -974,7 +1205,12 @@ export class MobileAccessGateway {
   private readonly connectedSockets = new Set<Socket>()
   private readonly activeRequests = new Map<number, ActiveRequest>()
   private readonly activeWebSockets = new Map<number, ActiveWebSocket>()
-  private readonly mobileBootBatches = new Map<string, StoredMobileBootBatch>()
+  private readonly mobileBootBatches = new MobileBootBatchStore(
+    (entry, signal) => this.loadMobileBootEntry(entry, signal),
+    () => this.mobileLayoutFingerprint(),
+    MAX_MOBILE_BOOT_BATCHES,
+    (plan, signal) => this.readUpstreamClientBundle(plan.upstream.url, signal, MAX_MOBILE_BOOT_BATCH_BYTES),
+  )
   private upstreamCookie: string | undefined
   private upstreamCookieExpiresAt = 0
   private upstreamCookieTask: Promise<string> | undefined
@@ -1803,8 +2039,8 @@ export class MobileAccessGateway {
       }
       let body: Buffer
       try {
-        const rewritten = rewriteMobileIndexWithBatch(Buffer.concat(chunks).toString('utf8'))
-        if (rewritten.batch !== undefined) this.rememberMobileBootBatch(rewritten.batch)
+        const rewritten = rewriteMobileIndexWithBatches(Buffer.concat(chunks).toString('utf8'))
+        for (const plan of rewritten.batches ?? []) this.mobileBootBatches.remember(plan)
         body = Buffer.from(rewritten.html)
       } catch {
         throw new HttpError(502, 'upstream_unavailable')
@@ -1830,15 +2066,16 @@ export class MobileAccessGateway {
     }
   }
 
-  private rememberMobileBootBatch(plan: MobileBootBatchPlan): void {
-    const existing = this.mobileBootBatches.get(plan.key)
-    this.mobileBootBatches.delete(plan.key)
-    this.mobileBootBatches.set(plan.key, existing ?? { plan })
-    while (this.mobileBootBatches.size > MAX_MOBILE_BOOT_BATCHES) {
-      const oldest = this.mobileBootBatches.keys().next().value as string | undefined
-      if (oldest === undefined) break
-      this.mobileBootBatches.delete(oldest)
-    }
+  /** Fetch one module of an assembled batch, substituting this plugin's own layout. */
+  private async loadMobileBootEntry(entry: MobileBootBatchEntry, signal: AbortSignal): Promise<Buffer> {
+    return entry.id === MOBILE_LAYOUT_MODULE
+      ? await readFile(this.config.mobileLayoutFile, { signal })
+      : await this.readUpstreamClientBundle(entry.url, signal)
+  }
+
+  /** Rebuild cached batches whenever the bundled layout module changes. */
+  private async mobileLayoutFingerprint(): Promise<string> {
+    return String((await stat(this.config.mobileLayoutFile)).mtimeMs)
   }
 
   private async serveMobileBootBatch(
@@ -1848,41 +2085,10 @@ export class MobileAccessGateway {
     authorization: SessionAuthorization,
   ): Promise<void> {
     if (request.method !== 'GET' && request.method !== 'HEAD') throw new HttpError(405, 'method_not_allowed')
-    const stored = this.mobileBootBatches.get(key)
-    if (stored === undefined) throw new HttpError(404, 'not_found')
     const operation = this.allocateRequest(authorization, response, {})
     try {
-      const layoutStat = await stat(this.config.mobileLayoutFile)
-      if (stored.body === undefined || stored.etag === undefined || stored.layoutMtimeMs !== layoutStat.mtimeMs) {
-        const body = await this.assembleMobileBootBatch(stored.plan, operation.signal)
-        stored.body = body
-        delete stored.gzipBody
-        stored.etag = createHash('sha256').update(body).digest('hex')
-        stored.layoutMtimeMs = layoutStat.mtimeMs
-      }
-      const compressed = acceptsGzip(request.headers['accept-encoding'])
-      const body = compressed
-        ? stored.gzipBody ??= await gzipBuffer(stored.body)
-        : stored.body
-      const etag = compressed ? `${stored.etag}-gzip` : stored.etag
-      const headers: OutgoingHttpHeaders = {
-        'Content-Type': 'text/javascript; charset=utf-8',
-        'Content-Length': body.byteLength,
-        'Cache-Control': 'private, no-cache',
-        ETag: etag,
-      }
-      if (compressed) headers['Content-Encoding'] = 'gzip'
-      addVaryAcceptEncoding(headers)
-      if (headerValue(request.headers, 'if-none-match') === etag) {
-        setSecurityHeaders(response, this.tlsEnabled)
-        response.writeHead(304, { ETag: etag, 'Cache-Control': 'private, no-cache', Vary: String(headers.vary) })
-        response.end()
-        return
-      }
-      setSecurityHeaders(response, this.tlsEnabled)
-      response.writeHead(200, headers)
-      if (request.method === 'HEAD') response.end()
-      else response.end(body)
+      const payload = await this.mobileBootBatches.render(key, operation.signal)
+      await sendMobileBootBatch(request, response, payload, this.tlsEnabled)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new HttpError(503, 'mobile_frontend_unavailable')
       throw error
@@ -1891,29 +2097,17 @@ export class MobileAccessGateway {
     }
   }
 
-  private async assembleMobileBootBatch(plan: MobileBootBatchPlan, signal: AbortSignal): Promise<Buffer> {
-    const bodies = new Array<Buffer>(plan.entries.length)
-    let cursor = 0
-    const worker = async (): Promise<void> => {
-      while (cursor < plan.entries.length) {
-        const index = cursor++
-        const entry = plan.entries[index]!
-        bodies[index] = entry.id === MOBILE_LAYOUT_MODULE
-          ? await readFile(this.config.mobileLayoutFile, { signal })
-          : await this.readUpstreamClientBundle(entry.url, signal)
-        if (bodies[index]!.byteLength > MAX_MOBILE_BOOT_ENTRY_BYTES) throw new HttpError(502, 'upstream_unavailable')
-      }
-    }
-    await Promise.all(Array.from({ length: Math.min(8, plan.entries.length) }, worker))
-    const total = bodies.reduce((bytes, body) => bytes + body.byteLength + 2, 0)
-    if (total > MAX_MOBILE_BOOT_BATCH_BYTES) throw new HttpError(502, 'upstream_unavailable')
-    return Buffer.concat(bodies.flatMap(body => [body, Buffer.from('\n;\n')]))
-  }
-
-  private async readUpstreamClientBundle(source: string, signal: AbortSignal): Promise<Buffer> {
-    if (!source.startsWith('/plugins/') || source.includes('#')) throw new HttpError(502, 'upstream_unavailable')
+  private async readUpstreamClientBundle(
+    source: string,
+    signal: AbortSignal,
+    maxBytes: number = MAX_MOBILE_BOOT_ENTRY_BYTES,
+  ): Promise<Buffer> {
+    // Entry urls are the relative single-module combo spellings (`plugins/??id/client.js&rev=…`),
+    // so they are resolved against the upstream origin instead of being required absolute.
+    if (source.includes('#')) throw new HttpError(502, 'upstream_unavailable')
     const target = new URL(source, this.config.upstreamOrigin)
     if (target.origin !== this.config.upstreamOrigin.origin) throw new HttpError(502, 'upstream_unavailable')
+    if (!target.pathname.startsWith('/plugins/')) throw new HttpError(502, 'upstream_unavailable')
     let upstreamRequest: ClientRequest | undefined
     const aborted = (): void => { upstreamRequest?.destroy(new Error('request aborted')) }
     signal.addEventListener('abort', aborted, { once: true })
@@ -1947,7 +2141,7 @@ export class MobileAccessGateway {
       for await (const chunk of proxied) {
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
         bytes += buffer.byteLength
-        if (bytes > MAX_MOBILE_BOOT_ENTRY_BYTES) throw new HttpError(502, 'upstream_unavailable')
+        if (bytes > maxBytes) throw new HttpError(502, 'upstream_unavailable')
         chunks.push(buffer)
       }
       return Buffer.concat(chunks)

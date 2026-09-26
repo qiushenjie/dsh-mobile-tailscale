@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module'
 import { describe, expect, it } from 'vitest'
-import { rewriteMobileIndex, rewriteRemoteMobileIndex } from '../src/gateway.js'
+import { rewriteMobileIndex, rewriteRemoteMobileIndex, rewriteRemoteMobileIndexWithBatches } from '../src/gateway.js'
 import { MOBILE_LAYOUT_STYLES } from '../src/mobile-layout.js'
 import { DSH_MOBILE_MODULE_ID } from '../src/version.js'
 
@@ -222,9 +222,35 @@ describe('dedicated mobile layout boot', () => {
 
     expect(output).toContain('"url":"/layout.js"')
     expect(output).not.toContain('/mobile-access/mobile-layout.js')
-    // That generation already serves one combined request per phase, so this
-    // plugin's own batch would add nothing and is not built.
-    expect(output).toContain('/plugins/application.js?rev=stock')
+    // The batch is still replaced: DSH fetches the whole graph in one combined
+    // request, so pruning a module only removes its bytes when this plugin serves
+    // that request itself.
+    expect(output).toMatch(/"url":"\/mobile-access\/mobile-boot\/[a-f\d]{64}\.js"/u)
+    expect(output).not.toContain('/plugins/application.js?rev=stock')
+  })
+
+  it('drops the oversized account settings module from the phone graph entirely', () => {
+    // `@deepseek-ai/dsh-client-ui-settings-account` is 5,281,067 bytes (~3.7 MB
+    // gzip of a 5.8 MB gzip payload) and no module injects it, so removing the
+    // entry *and* its bytes only costs the account/billing page.
+    const entries = [
+      { id: '@deepseek-ai/dsh-client-ui-layout', url: '/layout.js', rev: 'layout', inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-theme'] },
+      { id: '@deepseek-ai/dsh-client-ui-settings', url: '/settings.js', rev: 'settings', inject: ['@deepseek-ai/dsh-api-remotes'] },
+      { id: '@deepseek-ai/dsh-client-ui-settings-account', url: '/settings-account.js', rev: 'account', inject: ['@deepseek-ai/dsh-client-ui-settings'] },
+    ]
+    const source = `<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({
+      rev: 'stock',
+      entries,
+      batches: [{ phase: 'application', url: '/plugins/application.js?rev=stock', rev: 'stock', entries: entries.map(entry => entry.id) }],
+    })};</script></head><body></body></html>`
+
+    const output = rewriteMobileIndex(source)
+
+    expect(output).not.toContain('settings-account')
+    // The rewritten batch is served by this plugin, so the module's bytes never
+    // reach the phone even though the stock batch would have carried them.
+    expect(output).toMatch(/"url":"\/mobile-access\/mobile-boot\/[a-f\d]{64}\.js"/u)
+    expect(output).not.toContain('/plugins/application.js?rev=stock')
   })
 
   it('does not activate desktop-shell-only modules on a phone page', () => {
@@ -320,7 +346,7 @@ describe('remote mobile index rewrite', () => {
     expect(output).not.toContain('__DSH_MOBILE_FRONTEND__')
   })
 
-  it('leaves the stock boot batch untouched so no plugin batch endpoint is required', () => {
+  it('replaces the remote boot batch with one this plugin serves itself', () => {
     const entries = remoteEntries()
     const source = `<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({
       rev: 'stock',
@@ -330,8 +356,26 @@ describe('remote mobile index rewrite', () => {
 
     const output = rewriteRemoteMobileIndex(source)
 
-    expect(output).toContain('/plugins/application.js?rev=stock')
-    expect(output).not.toContain('/mobile-access/mobile-boot/')
+    // The proxy owns this origin, so the plans come back to it instead of going
+    // into the LAN gateway's store — which is not reachable when LAN access is off.
+    expect(output).toMatch(/"url":"\/mobile-access\/mobile-boot\/[a-f\d]{64}\.js"/u)
+    expect(output).not.toContain('/plugins/application.js?rev=stock')
+  })
+
+  it('hands the batch plans to the caller alongside the rewritten document', () => {
+    const entries = remoteEntries()
+    const source = `<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({
+      rev: 'stock',
+      entries,
+      batches: [{ phase: 'application', url: '/plugins/application.js?rev=stock', rev: 'stock', entries: entries.map(entry => entry.id) }],
+    })};</script></head><body></body></html>`
+
+    const rewritten = rewriteRemoteMobileIndexWithBatches(source)
+
+    expect(rewritten.batches).toHaveLength(1)
+    expect(rewritten.batches?.[0]?.upstream).toEqual({ url: '/plugins/application.js?rev=stock', rev: 'stock' })
+    expect(rewritten.batches?.[0]?.entries.map(entry => entry.id)).toEqual(entries.map(entry => entry.id))
+    expect(rewritten.batches?.[0]?.path).toBe(`/mobile-access/mobile-boot/${rewritten.batches?.[0]?.key ?? ''}.js`)
   })
 
   it('fails closed on an unsupported layout contract so the caller can serve the stock page', () => {
