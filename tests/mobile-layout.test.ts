@@ -522,21 +522,25 @@ describe('phone session window cap', () => {
     }
   })
 
-  it('clamps the opening window a phone asks for', () => {
+  it('clamps the opening window and drops the Turn floor that outgrows it', () => {
     for (const output of [rewriteMobileIndex(source), rewriteRemoteMobileIndex(source)]) {
       const forwarded = JSON.parse(dispatchedByBootstrap(output, followFrame(500))) as {
-        payload: { args: { request: { maxMessages: number; turnWindow: { minMessages: number } } } }
+        payload: { args: { request: { maxMessages: number; turnWindow?: unknown } } }
       }
-      expect(forwarded.payload.args.request.maxMessages).toBe(50)
-      // The Turn window floor stays DSH's own 50, which a 50-message page satisfies.
-      expect(forwarded.payload.args.request.turnWindow.minMessages).toBe(50)
+      // `paginate` cuts at the message count only when no Turn floor is set, and a
+      // floor of 2 Turns handed back 291 records for a 50-message request.
+      expect(forwarded.payload.args.request.maxMessages).toBe(10)
+      expect(forwarded.payload.args.request.turnWindow).toBeUndefined()
     }
   })
 
-  it('forwards every other frame and every window already at or below the cap', () => {
+  it('forwards every other frame untouched and keeps a smaller window', () => {
     const [output] = [rewriteMobileIndex(source)]
-    expect(dispatchedByBootstrap(String(output), followFrame(50))).toBe(followFrame(50))
-    expect(dispatchedByBootstrap(String(output), followFrame(20, 20))).toBe(followFrame(20, 20))
+    const smaller = JSON.parse(dispatchedByBootstrap(String(output), followFrame(4))) as {
+      payload: { args: { request: { maxMessages: number; turnWindow?: unknown } } }
+    }
+    expect(smaller.payload.args.request.maxMessages).toBe(4)
+    expect(smaller.payload.args.request.turnWindow).toBeUndefined()
     const other = JSON.stringify({ type: 'open', endpoint: 'session/page', payload: { args: { request: { maxMessages: 500 } } } })
     expect(dispatchedByBootstrap(String(output), other)).toBe(other)
   })

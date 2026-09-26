@@ -388,19 +388,23 @@ describe('RemotePassthroughProxy', () => {
     const forwarded = upstream.recorded.at(-1)
     expect(JSON.parse(forwarded?.body ?? '{}')).toMatchObject({
       method: 'session.history',
-      payload: { sessionId: 'session-example', maxMessages: 50, turnWindow: { minMessages: 50, minTurns: 2 } },
+      payload: { sessionId: 'session-example', maxMessages: 50 },
     })
+    expect(JSON.parse(forwarded?.body ?? '{}').payload.turnWindow).toBeUndefined()
     expect(forwarded?.headers['content-length']).toBe(String(Buffer.byteLength(forwarded?.body ?? '')))
 
     // A page the client already bounded stays untouched.
     await post(historyRequest({ maxMessages: 10 }))
     expect(JSON.parse(upstream.recorded.at(-1)?.body ?? '{}')).toMatchObject({ payload: { maxMessages: 10 } })
 
-    // A Turn window wider than the page we ask for is narrowed with it.
+    // A Turn window wider than the page we ask for is dropped, not narrowed: the
+    // floor is what lets `paginate` walk past the message count the phone asked
+    // for (291 records for a 50-message window on a measured long session).
     await post(historyRequest({ maxMessages: 500, turnWindow: { minMessages: 200, minTurns: 2 } }))
     expect(JSON.parse(upstream.recorded.at(-1)?.body ?? '{}')).toMatchObject({
-      payload: { maxMessages: 50, turnWindow: { minMessages: 50, minTurns: 2 } },
+      payload: { maxMessages: 50 },
     })
+    expect(JSON.parse(upstream.recorded.at(-1)?.body ?? '{}').payload.turnWindow).toBeUndefined()
 
     // Anything that is not a history request is forwarded byte for byte.
     const other = await fetch(proxy.origin() + '/api/session.list', {

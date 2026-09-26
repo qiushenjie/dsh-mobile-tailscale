@@ -97,7 +97,7 @@ const SESSION_HISTORY_PATH = '/api/session.history'
  * every row it taps — arrives through that window, so this is the one number
  * that decides how heavy a conversation is on a phone.
  */
-const MOBILE_SESSION_WINDOW_MESSAGES = 50
+const MOBILE_SESSION_WINDOW_MESSAGES = 10
 /**
  * Every request target whose body carries a session history window.
  *
@@ -297,13 +297,22 @@ const MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP = `(()=>{if(window.__DSH_TRANSPOR
  * HTTP trim never saw this request — it matches `/api/session.history`, which no
  * DSH 0.1.7 client calls.
  *
+ * The Turn floor is dropped with it, and that is the part that actually bounded
+ * the page. `paginate` walks the log backwards and cuts at whichever comes first
+ * — the message count reaching `maxMessages`, or a `turn/start` once
+ * `count >= minMessages` and the Turn count reaches `minTurns` — so
+ * `{"minMessages":50,"minTurns":2}` keeps pulling whole Turns and can hand back
+ * six records per message. Measured over the tailnet on an idle 291-record
+ * session: `maxMessages:500` + the Turn floor delivered 797 KB of snapshot and
+ * 291 records, 1588 ms of main-thread work and a 650 ms frame gap at 6x CPU;
+ * `maxMessages:10` with the floor dropped delivered 190 KB, 60 records, 1178 ms
+ * and a 383 ms gap, with `hasMore: true` so 加载更早 still pages backwards.
+ *
  * Clamping the frame instead of the transport keeps the cap independent of how
  * the window is spelled: the mux carries JSON, every other frame is forwarded
- * untouched, and a window already at or below the cap is left exactly as it is.
- * The Turn window floor stays at DSH's own 50, which a 50-message page still
- * satisfies.
+ * untouched, and a request already at or below the cap keeps its message count.
  */
-const MOBILE_SESSION_WINDOW_BOOTSTRAP = `(()=>{const send=WebSocket.prototype.send;WebSocket.prototype.send=function(data){if(typeof data==="string"&&data.includes('"endpoint":"session/follow"')&&data.includes('"maxMessages":')){data=data.replace(/"maxMessages":(\\d+)/g,(match,value)=>Number(value)>${MOBILE_SESSION_WINDOW_MESSAGES}?'"maxMessages":${MOBILE_SESSION_WINDOW_MESSAGES}':match)}return send.call(this,data)}})();`
+const MOBILE_SESSION_WINDOW_BOOTSTRAP = `(()=>{const send=WebSocket.prototype.send;WebSocket.prototype.send=function(data){if(typeof data==="string"&&data.includes('"endpoint":"session/follow"')){try{const frame=JSON.parse(data);const request=frame&&frame.payload&&frame.payload.args&&frame.payload.args.request;if(request&&typeof request==="object"){if(typeof request.maxMessages!=="number"||request.maxMessages>${MOBILE_SESSION_WINDOW_MESSAGES})request.maxMessages=${MOBILE_SESSION_WINDOW_MESSAGES};delete request.turnWindow;data=JSON.stringify(frame)}}catch(error){}}return send.call(this,data)}})();`
 
 const PAIR_PAGE = `<!doctype html>
 <html lang="en">
@@ -1272,16 +1281,18 @@ export function mobileHistoryRequestBody(
     return body
   }
   const clamped: Record<string, unknown> = { ...holder, maxMessages: pageMessages }
-  // The client's Turn window is a preference rather than a server requirement,
-  // but a window that demands more messages than the page we ask for makes the
-  // request invalid (`turnWindow.minMessages` must not exceed `maxMessages`).
-  const window = holder.turnWindow
-  if (isJsonRecord(window) && typeof window.minMessages === 'number' && window.minMessages > pageMessages) {
-    clamped.turnWindow = { ...window, minMessages: pageMessages }
-  }
-  const payload = nested === undefined
+  // The Turn window is a floor, not a bound: `paginate` keeps walking back to a
+  // Turn boundary once the message count passes `minMessages`, so leaving it in
+  // place lets a page grow past the size asked for (the phone's opening window
+  // measured 291 records for `maxMessages: 50` because of it). Paging needs no
+  // floor either — the journal stream asks for the next page by cursor.
+  delete clamped.turnWindow
+  const payload: Record<string, unknown> = nested === undefined
     ? { ...parsed.payload, ...clamped }
     : { ...parsed.payload, args: { ...args, request: clamped } }
+  // The flat spelling carries the Turn window on the payload itself, so dropping
+  // it from the clamped holder is not enough: the spread would keep the original.
+  delete payload.turnWindow
   return Buffer.from(JSON.stringify({ ...parsed, payload }))
 }
 

@@ -954,16 +954,17 @@ describe('HTTP gateway', () => {
     })
     expect(JSON.parse(inner.observations.at(-1)?.body ?? '{}')).toMatchObject({ payload: { maxMessages: 5 } })
 
-    // The browser client asks for a Turn window wider than the mobile page;
-    // narrowing only maxMessages would make the request invalid upstream.
+    // A Turn window wider than the mobile page is dropped rather than narrowed:
+    // the floor is what made the opening window outgrow its own message count.
     await request(instance.address().port, SESSION_HISTORY_PATH, {
       method: 'POST',
       headers: { ...headers, 'accept-encoding': 'identity' },
       body: historyRequest(500, { minMessages: 200, minTurns: 2 }),
     })
     expect(JSON.parse(inner.observations.at(-1)?.body ?? '{}')).toMatchObject({
-      payload: { maxMessages: 10, turnWindow: { minMessages: 10, minTurns: 2 } },
+      payload: { maxMessages: 10 },
     })
+    expect(JSON.parse(inner.observations.at(-1)?.body ?? '{}').payload.turnWindow).toBeUndefined()
   })
 
   it('caps the session window DSH 0.1.7 pages with, whose window is nested', async () => {
@@ -1007,11 +1008,13 @@ describe('HTTP gateway', () => {
             address: { kind: 'session', sessionId: 'session-example' },
             throughSeq: 4096,
             maxMessages: 10,
-            turnWindow: { minMessages: 10, minTurns: 2 },
           },
         },
       },
     })
+    // A Turn floor is a floor, not a bound: leaving it lets the page grow past
+    // the size the phone asked for, so the clamp drops it.
+    expect(JSON.parse(inner.observations.at(-1)?.body ?? '{}').payload.args.request.turnWindow).toBeUndefined()
   })
 
   it('renews, logs out, and revokes without exposing the persistent credential to the app path', async () => {
