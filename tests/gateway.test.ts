@@ -966,6 +966,54 @@ describe('HTTP gateway', () => {
     })
   })
 
+  it('caps the session window DSH 0.1.7 pages with, whose window is nested', async () => {
+    const inner = await upstream()
+    const instance = await gateway(inner.port)
+    const paired = await pair(instance)
+    const headers = {
+      ...browserHeaders(instance),
+      cookie: `${SESSION_COOKIE}=${paired.session}`,
+      [CSRF_HEADER]: paired.csrf,
+      'content-type': 'application/json',
+    }
+
+    // DSH 0.1.7 asks through `session/page` with the window on
+    // `payload.args.request`; the flat `session.history` shape above is the
+    // older spelling, and neither may reach the host wider than a phone page.
+    await request(instance.address().port, '/api/session.page', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        type: 'client-request',
+        rpcId: crypto.randomUUID(),
+        method: 'session/page',
+        payload: {
+          args: {
+            request: {
+              address: { kind: 'session', sessionId: 'session-example' },
+              throughSeq: 4096,
+              maxMessages: 500,
+              turnWindow: { minMessages: 200, minTurns: 2 },
+            },
+          },
+        },
+      }),
+    })
+    expect(JSON.parse(inner.observations.at(-1)?.body ?? '{}')).toMatchObject({
+      method: 'session/page',
+      payload: {
+        args: {
+          request: {
+            address: { kind: 'session', sessionId: 'session-example' },
+            throughSeq: 4096,
+            maxMessages: 10,
+            turnWindow: { minMessages: 10, minTurns: 2 },
+          },
+        },
+      },
+    })
+  })
+
   it('renews, logs out, and revokes without exposing the persistent credential to the app path', async () => {
     const inner = await upstream()
     const instance = await gateway(inner.port)

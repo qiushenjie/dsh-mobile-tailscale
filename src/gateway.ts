@@ -88,6 +88,29 @@ const MAX_CONTROL_BODY_BYTES = 16 * 1024
 const MAX_HEADER_BYTES = 16 * 1024
 const MOBILE_HISTORY_PAGE_MESSAGES = 10
 const SESSION_HISTORY_PATH = '/api/session.history'
+/**
+ * Messages a phone may ask for when it opens a session.
+ *
+ * DSH's own client page size is 50 (`PAGE_MESSAGES` in
+ * `@deepseek-ai/dsh-api-session-controller`), and its ordinary window asks for
+ * 500. Everything the phone opens — the session it restores on a page load and
+ * every row it taps — arrives through that window, so this is the one number
+ * that decides how heavy a conversation is on a phone.
+ */
+const MOBILE_SESSION_WINDOW_MESSAGES = 50
+/**
+ * Every request target whose body carries a session history window.
+ *
+ * DSH 0.1.7 streams a session's opening window over the WebSocket mux
+ * (`session/follow`) and pages older messages through `session/page`; the
+ * `/api/session.history` spelling predates both and is kept for older clients
+ * that still post the window directly.
+ */
+const SESSION_WINDOW_PATHS: readonly string[] = Object.freeze([
+  SESSION_HISTORY_PATH,
+  '/api/session.page',
+  '/api/session.follow',
+])
 const DISCOVERY_QUERY = Buffer.from('DSH_MOBILE_DISCOVER_V1', 'ascii')
 const DISCOVERY_PROTOCOL = 1
 const DISCOVERY_INTERVAL_MS = 3_000
@@ -224,6 +247,36 @@ const MOBILE_CSRF_FETCH_BOOTSTRAP = `(()=>{const nativeFetch=window.fetch.bind(w
  * left untouched, and the client-side trust hint remains as the fallback.
  */
 const MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP = `(()=>{if(window.__DSH_TRANSPORT__!==undefined)return;window.__DSH_TRANSPORT__={fetch:(input,init)=>window.fetch(input,init),ownsHost:true}})();`
+
+/**
+ * Cap the session window a phone asks for, at the frame that asks for it.
+ *
+ * DSH 0.1.7 does not fetch a session's history over HTTP: every Gateway stream,
+ * `session/follow` included, travels the WebSocket mux at `/api/remote.mux` as
+ * a text frame. Measured on this machine's phone path, a page load and every
+ * session tap sent
+ *
+ * ```json
+ * {"type":"open","endpoint":"session/follow","payload":{"args":{"request":
+ *   {"address":{…},"assistantStream":true,"maxMessages":500,
+ *    "turnWindow":{"minMessages":50,"minTurns":2}}}}}
+ * ```
+ *
+ * `maxMessages: 500` is the desktop client's ordinary window, so a phone opening
+ * a long conversation pulled hundreds of records and then had to render them:
+ * opening such a session was slow and every later interaction in it stayed slow,
+ * while the same page with a short session stayed responsive. The plugin's own
+ * HTTP trim never saw this request — it matches `/api/session.history`, which no
+ * DSH 0.1.7 client calls.
+ *
+ * Clamping the frame instead of the transport keeps the cap independent of how
+ * the window is spelled: the mux carries JSON, every other frame is forwarded
+ * untouched, and a window already at or below the cap is left exactly as it is.
+ * The Turn window floor stays at DSH's own 50, which a 50-message page still
+ * satisfies.
+ */
+const MOBILE_SESSION_WINDOW_BOOTSTRAP = `(()=>{const send=WebSocket.prototype.send;WebSocket.prototype.send=function(data){if(typeof data==="string"&&data.includes('"endpoint":"session/follow"')&&data.includes('"maxMessages":')){data=data.replace(/"maxMessages":(\\d+)/g,(match,value)=>Number(value)>${MOBILE_SESSION_WINDOW_MESSAGES}?'"maxMessages":${MOBILE_SESSION_WINDOW_MESSAGES}':match)}return send.call(this,data)}})();`
+
 const PAIR_PAGE = `<!doctype html>
 <html lang="en">
 <meta charset="utf-8">
@@ -790,7 +843,7 @@ export function rewriteMobileIndexWithBatches(html: string): RewrittenMobileInde
   // The transport override is what upstream ships for the remote-backed
   // settings graph; on every other graph the client-side trust hint covers it.
   const transportBootstrap = remoteSettings ? MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP : ''
-  const replacement = `${transportBootstrap}${MOBILE_CSRF_FETCH_BOOTSTRAP}${MOBILE_TRUST_FLAG}window.__DSH_MOBILE_FRONTEND__="dedicated";${site.assignment}${JSON.stringify(parsed)};`
+  const replacement = `${transportBootstrap}${MOBILE_CSRF_FETCH_BOOTSTRAP}${MOBILE_SESSION_WINDOW_BOOTSTRAP}${MOBILE_TRUST_FLAG}window.__DSH_MOBILE_FRONTEND__="dedicated";${site.assignment}${JSON.stringify(parsed)};`
   return Object.freeze({
     html: ensureMobileViewport(`${dropStockBootPreloads(html.slice(0, site.start))}${replacement}${dropStockBootPreloads(html.slice(site.scriptEnd))}`),
     ...(mobileBatches.length === 0 ? {} : { batches: mobileBatches }),
@@ -831,7 +884,7 @@ export function rewriteRemoteMobileIndexWithBatches(html: string): RewrittenMobi
   if (mobileBatches.length > 0) {
     site.parsed.rev = createHash('sha256').update(JSON.stringify({ entries, batches })).digest('hex').slice(0, 16)
   }
-  const replacement = `${MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP}${MOBILE_TRUST_FLAG}${site.assignment}${JSON.stringify(site.parsed)};`
+  const replacement = `${MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP}${MOBILE_SESSION_WINDOW_BOOTSTRAP}${MOBILE_TRUST_FLAG}${site.assignment}${JSON.stringify(site.parsed)};`
   return Object.freeze({
     html: ensureMobileViewport(`${dropStockBootPreloads(html.slice(0, site.start))}${replacement}${dropStockBootPreloads(html.slice(site.scriptEnd))}`),
     ...(mobileBatches.length === 0 ? {} : { batches: mobileBatches }),
@@ -1124,7 +1177,7 @@ function shouldCompressResponse(request: IncomingMessage, response: IncomingMess
   const pathname = request.url?.split('?', 1)[0] ?? ''
   const compressibleRequest = (request.method === 'GET'
       && (pathname.startsWith('/plugins/') || pathname.startsWith('/assets/')))
-    || (request.method === 'POST' && pathname === SESSION_HISTORY_PATH)
+    || (request.method === 'POST' && SESSION_WINDOW_PATHS.includes(pathname))
   return compressibleRequest
     && response.statusCode === 200
     && request.headers.range === undefined
@@ -1172,26 +1225,35 @@ export function mobileHistoryRequestBody(
   body: Buffer,
   pageMessages: number = MOBILE_HISTORY_PAGE_MESSAGES,
 ): Buffer {
-  if (request.method !== 'POST' || request.url?.split('?', 1)[0] !== SESSION_HISTORY_PATH) return body
+  const target = request.url?.split('?', 1)[0] ?? ''
+  if (request.method !== 'POST' || !SESSION_WINDOW_PATHS.includes(target)) return body
   let parsed: unknown
   try {
     parsed = JSON.parse(body.toString('utf8'))
   } catch {
     return body
   }
-  if (!isJsonRecord(parsed) || parsed.method !== 'session.history' || !isJsonRecord(parsed.payload)) return body
-  const requested = parsed.payload.maxMessages
+  if (!isJsonRecord(parsed) || !isJsonRecord(parsed.payload)) return body
+  // DSH 0.1.7 nests the window under `payload.args.request`; the older
+  // `session.history` spelling puts it directly on the payload.
+  const args = isJsonRecord(parsed.payload.args) ? parsed.payload.args : undefined
+  const nested = args !== undefined && isJsonRecord(args.request) ? args.request : undefined
+  const holder = nested ?? parsed.payload
+  const requested = holder.maxMessages
   if (typeof requested === 'number' && Number.isInteger(requested) && requested > 0 && requested <= pageMessages) {
     return body
   }
-  const payload: Record<string, unknown> = { ...parsed.payload, maxMessages: pageMessages }
+  const clamped: Record<string, unknown> = { ...holder, maxMessages: pageMessages }
   // The client's Turn window is a preference rather than a server requirement,
   // but a window that demands more messages than the page we ask for makes the
   // request invalid (`turnWindow.minMessages` must not exceed `maxMessages`).
-  const window = parsed.payload.turnWindow
+  const window = holder.turnWindow
   if (isJsonRecord(window) && typeof window.minMessages === 'number' && window.minMessages > pageMessages) {
-    payload.turnWindow = { ...window, minMessages: pageMessages }
+    clamped.turnWindow = { ...window, minMessages: pageMessages }
   }
+  const payload = nested === undefined
+    ? { ...parsed.payload, ...clamped }
+    : { ...parsed.payload, args: { ...args, request: clamped } }
   return Buffer.from(JSON.stringify({ ...parsed, payload }))
 }
 
@@ -2328,7 +2390,7 @@ export class MobileAccessGateway {
     const operation = this.allocateRequest(authorization, response, holder)
     let bodyDone: Promise<void> | undefined
     try {
-      const bufferedBody = request.method === 'POST' && request.url?.split('?', 1)[0] === SESSION_HISTORY_PATH
+      const bufferedBody = request.method === 'POST' && SESSION_WINDOW_PATHS.includes(request.url?.split('?', 1)[0] ?? '')
         ? mobileHistoryRequestBody(request, await readBoundedBody(request, this.config.maxBodyBytes))
         : undefined
       const upstreamHeaders = sanitizeRequestHeaders(request, this.config.upstreamOrigin)

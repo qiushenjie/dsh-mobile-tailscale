@@ -443,3 +443,78 @@ describe('stock boot preload hints', () => {
     }
   })
 })
+
+describe('phone session window cap', () => {
+  const entries = [
+    { id: '@deepseek-ai/dsh-client-runtime', url: '/runtime.js', rev: 'runtime' },
+    {
+      id: '@deepseek-ai/dsh-client-ui-layout',
+      url: '/layout.js',
+      rev: 'layout',
+      inject: ['@deepseek-ai/dsh-client-runtime', '@deepseek-ai/dsh-client-ui-theme'],
+    },
+    { id: packageName, url: '/mobile.js', rev: 'mobile' },
+  ]
+  const source = currentIndex(entries)
+
+  /**
+   * Install the document's own window bootstrap against a fake WebSocket and
+   * return what `send` was handed.
+   */
+  const dispatchedByBootstrap = (html: string, frame: string): string => {
+    const bootstrap = html.match(/\(\(\)=>\{const send=WebSocket\.prototype\.send[\s\S]*?\}\)\(\);/u)?.[0]
+    expect(bootstrap).toBeDefined()
+    const sent: string[] = []
+    const FakeWebSocket = function (this: unknown) {} as unknown as { prototype: { send: (data: string) => void } }
+    FakeWebSocket.prototype.send = (data: string) => { sent.push(data) }
+    const install = new Function('WebSocket', `${String(bootstrap)}\nreturn WebSocket;`) as (target: unknown) => unknown
+    install(FakeWebSocket)
+    FakeWebSocket.prototype.send(frame)
+    return sent.at(-1) ?? ''
+  }
+
+  const followFrame = (maxMessages: number, minMessages = 50): string => JSON.stringify({
+    type: 'open',
+    streamId: 'stream-example',
+    endpoint: 'session/follow',
+    payload: {
+      args: {
+        request: {
+          address: { kind: 'session', sessionId: 'session-example' },
+          assistantStream: true,
+          maxMessages,
+          turnWindow: { minMessages, minTurns: 2 },
+        },
+      },
+    },
+  })
+
+  // DSH 0.1.7 sends session/follow over the WebSocket mux with the desktop's
+  // 500-message window. A phone that opens a long conversation then renders all
+  // of it, which is what makes opening it slow and every later tap in it slow.
+  it('is installed before the boot manifest on both channels', () => {
+    for (const output of [rewriteMobileIndex(source), rewriteRemoteMobileIndex(source)]) {
+      expect(output).toContain('WebSocket.prototype.send=function(data)')
+      expect(output.indexOf('WebSocket.prototype.send')).toBeLessThan(output.indexOf('__DSH_BOOT__'))
+    }
+  })
+
+  it('clamps the opening window a phone asks for', () => {
+    for (const output of [rewriteMobileIndex(source), rewriteRemoteMobileIndex(source)]) {
+      const forwarded = JSON.parse(dispatchedByBootstrap(output, followFrame(500))) as {
+        payload: { args: { request: { maxMessages: number; turnWindow: { minMessages: number } } } }
+      }
+      expect(forwarded.payload.args.request.maxMessages).toBe(50)
+      // The Turn window floor stays DSH's own 50, which a 50-message page satisfies.
+      expect(forwarded.payload.args.request.turnWindow.minMessages).toBe(50)
+    }
+  })
+
+  it('forwards every other frame and every window already at or below the cap', () => {
+    const [output] = [rewriteMobileIndex(source)]
+    expect(dispatchedByBootstrap(String(output), followFrame(50))).toBe(followFrame(50))
+    expect(dispatchedByBootstrap(String(output), followFrame(20, 20))).toBe(followFrame(20, 20))
+    const other = JSON.stringify({ type: 'open', endpoint: 'session/page', payload: { args: { request: { maxMessages: 500 } } } })
+    expect(dispatchedByBootstrap(String(output), other)).toBe(other)
+  })
+})
