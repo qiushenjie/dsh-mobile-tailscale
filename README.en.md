@@ -242,11 +242,14 @@ See [SECURITY.md](SECURITY.md) for the full notes.
 
 | dsh-mobile-tailscale | Verified DeepSeek Harness                                                  |
 | -------------------- | -------------------------------------------------------------------------- |
-| `0.3.4`, `0.3.3`     | `0.1.0-rc.5`, `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.1-rc.2`, `0.1.2-alpha.1`, `0.1.2-rc.1` |
+| `0.3.6`              | `0.1.0-rc.5`, `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.1-rc.2`, `0.1.2-alpha.1`, `0.1.2-rc.1`, `0.1.7-rc.2` |
+| `0.3.5`, `0.3.4`, `0.3.3` | `0.1.0-rc.5`, `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.1-rc.2`, `0.1.2-alpha.1`, `0.1.2-rc.1` |
 | `0.3.2`              | `0.1.0-rc.5`, `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.1-rc.2`, `0.1.2-alpha.1` |
 | `0.3.1`              | `0.1.0-rc.5`, `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.1-rc.2`, `0.1.2-alpha.1` |
 
 On startup the plugin compares the installed DSH Host version against the verified set above. **An unverified version only records a `DSH_MOBILE_UNVERIFIED_DSH_VERSION` warning and activation continues — it never aborts the Host**, because one plugin's version check must not stop the whole harness from booting. The frontend dependencies the mobile layout needs are still validated strictly where they are used, and fail closed there. CI continuously tracks the DSH main branch layout contract. If you see a compatibility warning after upgrading DSH, upgrade dsh-mobile-tailscale first. See the [troubleshooting guide](TROUBLESHOOTING.md) (Chinese) for diagnosis steps.
+
+> **That advisory check is this plugin's own, and it does not override DSH's.** Newer DSH releases validate a plugin's declared `peerDependencies` against the runtime *before* loading, and **refuse to activate the whole plugin when they do not cover it** (log lines such as `Plugin … is incompatible with dsh …`, with an `Exact-version exemption` hint). The plugin is then absent from the tree entirely rather than running degraded. Upgrade dsh-mobile-tailscale, or grant the exact-version exemption for that specific combination in the plugin manager.
 
 ## Uninstall
 
