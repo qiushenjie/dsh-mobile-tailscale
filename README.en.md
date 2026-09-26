@@ -27,7 +27,7 @@
 >
 > **Difference from upstream**: the remote path no longer uses Tailscale Funnel, cpolar, or QR pairing. It uses **Tailscale Serve** instead — once the computer and phone sign in to the same tailnet, the phone browser opens the computer's MagicDNS name directly. No pairing, no manual certificate trust, no public exposure.
 >
-> LAN access is still a standalone HTTPS gateway, but it is now entered through a one-time **pairing link**: the panel creates the link and the phone opens it to pair (see [Local network access and pairing](#local-network-access-and-pairing)). The pairing QR code, pairing key, and paired-device management are no longer in the desktop panel.
+> LAN access is still a standalone HTTPS gateway, but it is now entered through a one-time **pairing link**: the panel creates the link and the phone opens it to pair (see [Local network access and pairing](#local-network-access-and-pairing)). That one control is all the desktop panel keeps — it also renders the QR code for the same link, for the Android app to scan — and the pairing key and paired-device management are gone from the panel.
 
 dsh-mobile-tailscale is a DeepSeek Harness plugin that lets a mobile browser or the Android app connect over a protected LAN or a Tailscale Serve remote path. Both paths keep the same sessions, Workspaces, messages, and tools, switch on and off independently, and never modify DeepSeek Harness source.
 
@@ -44,7 +44,7 @@ It also lets you customize the phone from a DSH conversation: `/mobile <what you
 - **Direct Tailscale Serve remote**: any device on the same tailnet opens `https://<host>.ts.net` with no pairing or certificates.
 - **One-click connection diagnostics**: check versions, the LAN interface, the firewall, the LAN gateway, the remote path, and the phone network, then copy a report without credentials or full addresses.
 - **Faster connection recovery**: remote reopen restores trust in parallel, reuses revisioned assets, and compresses mobile boot batches.
-- **One-time pairing link**: the panel creates a link you send to the phone; opening it completes LAN pairing. The link is valid for two minutes and can be used once.
+- **One-time pairing link**: the panel creates a link you send to the phone; opening it completes LAN pairing. The link is valid for two minutes and can be used once, and the panel shows its QR code for the Android app to scan.
 
 Paired LAN devices are considered fully trusted and can operate DSH on the computer; use this only on trusted home, office, or VPN networks. For Tailscale remote access, the trust boundary is the tailnet itself.
 
@@ -180,14 +180,14 @@ Use this when the phone and computer share Wi-Fi, Ethernet, or a phone hotspot. 
 How to pair:
 
 1. Connect the phone and computer to the same local network, then open **Mobile Access → Local network** in the lower-left corner of DeepSeek Harness. The tab shows only `Browser access <address>`, one **Create pairing link** button, and a status line.
-2. Select **Create pairing link**. The panel calls `POST /api/mobile-access/lan/pairing/open` and copies the returned `pairUrl` to the clipboard, shaped like:
+2. Select **Create pairing link**. The panel calls `POST /api/mobile-access/lan/pairing/open`, copies the returned `pairUrl` to the clipboard, and renders the QR code for the same link (`qrSvg`) below the button, shaped like:
 
    ```text
    https://<lan-ip>:3443/mobile-access/pair#instance=<instanceId>&token=<43-character token>
    ```
 
    The link is valid for two minutes and can be used once.
-3. Send that link to the phone and open it. The phone completes pairing and gets a device credential; the Android app can open the same link, with the pairing code prefilled.
+3. Send that link to the phone and open it (or scan the panel QR code with the Android app). The phone completes pairing and gets a device credential; the app prefills the pairing code when it opens the link.
 4. Pairing creates persistent device trust. Afterwards, just open the `Browser access` address the panel shows; Wi-Fi, hotspot, and DHCP address changes normally do not require pairing again.
 
 The phone must be on the same network as the computer. The address the panel shows is **useless to an unpaired device** (it gets redirected to the login page) — which is exactly why the **Create pairing link** button exists. The app is optional: a mobile browser can complete the same flow. The browser must manually trust the plugin certificate on the first LAN visit.
