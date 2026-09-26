@@ -259,8 +259,8 @@ function installControl(): { remove: () => void; toggle: () => void } {
   lanActions.append(lanPair)
   const lanFeedback = element('p', 'dsh-mobile-control__intro'); lanFeedback.hidden = true
   lanFeedback.setAttribute('role', 'status'); lanFeedback.setAttribute('aria-live', 'polite')
-  // The Android app can also pair by scanning; the route already returns the
-  // QR for the same one-time link, so show it next to the copied URL.
+  // The route already returns the QR for the same one-time link, so the phone
+  // camera can open it without copying anything by hand.
   const lanQr = element('div', 'dsh-mobile-control__qr'); lanQr.hidden = true
   const lanQrCaption = element('span', 'dsh-mobile-control__qr-caption'); lanQrCaption.textContent = '用手机相机扫码即可打开配对链接'
   const lanQrCode = element('div', 'dsh-mobile-control__qr-code')
@@ -302,7 +302,8 @@ function installControl(): { remove: () => void; toggle: () => void } {
   // device-management controls, but a device that has never paired cannot use
   // the address at all, so the tab keeps exactly one control: open a pairing
   // window and hand over the link the phone pairs with.
-  lanView.append(access, lanActions, lanFeedback, lanQr)
+  const lanProbe = element('p', 'dsh-mobile-control__intro'); lanProbe.hidden = true
+  lanView.append(access, lanProbe, lanActions, lanFeedback, lanQr)
   remoteView.append(remoteIntro, remoteAccess, remoteStatus, remoteActions)
   diagnosticsView.append(diagnosticsIntro, diagnosticsSummary, diagnosticsToolbar, diagnosticsFeedback, diagnosticsChecks, diagnosticsDetails)
   panel.append(header, switcher, lanView, remoteView, diagnosticsView); root.append(panel); document.body.append(root)
@@ -376,6 +377,11 @@ function installControl(): { remove: () => void; toggle: () => void } {
     accessLink.href = origin
     accessLink.textContent = origin
     accessLink.title = origin
+    // A phone that opens the address and hangs cannot reach this machine at
+    // all; the plain health path answers {"ok":true} without any credential,
+    // so the phone can tell "wrong network" from "not paired yet".
+    lanProbe.hidden = origin === ''
+    lanProbe.textContent = `手机打不开配对页时，用手机浏览器访问 ${origin}/mobile-access/health，返回 {"ok":true} 说明网络可达。`
     lanActions.hidden = origin === '' || !pairingReachable
     lanPair.disabled = origin === '' || !pairingReachable
     if (lanActions.hidden) lanQr.hidden = true

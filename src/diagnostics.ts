@@ -197,7 +197,7 @@ export async function collectConnectionDiagnostics(
     'versions',
     'ok',
     '版本兼容',
-    `插件 ${DSH_MOBILE_VERSION}，DSH ${snapshot.dshVersion}，Android App 最低 ${MINIMUM_ANDROID_APP_VERSION}。`,
+    `插件 ${DSH_MOBILE_VERSION}，DSH ${snapshot.dshVersion}。`,
   ))
 
   if (snapshot.lan.networkError !== undefined) {
