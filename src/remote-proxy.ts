@@ -35,6 +35,7 @@ import {
   MobileBootBatchStore,
   mobileHistoryRequestBody,
   prunedClientModuleRequest,
+  revisionedStaticCacheControl,
   rewriteRemoteMobileIndexWithBatches,
   sanitizeRequestHeaders,
   sanitizeResponseHeaders,
@@ -287,6 +288,8 @@ export class RemotePassthroughProxy {
     })
     if (document && await this.serveRewrittenDocument(proxied, response, upstream)) return
     const headers = sanitizeResponseHeaders(proxied.headers, upstream)
+    const cacheControl = revisionedStaticCacheControl(request)
+    if (cacheControl !== undefined) headers['cache-control'] = cacheControl
     response.writeHead(proxied.statusCode ?? 502, headers)
     if (method === 'HEAD') {
       proxied.resume()

@@ -343,6 +343,24 @@ describe('RemotePassthroughProxy', () => {
     expect(await (await fetch(proxy.origin() + '/')).text()).toBe('plain')
   })
 
+  it('caches a revisioned asset on the remote channel instead of stripping its freshness', async () => {
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache', etag: '"asset"' })
+      response.end('/* asset */')
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const revisioned = await fetch(proxy.origin() + '/plugins/@example/plugin/assets/mermaid.js?rev=ebebb4015a5c')
+    expect(revisioned.status).toBe(200)
+    expect(revisioned.headers.get('cache-control')).toBe('private, max-age=31536000, immutable')
+    const hashed = await fetch(proxy.origin() + '/assets/index-Q6zc2uHV.js')
+    expect(hashed.headers.get('cache-control')).toBe('private, max-age=31536000, immutable')
+    const unversioned = await fetch(proxy.origin() + '/plugins/events')
+    expect(unversioned.headers.get('cache-control')).toBeNull()
+  })
+
   it('trims the history page a tailnet client asks for', async () => {
     const upstream = await startUpstream((_record, response) => {
       response.writeHead(200, { 'content-type': 'application/json' })

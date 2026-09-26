@@ -1134,7 +1134,24 @@ function shouldCompressResponse(request: IncomingMessage, response: IncomingMess
     && isCompressibleContentType(response.headers['content-type'])
 }
 
-function revisionedStaticCacheControl(request: IncomingMessage): string | undefined {
+/**
+ * Long-lived caching for a revision-addressed response, when the request names
+ * one.
+ *
+ * `sanitizeResponseHeaders` strips `cache-control` (and `expires`) from every
+ * upstream response, so a channel that does not call this answers revisioned
+ * assets with no validator and no freshness at all. A browser then has nothing
+ * to revalidate against and re-downloads them on the next navigation: on DSH
+ * 0.1.7 the phone channel re-fetched 5.66 MB of script and stylesheet bytes per
+ * page load (3.24 MB mermaid, 0.67 MB three, vendor, shell) with a warm cache.
+ *
+ * Safe only because every URL this matches carries its own content identity: a
+ * `/plugins/…?rev=<revision>` or `/assets/<name>-<hash>.<ext>` pair changes
+ * whenever the bytes change.
+ * @param request - Request whose target is inspected for a revision or hash.
+ * @returns The cache-control value, or undefined for an unversioned response.
+ */
+export function revisionedStaticCacheControl(request: IncomingMessage): string | undefined {
   if (request.method !== 'GET' && request.method !== 'HEAD') return undefined
   let target: URL
   try { target = new URL(request.url ?? '/', 'https://dsh-mobile.invalid') } catch { return undefined }
