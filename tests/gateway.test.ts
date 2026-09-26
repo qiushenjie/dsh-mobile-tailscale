@@ -7,6 +7,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { connect, type AddressInfo, type Socket } from 'node:net'
 import { gunzipSync } from 'node:zlib'
+import QRCode from 'qrcode'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parseGatewayConfig } from '../src/config.js'
 import { MobileAccessGateway, prunedClientModuleRequest } from '../src/gateway.js'
@@ -621,6 +622,10 @@ describe('HTTP gateway', () => {
     expect(pairing.pairUrl).not.toContain(`?token=${pairing.token}`)
     expect(pairing.appPairUrl).toBe(pairing.pairUrl)
     expect(pairing.qrSvg).toContain('<svg')
+    // A phone camera needs the standard four-module quiet zone on every side.
+    const qrSide = Number(/viewBox="0 0 (\d+) (\d+)"/u.exec(pairing.qrSvg ?? '')?.[1])
+    const qrModules = QRCode.create(pairing.appPairUrl, { errorCorrectionLevel: 'M' }).modules.size
+    expect(qrSide).toBe(qrModules + 8)
 
     const paired = await request(instance.address().port, '/mobile-access/auth/pair', {
       method: 'POST',

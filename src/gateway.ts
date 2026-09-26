@@ -2750,7 +2750,9 @@ export class MobileAccessGateway {
             // The QR code is an enhancement; a failed render must not waste an opened window.
             let qrSvg = ''
             try {
-              qrSvg = await QRCode.toString(appPairUrl, { type: 'svg', margin: 1 })
+              // A phone camera needs the full quiet zone: the code itself is one
+              // of the densest parts of the panel, so give it four modules.
+              qrSvg = await QRCode.toString(appPairUrl, { type: 'svg', margin: 4 })
             } catch {
               // keep qrSvg empty
             }

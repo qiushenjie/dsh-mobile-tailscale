@@ -23,13 +23,13 @@
   <a href="README.md">简体中文</a>
 </p>
 
-> dsh-mobile-tailscale is a fork of [dsh-mobile](https://github.com/saya-ch/dsh-mobile), a DeepSeek Harness community plugin; the native app supports Android only.
+> dsh-mobile-tailscale is a fork of [dsh-mobile](https://github.com/saya-ch/dsh-mobile), a DeepSeek Harness community plugin; it is used from a phone browser and needs no extra client.
 >
 > **Difference from upstream**: the remote path no longer uses Tailscale Funnel, cpolar, or QR pairing. It uses **Tailscale Serve** instead — once the computer and phone sign in to the same tailnet, the phone browser opens the computer's MagicDNS name directly. No pairing, no manual certificate trust, no public exposure.
 >
-> LAN access is still a standalone HTTPS gateway, but it is now entered through a one-time **pairing link**: the panel creates the link and the phone opens it to pair (see [Local network access and pairing](#local-network-access-and-pairing)). That one control is all the desktop panel keeps — it also renders the QR code for the same link, for the Android app to scan — and the pairing key and paired-device management are gone from the panel.
+> LAN access is still a standalone HTTPS gateway, but it is now entered through a one-time **pairing link**: the panel creates the link and the phone opens it to pair (see [Local network access and pairing](#local-network-access-and-pairing)). That one control is all the desktop panel keeps — it also renders the QR code for the same link — and the pairing key and paired-device management are gone from the panel.
 
-dsh-mobile-tailscale is a DeepSeek Harness plugin that lets a mobile browser or the Android app connect over a protected LAN or a Tailscale Serve remote path. Both paths keep the same sessions, Workspaces, messages, and tools, switch on and off independently, and never modify DeepSeek Harness source.
+dsh-mobile-tailscale is a DeepSeek Harness plugin that lets a phone browser connect over a protected LAN or a Tailscale Serve remote path. Both paths keep the same sessions, Workspaces, messages, and tools, switch on and off independently, and never modify DeepSeek Harness source.
 
 LAN mobile access runs on its own HTTPS gateway with a self-managed certificate, and only paired devices get in. Tailscale Serve remote access is visible only to devices on the same tailnet and has no pairing step at all.
 
@@ -40,11 +40,11 @@ It also lets you customize the phone from a DSH conversation: `/mobile <what you
 - **Continue DSH work from a phone**: the same sessions, Workspaces, messages, and tools, in real time.
 - **Customize the phone UI by talking to DSH**: change the mobile layout, interactions, and features from a conversation; open pages refresh within seconds.
 - **A dedicated touch layout**: session drawer, tool details, settings, question cards, and composer reorganized for phones.
-- **LAN auto-discovery, no repeated pairing**: when the computer's LAN address changes, the app finds the same computer by its stable installation identifier and normally recovers automatically.
+- **LAN discovery**: the plugin advertises a stable installation identifier on the machine (DNS-SD/mDNS plus periodic UDP announcements) so a scanning phone recognises the same computer.
 - **Direct Tailscale Serve remote**: any device on the same tailnet opens `https://<host>.ts.net` with no pairing or certificates.
 - **One-click connection diagnostics**: check versions, the LAN interface, the firewall, the LAN gateway, the remote path, and the phone network, then copy a report without credentials or full addresses.
 - **Faster connection recovery**: remote reopen restores trust in parallel, reuses revisioned assets, and compresses mobile boot batches.
-- **One-time pairing link**: the panel creates a link you send to the phone; opening it completes LAN pairing. The link is valid for two minutes and can be used once, and the panel shows its QR code for the Android app to scan.
+- **One-time pairing link**: the panel creates a link you send to the phone; opening it completes LAN pairing. The link is valid for two minutes and can be used once, and the panel shows its QR code for a phone camera to scan.
 
 Paired LAN devices are considered fully trusted and can operate DSH on the computer; use this only on trusted home, office, or VPN networks. For Tailscale remote access, the trust boundary is the tailnet itself.
 
@@ -187,7 +187,7 @@ How to pair:
    ```
 
    The link is valid for two minutes and can be used once.
-3. Send that link to the phone and open it (or scan the panel QR code with the Android app). The phone completes pairing and gets a device credential; the app prefills the pairing code when it opens the link.
+3. Send that link to the phone and open it (or scan the panel QR code with the phone camera). The phone completes pairing and gets a device credential; opening the link prefills the pairing code.
 4. Pairing creates persistent device trust. Afterwards, just open the `Browser access` address the panel shows; Wi-Fi, hotspot, and DHCP address changes normally do not require pairing again.
 
 The phone must be on the same network as the computer. The address the panel shows is **useless to an unpaired device** (it gets redirected to the login page) — which is exactly why the **Create pairing link** button exists. The app is optional: a mobile browser can complete the same flow. The browser must manually trust the plugin certificate on the first LAN visit.
@@ -211,7 +211,7 @@ Use this after the phone leaves the computer's network. No port forwarding, Funn
 1. Open **Mobile Access → Remote** in the lower-left corner of DeepSeek Harness. The tab shows the remote address, **Enable remote access**/**Disable remote access**, and **Reconnect**; there is no pairing and no QR code.
 2. Select **Enable remote access**. The plugin starts a loopback passthrough proxy locally and runs `tailscale serve --bg --yes --https=443 http://127.0.0.1:<remote proxy port>`, using the computer's MagicDNS name as the remote address. The registered target is the plugin's own loopback proxy port (dynamically assigned), not DSH's Web port; the proxy resolves the live upstream per request (`DSH_WEB_URL` first), so there is no need to pin DSH's Web port.
 3. Once ready, the panel shows an address like `https://<host>.ts.net`.
-4. Open that address in a mobile browser (or the Android app's remote entry). Same-tailnet access works directly, with no pairing at all.
+4. Open that address in the phone browser. Same-tailnet access works directly, with no pairing at all.
 
 - Turn off the remote switch when not in use (the plugin runs `tailscale serve --https=443 off` and stops the proxy).
 - On shutdown it first reads `tailscale serve status --json` and clears the 443 entry only while it still points at this instance's own proxy; if that entry has moved to another process, the plugin stops only its own loopback proxy and leaves the other registration alone — so restarting Desktop no longer kills the ts.net channel.
@@ -249,20 +249,15 @@ The examples above, applied:
   <img src="assets/screenshots/cyberpunk-monitor-1.png" width="22%" style="margin-left:8px" alt="Mobile UI customized into a cyberpunk monitor panel">
 </p>
 
-## App vs mobile browser
+## Phone browser
 
-| Method          | Best for                    | Notes                                                                      |
-| --------------- | --------------------------- | -------------------------------------------------------------------------- |
-| Android app     | Daily use                  | Home screen splits LAN and remote entries; LAN pairs by opening the pairing link and then finds the computer by its stable installation identifier, remote opens the tailnet address |
-| Mobile browser  | Temporary or cross-platform | Open the HTTPS address shown in the Mobile Access card; for LAN, open the pairing link first and trust the certificate on the first visit, remote opens directly |
-
-The Android app is a thin Kotlin WebView shell and does not bundle a second page; the mobile browser opens the same page. To troubleshoot compatibility, append `?frontend=stock` to the **LAN gateway page** URL to temporarily return to the desktop page layout; the flag works only on the LAN gateway (`https://<lan-ip>:3443/...`) and is not recognized by the remote `*.ts.net` path.
+Open the HTTPS address shown in the Mobile Access card in a phone browser: on the LAN, pair by opening the pairing link first and trust the certificate on the first visit; remotely, open the address from a device on the same tailnet. To troubleshoot compatibility, append `?frontend=stock` to the **LAN gateway page** URL to temporarily return to the desktop page layout; the flag works only on the LAN gateway (`https://<lan-ip>:3443/...`) and is not recognized by the remote `*.ts.net` path.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-  Phone["Android app / mobile browser"] -->|"LAN HTTPS"| Lan["LAN gateway"]
+  Phone["Phone browser"] -->|"LAN HTTPS"| Lan["LAN gateway"]
   Phone -->|"tailnet HTTPS"| Serve["Tailscale Serve"]
   Lan --> Gateway["DSH Mobile Gateway Core"]
   Serve --> DSH["Native DSH Web & Host (loopback)"]
@@ -270,7 +265,7 @@ flowchart LR
   DSH -->|"same Workspaces, sessions, and event stream"| Phone
 ```
 
-The plugin has three layers: the Host face handles LAN discovery, pairing, HTTPS, loopback proxying, Tailscale Serve control, and the extension registry; the Client face provides the standalone mobile layout and extension SDK; the Android app provides a restricted native bridge. DeepSeek Harness source and the desktop page are never modified; installation and removal go entirely through the plugin mechanism.
+The plugin has three layers: the Host face handles LAN discovery, pairing, HTTPS, loopback proxying, Tailscale Serve control, and the extension registry; the Client face provides the standalone mobile layout and extension SDK. DeepSeek Harness source and the desktop page are never modified; installation and removal go entirely through the plugin mechanism.
 
 ## Phone experience
 
@@ -362,6 +357,5 @@ npm ci
 npm run verify
 ```
 
-For Android builds, see the [app docs](apps/mobile/README.zh-CN.md).
 
 Apache-2.0, see [LICENSE](LICENSE).
