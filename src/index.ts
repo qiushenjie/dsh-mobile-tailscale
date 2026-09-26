@@ -1,56 +1,50 @@
 /**
- * Authenticated LAN gateway for the existing DSH Web application. The ordinary
- * Web listener remains loopback-only; this package owns pairing and the only
- * listener intended for phones.
+ * Phone access to the existing DSH Web application through Tailscale Serve. The
+ * ordinary Web listener remains loopback-only; this package owns the remote
+ * channel that is the only route intended for phones, so tailnet membership is
+ * the access control and no pairing secret or self-signed CA exists.
  */
-export { AccessController, AccessError, BoundedRateLimiter } from './access.js'
-export type {
-  AccessControllerOptions,
-  DeviceSummary,
-  PairingResult,
-  RenewalResult,
-  SessionAuthorization,
-} from './access.js'
-export { Config, parseControlFile, parseGatewayConfig } from './config.js'
+export { Config, parseMobileConfig, parseUpstream } from './config.js'
+export type { PluginConfig, ResolvedMobileConfig } from './config.js'
 export {
   assertSupportedDshVersion,
   isSupportedDshVersion,
   SUPPORTED_DSH_VERSIONS,
   warnUnsupportedDshVersion,
 } from './compatibility.js'
-export type {
-  DisabledTlsConfig,
-  PluginConfig,
-  ProvidedTlsConfig,
-  ResolvedGatewayConfig,
-  TlsConfig,
-} from './config.js'
 export {
   JsonMobileAccessControlStore,
-  MobileAccessGatewayController,
   parseMobileAccessControlState,
 } from './control.js'
 export type {
   MobileAccessControlState,
   MobileAccessControlStore,
-  MobileAccessRuntime,
 } from './control.js'
 export {
-  MobileAccessGateway,
+  MOBILE_LAYOUT_NEXT_PATH,
+  MobileAssetRoute,
   MobileBootBatchStore,
   mobileBootBatchKey,
-  rewriteMobileIndex,
-  rewriteMobileIndexWithBatches,
+  mobileHistoryRequestBody,
+  prunedClientModuleRequest,
+  revisionedStaticCacheControl,
   rewriteRemoteMobileIndex,
   rewriteRemoteMobileIndexWithBatches,
+  sanitizeRequestHeaders,
+  sanitizeResponseHeaders,
   sendMobileBootBatch,
-} from './gateway.js'
+  sendPrunedClientModule,
+  stripIpv6Brackets,
+  websocketAccept,
+} from './mobile-frontend.js'
 export type {
+  MobileAssetRouteOptions,
   MobileBootBatchEntry,
   MobileBootBatchPayload,
   MobileBootBatchPlan,
+  MobileLayoutMode,
   RewrittenMobileIndex,
-} from './gateway.js'
+} from './mobile-frontend.js'
 export {
   EXTENSION_LIMITS,
   MobileAccessService,
@@ -72,28 +66,6 @@ export type {
   MobileRouteRequest,
   MobileRouteResponse,
 } from './extensions.js'
-export {
-  AUTH_PREFIX,
-  CSRF_COOKIE,
-  CSRF_HEADER,
-  DEVICE_COOKIE,
-  LOCAL_ADMIN_PREFIX,
-  SESSION_COOKIE,
-  WS_PATHS,
-} from './http-security.js'
-export {
-  addressAllowed,
-  isLoopbackAddress,
-  parseAuthority,
-  parseCidr,
-  RequestTrustPolicy,
-  resolveAuthority,
-} from './network.js'
-export type { AuthoritySpec, ParsedCidr } from './network.js'
-export {
-  JsonDeviceStore,
-  MemoryDeviceStore,
-  parseDeviceSnapshot,
-} from './storage.js'
-export type { DeviceSnapshot, DeviceStore, StoredDevice } from './storage.js'
+export { AUTH_PREFIX, LOCAL_ADMIN_PREFIX } from './http-security.js'
+export { isLoopbackAddress } from './network.js'
 export { apply, inject, name } from './plugin.js'

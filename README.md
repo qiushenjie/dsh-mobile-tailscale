@@ -25,13 +25,13 @@
 
 > dsh-mobile-tailscale 是 [dsh-mobile](https://github.com/saya-ch/dsh-mobile) 的 fork，一个 DeepSeek Harness 社区插件，只用手机浏览器访问，不需要安装任何客户端。
 >
-> **与上游的区别**：远程连接不再使用 Tailscale Funnel / cpolar 与扫码配对机制，改为 **Tailscale Serve**——电脑与手机登录同一个 tailnet 后，手机浏览器直接打开电脑节点的 MagicDNS 地址即可，无需扫码配对、无需手动信任证书、无公网暴露。
+> **与上游的区别**：本插件只保留一条连接通道——**Tailscale Serve**。电脑与手机登录同一个 tailnet 后，手机浏览器直接打开电脑节点的 MagicDNS 地址即可；没有扫码配对、没有手动信任证书、没有公网暴露，也没有任何局域网监听端口。
 >
-> 局域网仍是独立的 HTTPS 网关，改由一次性**配对链接**接入：面板生成链接，手机打开链接完成配对（见[局域网访问与配对](#局域网访问与配对)）。桌面面板只保留这一个入口（同一个链接的配对二维码也显示在链接旁）；配对密钥与配对设备管理不再放在面板里。
+> **0.4.0 起，局域网通道已整体移除。** 之前的局域网 HTTPS 网关、`:3443` 监听、配对链接与二维码、配对设备管理、自签名「DeepSeek Harness Mobile CA」证书链和 `dsh-mobile setup` 子命令都不再存在；`dsh-mobile setup` 没有任何替代品，因为远程通道不需要初始化。移除原因见 [0.4.0 更新记录](CHANGELOG.md#040) 与 [排障手册](TROUBLESHOOTING.md#为什么不再有局域网直连)。
 
-dsh-mobile-tailscale 是一个 DeepSeek Harness 插件，让手机浏览器通过局域网或 Tailscale Serve 远程通道连接电脑，继续使用同一份会话、工作区、消息和工具。两条通道相互独立、各自启停，且都不修改 DeepSeek Harness 源码。
+dsh-mobile-tailscale 是一个 DeepSeek Harness 插件，让手机浏览器通过 Tailscale Serve 连接电脑，继续使用同一份会话、工作区、消息和工具，且不修改 DeepSeek Harness 源码。
 
-局域网移动访问使用独立的 HTTPS 网关与自管理证书，只有配对过的设备能接入；Tailscale Serve 远程访问只对同一 tailnet 内的设备可见，完全没有配对步骤。
+访问控制就是 tailnet 成员身份：只有登录同一 tailnet 且运行着 Tailscale 的设备能看到 `https://<node>.<tailnet>.ts.net`，该地址由 Let's Encrypt 签发真实证书，因此手机端没有登录页、没有配对步骤、也不会遇到证书警告。
 
 它还能在 DSH 对话里用 `/mobile <需求>` 定制手机端。
 
@@ -40,20 +40,19 @@ dsh-mobile-tailscale 是一个 DeepSeek Harness 插件，让手机浏览器通�
 - **在手机上继续电脑端的工作**：同一份会话、工作区、消息和工具，实时同步。
 - **用对话定制手机端**：直接在 DSH 对话里改手机页面的布局、交互和功能，几秒内刷新。
 - **专属触屏布局**：会话抽屉、工具详情、设置、提问卡片和输入栏都按手机重新组织。
-- **局域网自动发现**：插件在本机广播稳定的安装标识（DNS-SD/mDNS 加周期性 UDP 公告），手机端的局域网扫描可用它认出同一台电脑。
-- **Tailscale Serve 远程直连**：同 tailnet 的任意设备直接访问 `https://<host>.ts.net`，无需配对与证书。
-- **一键连接诊断**：检查版本、局域网网卡、防火墙、局域网网关、远程通道和手机网络，并生成不含凭据与完整地址的脱敏报告。
-- **更快恢复连接**：远程重开会并行恢复可信连接、复用版本化资源，并压缩移动端启动批次。
-- **一次性配对链接**：面板点「生成配对链接」，把链接发到手机打开即完成局域网配对；链接 2 分钟内有效且只能用一次。也可以用手机相机扫描面板上同步显示的配对二维码。
+- **Tailscale Serve 远程直连**：同 tailnet 的任意设备直接访问 `https://<node>.<tailnet>.ts.net`，无需配对、无需信任证书。
+- **一键连接诊断**：检查插件与 DSH 版本兼容性、远程通道、Tailscale 提供方和手机网络，并生成不含凭据与完整地址的脱敏报告。
+- **更快恢复连接**：远程重开会复用版本化资源，并压缩移动端启动批次。
 
-局域网配对设备被视为完全信任，可以操作电脑上的 DSH；建议只在可信的家庭、办公局域网或可信 VPN 中使用。Tailscale 远程访问的可信边界是 tailnet 本身。
+Tailscale 远程访问的可信边界是 tailnet 本身。任何加入该 tailnet 的设备都能操作电脑上的 DSH，请只把可信设备加入 tailnet。
 
 ## 快速开始
 
 > **安装前须知**
 >
-> - 插件的**包名**是 `dsh-mobile-tailscale`，它提供的**可执行命令**是 `dsh-mobile`（`setup`、`purge` 等子命令都通过它运行，例如 `dsh plugin --profile web exec dsh-mobile setup`）。
+> - 插件的**包名**是 `dsh-mobile-tailscale`，它提供的**可执行命令**是 `dsh-mobile`（`extension`、`purge` 等子命令都通过它运行，例如 `dsh plugin --profile web exec dsh-mobile purge --yes`）。
 > - 使用 `dsh-mobile-tailscale@latest` 安装的前提是包已经发布到 npm（`npm view dsh-mobile-tailscale` 能查到版本）。尚未发布时（本地 fork / 开发阶段），请用下面的「方式三：从本地源码安装」。
+> - **无需初始化子命令**。0.4.0 起 `dsh-mobile setup` 已随局域网通道移除；远程通道在面板里点开关即可启用。
 
 ### 方式一：使用 `dsh` 命令
 
@@ -61,7 +60,6 @@ dsh-mobile-tailscale 是一个 DeepSeek Harness 插件，让手机浏览器通�
 
 ```powershell
 dsh plugin --profile web add dsh-mobile-tailscale@latest
-dsh plugin --profile web exec dsh-mobile setup
 dsh --profile web
 ```
 
@@ -86,7 +84,6 @@ npm install -g @deepseek-ai/dsh@<version>
 
 ```bash
 dsh plugin --profile web add dsh-mobile-tailscale@latest
-dsh plugin --profile web exec dsh-mobile setup
 dsh --profile web
 ```
 
@@ -97,7 +94,6 @@ dsh --profile web
 ```bash
 corepack enable; pnpm install
 pnpm dsh plugin --profile web add dsh-mobile-tailscale@latest
-pnpm dsh plugin --profile web exec dsh-mobile setup
 pnpm dsh --profile web
 ```
 
@@ -105,7 +101,7 @@ Windows 下在源码根目录的 PowerShell 里执行同样的命令即可。
 
 ### 方式三：从本地源码安装（无需发布 npm）
 
-插件尚未发布到 npm 时（本地 fork / 开发阶段）使用。整体流程：**克隆 → 装依赖 → 构建 → 打包 → 装入 profile → 初始化**。
+插件尚未发布到 npm 时（本地 fork / 开发阶段）使用。整体流程：**克隆 → 装依赖 → 构建 → 打包 → 装入 profile**。
 
 **前置条件**：Node.js 22.19+ 或 24+（`package.json` 的 `engines` 为 `^22.19.0 || >=24.0.0`；建议开启 corepack 以使用 pnpm）。
 
@@ -127,13 +123,12 @@ npm pack           # 生成 dsh-mobile-tailscale-<version>.tgz
 
 > `npm pack` 会校验 `package.json` 的 version 与 `apps/mobile/android/app/build.gradle.kts` 的 `versionName` 一致，不一致时先对齐再打包；npm 缓存报 EPERM 时改用 `pnpm pack`，只想跳过校验直接打包用 `npm pack --ignore-scripts`。
 
-**3. 把 tarball 装入 web profile 并初始化：**
+**3. 把 tarball 装入 web profile：**
 
 **Windows（PowerShell）：**
 
 ```powershell
 dsh plugin --profile web add .\dsh-mobile-tailscale-<version>.tgz
-dsh plugin --profile web exec dsh-mobile setup
 dsh --profile web
 ```
 
@@ -143,7 +138,6 @@ dsh --profile web
 # 目录里可能留有多个历史 tarball：取版本号最大的那个，不要用 head -1
 TGZ=$(ls -1 dsh-mobile-tailscale-*.tgz | sort -V | tail -1)
 dsh plugin --profile web add "$PWD/$TGZ"
-dsh plugin --profile web exec dsh-mobile setup
 dsh --profile web
 ```
 
@@ -159,66 +153,35 @@ dsh --profile web
 
 **开发迭代**：每次改动源码后，重新执行第 2、3 步（`build` + `pack` + `add`）覆盖安装即可。DSH Desktop 正在运行时，需要完全退出并重新打开才会加载新插件。
 
-`setup` 会自动选择并记住当前局域网，切换 Wi-Fi、热点或 IP 后通常自动恢复；仅在自动选择失败时使用 `--address 192.168.x.x`。设置、证书、设备和自定义文件保存在 `$DSH_HOME/mobile-access/`。
-
-安装并启动 DSH 后，按照下一节选择局域网或远程连接。
+安装并启动 DSH 后，先在本机（Mac）和手机上都安装 [Tailscale](https://tailscale.com/download) 并登录同一个 tailnet，然后按下一节启用远程访问。插件的状态与自定义文件保存在 `$DSH_HOME/mobile-access/`。
 
 ## 连接教程
 
-局域网和远程访问是两套相互独立的连接：在电脑附近优先使用局域网，延迟最低；离开当前网络时再启用远程访问。两条通道各自启停，互不影响。
+远程通道（Tailscale Serve）是 0.4.0 起唯一支持的连接方式。无需公网端口转发，也不使用 Funnel 或 cpolar；远程访问默认关闭。
 
-### 局域网访问与配对
+**前提**：电脑和手机都安装 [Tailscale](https://tailscale.com/download)，并登录到**同一个 tailnet**；手机上 Tailscale 需保持运行。
 
-适合同一 Wi-Fi、以太网或手机热点，是默认且最简单的连接方式。局域网网关监听 `https://<lan-ip>:3443`，使用自管理的自签名证书（位于 `$DSH_HOME/mobile-access/tls/`）；网络配置由 `dsh-mobile setup` 写进 `$DSH_HOME/mobile-access/setup.json`，开关状态在 `$DSH_HOME/mobile-access/control.json`。
-
-**局域网需要配对。** 未配对的设备用浏览器访问页面会得到 `302`，跳转到 `/mobile-access/login?return=%2F`；配对页 `GET /mobile-access/pair` 只在配对窗口打开时存在，否则返回 `404`。配对是一次性的、单设备：一个窗口只接受一次配对，窗口时长由 `pairingTtlMs` 决定（默认 120 秒，最小 10 秒，最大 600 秒）。
-
-<p align="center">
-  <img src="assets/screenshots/lan-access.png" width="82%" alt="DSH Mobile 局域网标签页：浏览器访问地址、生成配对链接按钮与状态行">
-</p>
-
-配对步骤：
-
-1. 让手机和电脑连接同一个局域网，在 DeepSeek Harness 左下角打开 **移动访问 → 局域网**。该标签页只显示 `浏览器访问 <地址>`、一个 **生成配对链接** 按钮和一行状态。
-2. 点 **生成配对链接**。面板调用 `POST /api/mobile-access/lan/pairing/open`，把返回的 `pairUrl` 复制到剪贴板，并把同一链接的二维码（响应里的 `qrSvg`）显示在按钮下方，形如：
-
-   ```text
-   https://<lan-ip>:3443/mobile-access/pair#instance=<instanceId>&token=<43 位 token>
-   ```
-
-   链接 2 分钟内有效，且只能用一次。
-3. 把这个链接发到手机并打开（也可以用手机相机扫面板上的二维码）。手机会完成配对并获得设备凭据；打开该链接时配对码会自动填入。
-4. 配对完成后即建立持久设备信任。之后打开面板显示的那个 `浏览器访问` 地址即可；切换 Wi-Fi、热点或 DHCP 地址后通常无需重新配对。
-
-手机必须和电脑在同一网络。面板显示的地址对**未配对**的设备不可用（会被跳转到登录页）——这正是「生成配对链接」按钮存在的唯一原因。手机浏览器就能完成整个流程；局域网首次访问需要按浏览器提示信任插件的自签名证书。
-
-**局域网开关与设备管理（仅本机）**：桌面面板不再提供局域网开关、配对密钥/二维码和配对设备管理。这些操作只在仅回环（loopback-only）的本地管理接口上提供，必须从电脑本机调用；非本机来源返回 `403`，手机（即使已配对）访问 `/api/mobile-access` 前缀也会被网关直接拒绝：
-
-| 接口 | 作用 |
-| --- | --- |
-| `GET`/`POST` `/api/mobile-access/lan/control` | 查看/切换局域网开关（POST body `{"running":true}` 或 `{"running":false}`） |
-| `POST` `/api/mobile-access/lan/pairing/open` | 打开配对窗口并返回 `pairUrl`、`appKey`、`qrSvg`（面板按钮调用的就是它） |
-| `GET` `/api/mobile-access/lan/devices` | 列出已配对设备 |
-| `POST` `/api/mobile-access/lan/devices/revoke` | 撤销单个设备（body `{"deviceId":"<32 位 hex>"}`） |
-| `POST` `/api/mobile-access/lan/devices/reset` | 清除全部设备（body `{"confirm":true}`） |
-
-### 远程访问（Tailscale Serve）
-
-适合手机离开电脑所在网络后使用。无需公网端口转发，也不使用 Funnel 或 cpolar；远程访问默认关闭。
-
-**前提**：电脑和手机都安装 [Tailscale](https://tailscale.com/download)，并登录到同一个 tailnet。
-
-1. 在 DeepSeek Harness 左下角打开 **移动访问 → 远程**。该标签页显示远程地址、**启用远程访问/关闭远程访问** 和 **重新连接**，没有配对与二维码。
+1. 在 DeepSeek Harness 左下角打开 **移动访问** 卡片。面板只有一个视图：远程地址（含复制操作）、**启用远程访问/关闭远程访问** 开关、一行状态、**重新连接** 与 **复制地址**，以及 **诊断** 区域。没有标签页、没有二维码、没有设备列表。
 2. 点 **启用远程访问**。插件会在本机启动一个回环直通代理，并执行 `tailscale serve --bg --yes --https=443 http://127.0.0.1:<远程代理端口>`，把电脑的 MagicDNS 名作为远程地址。注册目标是插件自己的回环代理端口（动态分配），不是 DSH 的 Web 端口；代理按请求解析实时上游（优先 `DSH_WEB_URL`），因此不需要固定 DSH 的 Web 端口。
-3. 状态变为就绪后，面板会显示 `https://<host>.ts.net` 这样的地址。
-4. 在手机浏览器打开该地址即可；同一 tailnet 内直接访问，无需任何配对。
+3. 状态变为就绪后，面板会显示 `https://<node>.<tailnet>.ts.net` 这样的地址。
+4. 在手机浏览器打开该地址即可；同一 tailnet 内直接访问，无需任何配对与登录。证书由 Let's Encrypt 签发，不会被浏览器拦截。
 
 - 不使用时应关闭远程开关（插件执行 `tailscale serve --https=443 off` 并停止代理）。
 - 关闭时会先读 `tailscale serve status --json`，只清除**仍指向本实例自己代理**的 443 条目；如果该条目已指向别的进程，插件只停自己的回环代理，不会动别人的注册——所以重启 Desktop 不会再打断 ts.net 通道。
 - 远程地址仅在 tailnet 内可见（`tailnet only`），不会被公开到公网。
-- 若状态已就绪但 `https://<host>.ts.net` 打不开：先确认 `tailscale status` 显示在线，然后重跑 `tailscale serve --bg --yes --https=443 http://127.0.0.1:<远程代理端口>`，或直接点面板上的 **重新连接**。`<远程代理端口>` 可从 `tailscale serve status --json` 的 `Proxy` 字段读出。
+- 若状态已就绪但 `https://<node>.<tailnet>.ts.net` 打不开：先确认 `tailscale status` 显示在线，然后重跑 `tailscale serve --bg --yes --https=443 http://127.0.0.1:<远程代理端口>`，或直接点面板上的 **重新连接**。`<远程代理端口>` 可从 `tailscale serve status --json` 的 `Proxy` 字段读出。
 - 上游自动跟随 `DSH_WEB_URL`（回退到配置的 `upstreamOrigin`）：DSH Desktop 每次启动的 Web 端口可能变化，插件会在启动/重连时自动重新注册，无需手动重新指向。
+- **重置**（`POST /api/mobile-access/remote/reset`，body 需 `{"confirm":true}`）会清除插件自己保存的远程状态（`$DSH_HOME/mobile-access/remote/` 下的控制与提供方文件），用于把远程通道恢复到初始状态；它不会尝试删除指向别的进程的 443 注册。该接口只接受电脑本机调用，面板里没有对应按钮。
 - 443 端口若被残留的 TCP 转发占用，启动时会自动清理（仅当 443 是唯一的 serve 条目）并重试；与其他条目冲突时面板会显示明确的 `serve_port_conflict` 提示。
+
+**本机管理接口（仅限电脑本机）**：这些操作只接受同源且 `sec-fetch-site` 合规的本机调用，非本机来源返回 `403`：
+
+| 接口 | 作用 |
+| --- | --- |
+| `GET`/`POST` `/api/mobile-access/remote/control` | 查看/切换远程开关（POST body `{"running":true}` 或 `{"running":false}`） |
+| `POST` `/api/mobile-access/remote/reconnect` | 停止并重新启动远程通道、重新注册 443 |
+| `POST` `/api/mobile-access/remote/reset` | 清除插件自己保存的远程状态 |
+| `GET` `/api/mobile-access/diagnostics` | 跑一次脱敏诊断（仅覆盖远程通道、Tailscale 提供方与 DSH 版本兼容性） |
 
 ## 扩展与自定义
 
@@ -236,6 +199,12 @@ dsh --profile web
 
 `/mobile` 把需求交给 DSH 对话中的 agent，由它直接修改本机 `$DSH_HOME/mobile-access/` 下的文件，保存后手机端自动生效。改动分两类：界面和交互在 `mobile.css`/`mobile.js`；需要电脑能力时用 `extensions/` 下的扩展，其 `host.mjs` 以本机用户权限在电脑上运行。不修改 DeepSeek Harness 源码。
 
+也可以手工创建扩展脚手架：
+
+```bash
+dsh plugin --profile web exec dsh-mobile extension create <id> [--name <name>]
+```
+
 > `host.mjs` 与本机程序拥有相同权限；仅创建和运行你理解并信任的电脑端扩展。
 
 示例的实际效果：
@@ -249,31 +218,29 @@ dsh --profile web
 
 ## 手机浏览器
 
-手机浏览器打开「移动访问」卡片显示的 HTTPS 地址：局域网先打开配对链接完成配对、首次访问需按浏览器提示信任证书，远程在同一 tailnet 内直接打开。需要排查兼容性时，可在**局域网网关页面**的地址后追加 `?frontend=stock`，临时回到旧的桌面页面适配模式；该参数只在局域网网关页（`https://<lan-ip>:3443/...`）生效，远程 `*.ts.net` 通道不识别它。
+在手机浏览器打开面板显示的 `https://<node>.<tailnet>.ts.net` 地址即可：同一 tailnet 内直接访问，无需配对，也没有证书警告。想换用 DSH 原生布局时，把 [配置项参考](#配置项参考) 里的 `mobileLayout` 设为 `stock`，或设为 `mobile` 强制启用本插件的专用移动布局。
 
 ## 工作原理
 
 ```mermaid
 flowchart LR
-  Phone["手机浏览器"] -->|"局域网 HTTPS"| Lan["局域网网关"]
-  Phone -->|"tailnet HTTPS"| Serve["Tailscale Serve"]
-  Lan --> Gateway["DSH Mobile Gateway Core"]
-  Serve --> DSH["原生 DSH Web 与 Host（本机回环）"]
-  Gateway -->|"回环代理"| DSH
+  Phone["手机浏览器"] -->|"tailnet HTTPS"| Serve["Tailscale Serve"]
+  Serve --> Proxy["回环直通代理"]
+  Proxy --> DSH["原生 DSH Web 与 Host（本机回环）"]
   DSH -->|"同一工作区、会话和事件流"| Phone
 ```
 
-插件包含三层：Host face 负责局域网发现、配对、HTTPS、回环代理、Tailscale Serve 控制和扩展注册表；Client face 提供独立的移动布局与扩展 SDK。DeepSeek Harness 的源码和桌面页面都不会被修改，安装和卸载完全通过插件机制完成。
+插件包含三层：Host face 负责回环直通代理、Tailscale Serve 控制与扩展注册表；Client face 提供独立的移动布局与扩展 SDK。DeepSeek Harness 的源码和桌面页面都不会被修改，安装和卸载完全通过插件机制完成。
 
 ## 手机端体验
 
-以下几版（0.3.15–0.3.21）集中处理手机加载与解码成本，与用哪条通道无关：
+以下几版（0.3.15–0.3.21）集中处理手机加载与解码成本，这些优化现在都作用在唯一的远程通道上：
 
-- **版本化静态资源可长期缓存**（0.3.15）：内容寻址的 URL（`/plugins/**?rev=…`、`/assets/**-<hash>.<ext>`）在两个通道都返回 `private, max-age=31536000, immutable`。在此之前远程通道会剥掉缓存头，手机每次导航都要重新下载约 5.66 MB。
+- **版本化静态资源可长期缓存**（0.3.15）：内容寻址的 URL（`/plugins/**?rev=…`、`/assets/**-<hash>.<ext>`）返回 `private, max-age=31536000, immutable`。在此之前远程通道会剥掉缓存头，手机每次导航都要重新下载约 5.66 MB。
 - **收窄手机请求的会话窗口**（0.3.16/0.3.18）：DSH 0.1.7 通过 WebSocket 的 `session/follow` 帧下发会话首屏，手机原本请求 `maxMessages: 500`。插件把该帧改写为 `maxMessages: 10` 并删除 `turnWindow`（Turn 窗口是下限而非上限），打开一个长会话从约 291 条记录降到约 60 条。
 - **剔除手机渲染不了的客户端模块**（0.3.17）：`dsh-desktop-next`、`dsh-better-sidebar`、`dsh-rewind-plugin`、`@deepseek-ai/dsh-client-ui-settings-account` 不再进入手机端启动批次。
 - **可选的布局策略**（0.3.19）：新增 `mobileLayout: 'auto' | 'mobile' | 'stock'`，默认 `auto`，见[配置项参考](#配置项参考)。
-- **分页收紧**：打开会话的窗口固定为 10 条消息；向上翻页时远程通道 50 条/页（`REMOTE_HISTORY_PAGE_MESSAGES = 50`），局域网通道 10 条/页（`MOBILE_HISTORY_PAGE_MESSAGES = 10`）。
+- **分页收紧**：打开会话的窗口固定为 10 条消息；向上翻页时远程通道 50 条/页（`REMOTE_HISTORY_PAGE_MESSAGES = 50`）。
 
 ## 配置项参考
 
@@ -282,40 +249,41 @@ flowchart LR
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
 | `mobileLayout` | `auto` | 手机端布局策略：`auto` 只在本插件实现了该布局代次时替换，`mobile` 在当前代次也替换，`stock` 从不替换。 |
-| `listenHost` / `listenPort` | `127.0.0.1` / `3443` | 局域网监听地址与端口。 |
 | `upstreamOrigin` | `http://127.0.0.1:3080` | 回环上游；远程代理优先跟随 `DSH_WEB_URL`，再回退到这里。 |
-| `publicOrigin` | 未设置 | 指定对外 HTTPS 源（含端口），与 `listenPort`/`publicAuthorities` 互斥。 |
-| `publicAuthorities` | 由 `listenHost` 推导 | 非回环监听时必须显式声明可访问的主机名/地址。 |
-| `allowedCidrs` | 回环网段 | 允许访问局域网网关的来源网段。 |
-| `tls.mode`/`certFile`/`keyFile`/`caFile` | `provided`（由 `dsh-mobile setup` 生成） | 局域网网关证书；`disabled` 只允许绑定回环监听。 |
-| `pairingTtlMs` | `120000`（10 s–600 s） | 配对窗口存活时间。 |
-| `deviceTtlMs` | 90 天 | 配对设备信任有效期。 |
-| `sessionTtlMs` | 8 小时（不超过 `deviceTtlMs`） | 配对后 Web 会话有效期。 |
-| `maxDevices` | `32` | 最多保留的配对设备数。 |
-| `maxSessions`/`maxConnections`/`maxActiveRequests`/`maxWebSockets` | `64`/`64`/`32`/`16` | 并发上限。 |
-| `maxBodyBytes` | 160 MiB | 单请求体上限。 |
-| `upstreamTimeoutMs` | `30000` | 上游请求超时。 |
-| `rateLimitWindowMs`/`maxPairingAttempts`/`maxRateLimitKeys` | `60000`/`8`/`256` | 限流窗口、窗口内配对尝试次数、限流键上限。 |
+| `stateFile` | 必填 | 插件自己的状态文件；由它推导出 `extensionsDir`、远程开关与提供方状态的位置。随包附带的 `cordis.patch.yml` 已设为 `$DSH_HOME/mobile-access/state.json`，只有手写插件条目时才需要自己指定。 |
+| `maxWebSockets` | `16` | 远程通道同时保持的 WebSocket 数上限。 |
+| `maxBodyBytes` | 160 MiB | 单次请求体上限。 |
+| `upstreamTimeoutMs` | `30000` | 转发到回环上游的超时（毫秒）。 |
 
-以下键在配置层是 `hidden`，由插件或 `dsh-mobile setup` 自行维护，通常不用手写：`setupFile`、`controlFile`、`customCssFile`、`customScriptFile`、`mobileLayoutFile`、`mobileLayoutNextFile`、`instanceId`、`pairingCaFile`、`initiallyEnabled`。数据路径 `stateFile`（默认 `$DSH_HOME/mobile-access/devices.json`）及其推导出的 `extensionsDir`（`<stateFile 所在目录>/extensions`）也是高级项——除非要迁移数据，否则保持默认。
+以下键在配置层是 `hidden`，由插件自行维护，通常不用手写：`customCssFile`、`customScriptFile`、`mobileLayoutFile`、`mobileLayoutNextFile`。它们与 `extensionsDir`（`<stateFile 所在目录>/extensions`）都由 `stateFile` 的目录推导，除非要迁移数据，否则保持默认。
 
-`dsh-mobile setup` 会把局域网网络配置写进 `$DSH_HOME/mobile-access/setup.json`，把首次开关状态写进 `$DSH_HOME/mobile-access/control.json`。
+运行时状态与自定义文件的位置：
+
+| 路径 | 内容 |
+| --- | --- |
+| `$DSH_HOME/mobile-access/remote/control.json` | 远程开关状态。 |
+| `$DSH_HOME/mobile-access/remote/provider.json` | 远程提供方选择。 |
+| `$DSH_HOME/mobile-access/mobile.css`、`mobile.js` | 手机端自定义样式与脚本。 |
+| `$DSH_HOME/mobile-access/extensions/` | 扩展目录。 |
+
+> **0.4.0 移除了局域网相关配置项**：监听地址/端口、TLS 证书路径、`publicOrigin`/`publicAuthorities`、`allowedCidrs`、配对与设备策略（`pairingTtlMs`/`deviceTtlMs`/`maxDevices` 等）都已失效。旧配置里保留这些键不会报错，但不会再被读取。局域网时代的 `$DSH_HOME/mobile-access/control.json` 也不再读取。
 
 ## 排障
 
-常见问题先看 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。两个容易误判的点：
+常见问题先看 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)。几个容易误判的点：
 
 - **重启 DSH Desktop 不会再把 ts.net 通道弄断**：插件关闭远程时只会清除仍指向本实例自己代理的 443 条目（读 `tailscale serve status --json` 比对）；如果该条目已指向别的进程，插件只停自己的回环代理。
-- **远程显示「已就绪」但 `https://<host>.ts.net` 打不开**：重跑 `tailscale serve --bg --yes --https=443 http://127.0.0.1:<远程代理端口>`，或点「远程」标签页里的 **重新连接**。
-- `GET /mobile-access/health` 现在在**两条通道**上都返回 `{"ok":true}`。此前远程通道返回 `404`，诊断会误报「远程通道不可达」；诊断若仍这样报，请先确认插件已更新。
+- **远程显示「已就绪」但 `https://<node>.<tailnet>.ts.net` 打不开**：重跑 `tailscale serve --bg --yes --https=443 http://127.0.0.1:<远程代理端口>`，或点面板上的 **重新连接**。
+- **手机打不开地址**：先确认手机已安装并运行 Tailscale、与电脑在同一 tailnet（`tailscale status` 两侧都在线），再确认地址是面板显示的那个 MagicDNS 名。
+- `GET /mobile-access/health` 在远程通道上返回 `{"ok":true}`；若诊断仍报远程不可达，先确认插件已更新到 0.3.21+。
 
 ## 安全
 
-- 局域网监听只用于可信家庭、办公网络或可信热点；不要自行做端口转发。
-- Tailscale 远程地址只对同一 tailnet 可见；不要开启 Tailscale Funnel 或把节点暴露到公网。不使用时应关闭远程开关。
-- 局域网配对设备拥有控制电脑端 DeepSeek Harness 的能力，应视为完全可信设备；丢失手机后，在电脑本机调用 `GET /api/mobile-access/lan/devices` 找到 `deviceId`，再 `POST /api/mobile-access/lan/devices/revoke`（body `{"deviceId":"<32 位 hex>"}`）撤销它。这些管理接口只接受本机回环调用，非本机来源返回 `403`，也不会暴露给手机。
-- 局域网开关与配对设备管理只保留在仅限本机的管理接口上（见[局域网访问与配对](#局域网访问与配对)）；手机即使已配对，访问 `/api/mobile-access` 前缀也会被网关拒绝。
-- 移动网关开启时才监听局域网；关闭后 DeepSeek Harness 仍正常在电脑本机运行。
+- 访问控制完全由 **tailnet 成员身份**承担：只有登录同一 tailnet 的设备能看到 `https://<node>.<tailnet>.ts.net`。请只把可信设备加入 tailnet。
+- 不要开启 Tailscale Funnel 或把节点暴露到公网；不使用时应关闭远程开关。
+- 插件不再监听任何局域网端口，也不再生成或保存配对密钥、设备凭据和自签名 CA。
+- 远程开关、重连与重置等管理接口只接受电脑本机调用，非本机来源返回 `403`。
+- 关闭远程后，DeepSeek Harness 仍正常在电脑本机运行。
 
 完整说明见 [SECURITY.md](SECURITY.md)。
 
@@ -323,7 +291,8 @@ flowchart LR
 
 | dsh-mobile-tailscale | 已验证的 DeepSeek Harness                                               |
 | -------------------- | ------------------------------------------------------------------------- |
-| `0.3.7` 及以后       | `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1`、`0.1.2-rc.1`、`0.1.7-rc.2` |
+| `0.4.0` 及以后       | `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1`、`0.1.2-rc.1`、`0.1.7-rc.2` |
+| `0.3.7`–`0.3.21`     | 同上 |
 | `0.3.6`              | 同上 |
 | `0.3.5`、`0.3.4`、`0.3.3` | `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1`、`0.1.2-rc.1` |
 | `0.3.2`              | `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1` |
@@ -346,7 +315,7 @@ dsh plugin --profile web exec dsh-mobile purge --yes
 dsh plugin --profile web remove dsh-mobile-tailscale
 ```
 
-源码模式：在 DSH 源码根目录把 `dsh` 换成 `pnpm dsh`；macOS 未安装 `dsh` 命令时用 DSH Desktop 内置 CLI，见「快速开始」方式一。
+`purge` 删除 `$DSH_HOME/mobile-access/`（远程状态、自定义文件、扩展）。源码模式：在 DSH 源码根目录把 `dsh` 换成 `pnpm dsh`；macOS 未安装 `dsh` 命令时用 DSH Desktop 内置 CLI，见「快速开始」方式一。
 
 ## 开发
 

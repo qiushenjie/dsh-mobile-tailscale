@@ -1,19 +1,11 @@
-# Community bundle: Host gateway and browser Client face over any Web-profile
-# composition. It does not patch DSH source files.
+# Community bundle: Tailscale Serve remote access for the existing DSH Web
+# application. It does not patch DSH source files and never opens a LAN
+# listener; the phone reaches the loopback Web server through `tailscale serve`.
 - insert:
     - id: mobile-access
       name: dsh-mobile-tailscale
       inject: [webServer, connection]
       config:
-        setupFile: !!js dshHomePath('mobile-access/setup.json')
-        stateFile: !!js dshHomePath('mobile-access/devices.json')
-        controlFile: !!js dshHomePath('mobile-access/control.json')
+        stateFile: !!js dshHomePath('mobile-access/state.json')
         customCssFile: !!js dshHomePath('mobile-access/mobile.css')
         customScriptFile: !!js dshHomePath('mobile-access/mobile.js')
-        initiallyEnabled: false
-        listenHost: 127.0.0.1
-        listenPort: 3443
-        upstreamOrigin: http://127.0.0.1:3080
-        allowedCidrs: [127.0.0.0/8]
-        tls:
-          mode: disabled

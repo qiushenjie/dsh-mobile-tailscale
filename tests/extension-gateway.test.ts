@@ -5,11 +5,8 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { parseGatewayConfig } from '../src/config.js'
 import { MobileAccessService } from '../src/extensions.js'
-import { MobileAccessGateway } from '../src/gateway.js'
-import { CSRF_HEADER, SESSION_COOKIE } from '../src/http-security.js'
-import { MemoryDeviceStore } from '../src/storage.js'
+import { MobileAssetRoute } from '../src/mobile-frontend.js'
 
 const cleanups: Array<() => Promise<void>> = []
 
@@ -33,58 +30,60 @@ async function request(port: number, path: string, options: { method?: string; h
   })
 }
 
-function cookie(headers: Record<string, string | string[] | undefined>, name: string): string {
-  const values = headers['set-cookie']; const list = Array.isArray(values) ? values : values === undefined ? [] : [values]
-  return list.find(value => value.startsWith(`${name}=`))?.split(';', 1)[0] ?? ''
+async function mount(): Promise<{ directory: string; port: number }> {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-mobile-extension-gateway-'))
+  cleanups.push(() => rm(directory, { recursive: true, force: true }))
+  const context = new Context()
+  cleanups.push(() => context.fiber.dispose().catch(() => undefined))
+  const service = new MobileAccessService(context)
+  service.registerExtension({
+    schemaVersion: 1, id: 'hello', name: 'Hello', version: '1.0.0',
+    actions: { echo: { run: async (_context, input) => ({ input }) } },
+    routes: [{ method: 'GET', path: 'status', handle: async () => ({ contentType: 'application/json', body: JSON.stringify({ ok: true }) }) }],
+  })
+  const route = new MobileAssetRoute({
+    customCssFile: join(directory, 'mobile.css'),
+    customScriptFile: join(directory, 'mobile.js'),
+    mobileLayoutFile: join(directory, 'mobile-layout.js'),
+    mobileLayoutNextFile: join(directory, 'mobile-layout-next.js'),
+    maxBodyBytes: 1024 * 1024,
+    extensions: service,
+  })
+  const server = createServer((incoming, response) => { void route.route().handler(incoming, response) })
+  const port = await listen(server)
+  cleanups.push(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())) })
+  return { directory, port }
 }
 
-describe('gateway extension namespace', () => {
-  it('authenticates actions and routes while keeping the upstream proxy intact', async () => {
-    const upstream = createServer((_, response) => { response.writeHead(200, { 'content-type': 'text/html' }); response.end('<!doctype html><script>window.__DSH_BOOT__ = {"rev":"x","entries":[{"id":"@deepseek-ai/dsh-client-ui-layout","url":"/layout.js","rev":"x","inject":["@deepseek-ai/dsh-client-runtime","@deepseek-ai/dsh-client-ui-theme"]}]};</script>') })
-    const upstreamPort = await listen(upstream)
-    cleanups.push(async () => { upstream.closeAllConnections(); await new Promise<void>(resolve => upstream.close(() => resolve())) })
-    const directory = await mkdtemp(join(tmpdir(), 'dsh-mobile-extension-gateway-'))
-    cleanups.push(() => rm(directory, { recursive: true, force: true }))
-    const context = new Context(); cleanups.push(() => context.fiber.dispose())
-    const service = new MobileAccessService(context)
-    service.registerExtension({
-      schemaVersion: 1, id: 'hello', name: 'Hello', version: '1.0.0',
-      actions: { echo: { run: async (_context, input) => ({ input }) } },
-      routes: [{ method: 'GET', path: 'status', handle: async () => ({ contentType: 'application/json', body: JSON.stringify({ ok: true }) }) }],
+describe('mobile asset route extension namespace', () => {
+  it('serves extension actions and routes straight from the asset route', async () => {
+    const { port } = await mount()
+    // The remote channel reaches this route over Tailscale Serve, so the
+    // extension namespace is invoked without any pairing or cookie dance.
+    const action = await request(port, '/mobile-access/extensions/hello/actions/echo', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ value: 1 }),
     })
-    const config = parseGatewayConfig({ listenHost: '127.0.0.1', listenPort: 38082, upstreamOrigin: `http://127.0.0.1:${String(upstreamPort)}`, publicAuthorities: ['127.0.0.1'], allowedCidrs: ['127.0.0.0/8'], stateFile: join(directory, 'devices.json'), tls: { mode: 'disabled' } })
-    const gateway = new MobileAccessGateway(config, new MemoryDeviceStore(), service)
-    await gateway.start(); cleanups.push(() => gateway.close())
-    const opened = await gateway.access.openPairing()
-    const origin = gateway.address().origin
-    const paired = await request(gateway.address().port, '/mobile-access/auth/pair', { method: 'POST', headers: { host: new URL(origin).host, origin, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, body: JSON.stringify({ token: opened.token }) })
-    expect(paired.status).toBe(201)
-    const session = cookie(paired.headers, SESSION_COOKIE); const csrf = JSON.parse(paired.body) as { csrfToken: string }
-    const headers = { host: new URL(origin).host, origin, 'sec-fetch-site': 'same-origin', cookie: session, [CSRF_HEADER]: csrf.csrfToken, 'content-type': 'application/json' }
-    const action = await request(gateway.address().port, '/mobile-access/extensions/hello/actions/echo', { method: 'POST', headers, body: JSON.stringify({ value: 1 }) })
-    expect(action.status).toBe(200); expect(JSON.parse(action.body)).toEqual({ input: { value: 1 } })
-    const route = await request(gateway.address().port, '/mobile-access/extensions/hello/routes/status', { headers })
-    expect(route.status).toBe(200); expect(JSON.parse(route.body)).toEqual({ ok: true })
+    expect(action.status).toBe(200)
+    expect(JSON.parse(action.body)).toEqual({ input: { value: 1 } })
+
+    const route = await request(port, '/mobile-access/extensions/hello/routes/status')
+    expect(route.status).toBe(200)
+    expect(JSON.parse(route.body)).toEqual({ ok: true })
+
+    const unknownAction = await request(port, '/mobile-access/extensions/hello/actions/missing', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    expect(unknownAction.status).toBeGreaterThanOrEqual(400)
+    expect(JSON.parse(unknownAction.body)).toHaveProperty('error')
   })
 
   it('serves the extension manifest on the canonical path the client requests', async () => {
-    const upstream = createServer((_, response) => { response.writeHead(200, { 'content-type': 'text/html' }); response.end('<!doctype html><script>window.__DSH_BOOT__ = {"rev":"x","entries":[{"id":"@deepseek-ai/dsh-client-ui-layout","url":"/layout.js","rev":"x","inject":["@deepseek-ai/dsh-client-runtime","@deepseek-ai/dsh-client-ui-theme"]}]};</script>') })
-    const upstreamPort = await listen(upstream)
-    cleanups.push(async () => { upstream.closeAllConnections(); await new Promise<void>(resolve => upstream.close(() => resolve())) })
-    const directory = await mkdtemp(join(tmpdir(), 'dsh-mobile-extension-manifest-'))
-    cleanups.push(() => rm(directory, { recursive: true, force: true }))
-    const context = new Context(); cleanups.push(() => context.fiber.dispose())
-    const service = new MobileAccessService(context)
-    service.registerExtension({ schemaVersion: 1, id: 'hello', name: 'Hello', version: '1.0.0' })
-    const config = parseGatewayConfig({ listenHost: '127.0.0.1', listenPort: 38084, upstreamOrigin: `http://127.0.0.1:${String(upstreamPort)}`, publicAuthorities: ['127.0.0.1'], allowedCidrs: ['127.0.0.0/8'], stateFile: join(directory, 'devices.json'), tls: { mode: 'disabled' } })
-    const gateway = new MobileAccessGateway(config, new MemoryDeviceStore(), service)
-    await gateway.start(); cleanups.push(() => gateway.close())
-    const opened = await gateway.access.openPairing()
-    const origin = gateway.address().origin
-    const paired = await request(gateway.address().port, '/mobile-access/auth/pair', { method: 'POST', headers: { host: new URL(origin).host, origin, 'sec-fetch-site': 'same-origin', 'content-type': 'application/json' }, body: JSON.stringify({ token: opened.token }) })
-    const session = cookie(paired.headers, SESSION_COOKIE)
-    const headers = { host: new URL(origin).host, origin, 'sec-fetch-site': 'same-origin', cookie: session, 'content-type': 'application/json' }
-    const manifest = await request(gateway.address().port, '/mobile-access/extensions/manifest', { headers })
+    const { directory, port } = await mount()
+    const manifest = await request(port, '/mobile-access/extensions/manifest')
     expect(manifest.status).toBe(200)
     expect(JSON.parse(manifest.body)).toMatchObject({
       protocol: 1,
@@ -92,11 +91,11 @@ describe('gateway extension namespace', () => {
       legacy: { scriptRevision: expect.any(String), styleRevision: expect.any(String) },
     })
     expect(manifest.headers.etag).toBeTruthy()
-    const notModified = await request(gateway.address().port, '/mobile-access/extensions/manifest', { headers: { ...headers, 'if-none-match': String(manifest.headers.etag) } })
+    const notModified = await request(port, '/mobile-access/extensions/manifest', { headers: { 'if-none-match': String(manifest.headers.etag) } })
     expect(notModified.status).toBe(304)
     await writeFile(join(directory, 'mobile.js'), 'window.dshMobile?.register(() => undefined)\n// changed\n')
-    const customized = await request(gateway.address().port, '/mobile-access/extensions/manifest', { headers: { ...headers, 'if-none-match': String(manifest.headers.etag) } })
+    const customized = await request(port, '/mobile-access/extensions/manifest', { headers: { 'if-none-match': String(manifest.headers.etag) } })
     expect(customized.status).toBe(200)
-    expect(JSON.parse(customized.body)).not.toMatchObject({ legacy: JSON.parse(manifest.body).legacy })
+    expect(JSON.parse(customized.body)).not.toMatchObject({ legacy: (JSON.parse(manifest.body) as { legacy: unknown }).legacy })
   })
 })

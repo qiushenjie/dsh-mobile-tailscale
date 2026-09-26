@@ -5,21 +5,14 @@ import { boundContextSummary, createUserMessage } from '@deepseek-ai/dsh-llm/mes
 import type {} from '@deepseek-ai/dsh-commands'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { createRequire } from 'node:module'
-import { readFile, rm } from 'node:fs/promises'
-import { dirname, isAbsolute, join, resolve } from 'node:path'
-import { parseControlFile, parseGatewayConfig, type PluginConfig, type ResolvedGatewayConfig } from './config.js'
+import { join } from 'node:path'
+import { parseMobileConfig, type PluginConfig } from './config.js'
 import { warnUnsupportedDshVersion } from './compatibility.js'
 import { collectConnectionDiagnostics } from './diagnostics.js'
 import { MOBILE_CUSTOMIZATION_GUIDE } from './mobile-guide.js'
-import {
-  FollowingMobileAccessRuntime,
-  JsonMobileAccessControlStore,
-  MobileAccessGatewayController,
-  type MobileAccessRuntime,
-} from './control.js'
-import { MobileAccessGateway } from './gateway.js'
+import { JsonMobileAccessControlStore } from './control.js'
+import { MobileAssetRoute } from './mobile-frontend.js'
 import { createMobileAccessService, type MobileAccessService } from './extensions.js'
-import { listComputerImages, readComputerImage } from './computer-images.js'
 import {
   AUTH_PREFIX,
   HttpError,
@@ -30,18 +23,10 @@ import {
   sendFailure,
   sendJson,
 } from './http-security.js'
-import { JsonDeviceStore } from './storage.js'
 import { configuredRemoteProvider, JsonRemoteProviderStore, type RemoteProvider } from './remote.js'
 import { TailscaleServeController } from './tailscale-serve.js'
 import { RemotePassthroughProxy } from './remote-proxy.js'
 import { resolveLiveUpstream } from './upstream.js'
-import { parseAuthority, parseCidr } from './network.js'
-import {
-  materializeManagedSetup,
-  parseManagedSetup,
-  selectLanNetwork,
-  type ManagedSetup,
-} from './managed-setup.js'
 
 /** Stable Cordis plugin name. */
 export const name = 'dsh-mobile-tailscale'
@@ -82,82 +67,6 @@ function installedDshVersion(): string | undefined {
   }
 }
 
-function mapAdminError(error: unknown): HttpError {
-  if (error instanceof HttpError) return error
-  const code = (error as NodeJS.ErrnoException).code
-  if (code === 'EADDRNOTAVAIL') return new HttpError(409, 'network_address_changed')
-  if (code === 'EADDRINUSE') return new HttpError(409, 'listen_port_in_use')
-  if (error instanceof Error && error.message.startsWith('saved LAN interface ')) {
-    return new HttpError(409, 'network_interface_unavailable')
-  }
-  return new HttpError(500, 'internal_error')
-}
-
-const SETUP_KEYS = new Set([
-  'version', 'publicOrigin', 'listenHost', 'listenPort', 'upstreamOrigin',
-  'publicAuthorities', 'allowedCidrs', 'instanceId', 'pairingCaFile', 'tls',
-])
-
-type LoadedSetup = {
-  readonly kind: 'fixed'
-  readonly config: PluginConfig
-} | {
-  readonly kind: 'managed'
-  readonly config: PluginConfig
-  readonly setup: ManagedSetup
-}
-
-function withoutSetupKeys(config: PluginConfig): PluginConfig {
-  const merged = { ...config } as Record<string, unknown>
-  for (const key of SETUP_KEYS) if (key !== 'version') delete merged[key]
-  return merged as unknown as PluginConfig
-}
-
-async function loadSetup(config: PluginConfig): Promise<LoadedSetup> {
-  if (config.setupFile === undefined) return { kind: 'fixed', config }
-  if (!isAbsolute(config.setupFile)) throw new Error('setupFile must be an absolute file path')
-  let source: string
-  try {
-    source = await readFile(resolve(config.setupFile), 'utf8')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'fixed', config }
-    throw error
-  }
-  let parsed: unknown
-  try { parsed = JSON.parse(source) as unknown }
-  catch (error) { throw new Error('mobile setup file is not valid JSON', { cause: error }) }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('mobile setup file must be an object')
-  }
-  const record = parsed as Record<string, unknown>
-  if (record.version === 2) {
-    return { kind: 'managed', config: withoutSetupKeys(config), setup: parseManagedSetup(record) }
-  }
-  if (record.version !== 1 || Reflect.ownKeys(record).some(key => typeof key !== 'string' || !SETUP_KEYS.has(key))) {
-    throw new Error('mobile setup file has an unsupported format')
-  }
-  const { version: _version, ...setup } = record
-  return {
-    kind: 'fixed',
-    config: { ...withoutSetupKeys(config), ...setup } as unknown as PluginConfig,
-  }
-}
-
-function loopbackTemplate(loaded: LoadedSetup): ResolvedGatewayConfig {
-  const base = withoutSetupKeys(loaded.config)
-  return parseGatewayConfig({
-    ...base,
-    ...(loaded.kind === 'managed'
-      ? { upstreamOrigin: loaded.setup.upstreamOrigin }
-      : loaded.config.upstreamOrigin === undefined ? {} : { upstreamOrigin: loaded.config.upstreamOrigin }),
-    listenHost: '127.0.0.1',
-    listenPort: 0,
-    publicAuthorities: ['127.0.0.1'],
-    allowedCidrs: ['127.0.0.0/8'],
-    tls: { mode: 'disabled' },
-  })
-}
-
 interface RemoteStatus {
   readonly enabled: boolean
   readonly state: string
@@ -182,7 +91,13 @@ function remoteControlPayload(
   }
 }
 
-/** Mount the resident control route and its optional authenticated LAN gateway. */
+/**
+ * Mount the resident control route and the Tailscale Serve remote channel.
+ *
+ * There is deliberately no LAN listener: the phone reaches the loopback DSH web
+ * server only through `tailscale serve`, so tailnet membership is the whole
+ * access control and no pairing secret or self-signed CA exists to trust.
+ */
 export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
   const dshVersion = installedDshVersion() ?? 'unknown'
   // Advisory only: an unverified Host version must never abort activation, or
@@ -190,98 +105,34 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
   // Host boot — down with it (DSH Desktop then falls back to its safe-mode
   // profile with every third-party plugin disabled).
   warnUnsupportedDshVersion(dshVersion)
-  const loaded = await loadSetup(config)
+  const resolved = parseMobileConfig(config)
   const mobileAccess: MobileAccessService = createMobileAccessService(ctx)
-  const template = loopbackTemplate(loaded)
   const liveWebOrigin = webServerOrigin(ctx)
-  const resolveUpstream = (): URL => resolveLiveUpstream(template.upstreamOrigin.origin, liveWebOrigin)
+  const resolveUpstream = (): URL => resolveLiveUpstream(resolved.upstreamOrigin.origin, liveWebOrigin)
   const resolveAuthenticatedUrl = (upstream: URL): string | undefined => upstreamAuthenticatedUrl(ctx, upstream)
-  const stateDirectory = dirname(template.stateFile)
-  const remoteDirectory = join(stateDirectory, 'remote')
+  const remoteDirectory = join(resolved.stateDirectory, 'remote')
   const remoteProviderStore = new JsonRemoteProviderStore(
     join(remoteDirectory, 'provider.json'),
     configuredRemoteProvider(process.env),
   )
-  let remoteProvider = (await remoteProviderStore.load()).provider
-  const unregisterBuiltin = mobileAccess.registerExtension({
-    schemaVersion: 1,
-    id: 'computer-images',
-    name: 'Computer images',
-    version: '1.0.0',
-    description: 'Authenticated computer-side image browser',
-    routes: [
-      {
-        method: 'GET', path: 'list',
-        async handle(request) {
-          return { status: 200, contentType: 'application/json; charset=utf-8', body: JSON.stringify(await listComputerImages(request.query.get('path'))) }
-        },
-      },
-      {
-        method: 'GET', path: 'image',
-        async handle(request) {
-          const image = await readComputerImage(request.query.get('path'))
-          return { status: 200, contentType: image.contentType, headers: { 'content-disposition': `inline; filename*=UTF-8''${encodeURIComponent(image.name)}` }, body: image.body }
-        },
-      },
-    ],
+  const remoteProvider = (await remoteProviderStore.load()).provider
+  const assetRoute = new MobileAssetRoute({
+    customCssFile: resolved.customCssFile,
+    customScriptFile: resolved.customScriptFile,
+    mobileLayoutFile: resolved.mobileLayoutFile,
+    mobileLayoutNextFile: resolved.mobileLayoutNextFile,
+    maxBodyBytes: resolved.maxBodyBytes,
+    extensions: mobileAccess,
   })
-  let lanGateway: MobileAccessGateway | undefined
-  const startGateway = async (candidateConfig: PluginConfig): Promise<MobileAccessRuntime> => {
-    const upstream = resolveLiveUpstream(
-      candidateConfig.upstreamOrigin ?? template.upstreamOrigin.origin,
-      liveWebOrigin,
-    )
-    const resolved = parseGatewayConfig({
-      ...candidateConfig,
-      upstreamOrigin: upstream.origin,
-    })
-    const candidate = new MobileAccessGateway(
-      resolved,
-      new JsonDeviceStore(resolved.stateFile, resolved.maxDevices),
-      mobileAccess,
-      upstreamAuthenticatedUrl(ctx, upstream),
-    )
-    await candidate.start()
-    lanGateway = candidate
-    return {
-      close: async () => {
-        if (lanGateway === candidate) lanGateway = undefined
-        await candidate.close()
-      },
-    }
-  }
-  const startRuntime = async (): Promise<MobileAccessRuntime> => {
-    if (loaded.kind === 'fixed') return startGateway(loaded.config)
-    const following = new FollowingMobileAccessRuntime(async () => {
-      const network = selectLanNetwork(undefined, loaded.setup.networkInterface)
-      return {
-        key: `${network.name}\0${network.address}\0${network.cidr}`,
-        start: async () => startGateway({
-          ...loaded.config,
-          ...await materializeManagedSetup(loaded.setup),
-        }),
-      }
-    }, (error) => {
-      process.emitWarning(`DSH Mobile could not follow the current LAN address: ${error instanceof Error ? error.message : String(error)}`, {
-        code: 'DSH_MOBILE_NETWORK_REFRESH',
-      })
-    })
-    await following.initialize(2_000)
-    return following
-  }
-  const lanController = new MobileAccessGatewayController(
-    new JsonMobileAccessControlStore(parseControlFile(config.controlFile), config.initiallyEnabled),
-    startRuntime,
-  )
   const tailscaleStore = new JsonMobileAccessControlStore(join(remoteDirectory, 'control.json'), false)
   const remoteProxy = new RemotePassthroughProxy({
     resolveUpstream,
     resolveAuthenticatedUrl,
-    upstreamTimeoutMs: template.upstreamTimeoutMs,
-    maxBodyBytes: template.maxBodyBytes,
-    maxWebSockets: template.maxWebSockets,
-    mobileLayoutNextFile: template.mobileLayoutNextFile,
-    mobileLayout: template.mobileLayout,
+    upstreamTimeoutMs: resolved.upstreamTimeoutMs,
+    maxBodyBytes: resolved.maxBodyBytes,
+    maxWebSockets: resolved.maxWebSockets,
+    mobileLayoutNextFile: resolved.mobileLayoutNextFile,
+    mobileLayout: resolved.mobileLayout,
   })
   const remoteControllers = {
     tailscale: new TailscaleServeController({
@@ -294,28 +145,10 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
     remoteProvider,
     remoteController().status(),
   )
-  const lanPayload = (): Record<string, unknown> => ({
-    running: lanController.isRunning(),
-    origin: lanGateway?.address().origin,
-    ...(lanGateway === undefined ? {} : { extensions: lanGateway.extensionStatus() }),
-  })
   const diagnosticsPayload = async (): Promise<Record<string, unknown>> => {
-    let interfaceName: string | undefined
-    let networkError: string | undefined
-    if (loaded.kind === 'managed') {
-      try { interfaceName = selectLanNetwork(undefined, loaded.setup.networkInterface).name }
-      catch { networkError = 'network_interface_unavailable' }
-    }
     const remote = remoteController().status()
     return collectConnectionDiagnostics({
       dshVersion,
-      lan: {
-        running: lanController.isRunning(),
-        ...(lanGateway === undefined ? {} : { origin: lanGateway.address().origin, port: lanGateway.address().port }),
-        ...(loaded.kind === 'managed' ? { configuredInterface: loaded.setup.networkInterface, port: loaded.setup.listenPort } : {}),
-        ...(interfaceName === undefined ? {} : { interfaceName }),
-        ...(networkError === undefined ? {} : { networkError }),
-      },
       remote: {
         provider: remoteProvider,
         running: remote.enabled,
@@ -334,21 +167,8 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
         const target = parseRequestTarget(request.url)
         assertLocalAdminTrust(request, request.method === 'POST')
         if (target.search !== '') throw new HttpError(400, 'bad_request')
-        const lanControl = target.decodedPathname === `${LOCAL_ADMIN_PREFIX}/control`
-          || target.decodedPathname === `${LOCAL_ADMIN_PREFIX}/lan/control`
-        if (request.method === 'GET' && lanControl) {
-          sendJson(response, 200, lanPayload(), false)
-          return
-        }
         if (request.method === 'GET' && target.decodedPathname === `${LOCAL_ADMIN_PREFIX}/diagnostics`) {
           sendJson(response, 200, await diagnosticsPayload(), false)
-          return
-        }
-        if (request.method === 'POST' && lanControl) {
-          const body = await readJsonObject(request, 4096)
-          if (typeof body.running !== 'boolean') throw new HttpError(400, 'bad_request')
-          await lanController.setRunning(body.running)
-          sendJson(response, 200, lanPayload(), false)
           return
         }
         if (request.method === 'GET' && target.decodedPathname === `${LOCAL_ADMIN_PREFIX}/remote/control`) {
@@ -375,36 +195,20 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
           sendJson(response, 200, remotePayload(), false)
           return
         }
-        if (target.decodedPathname.startsWith(`${LOCAL_ADMIN_PREFIX}/lan/`)) {
-          const active = lanGateway
-          if (active === undefined) throw new HttpError(409, 'gateway_stopped')
-          await active.localAdminRoute(`${LOCAL_ADMIN_PREFIX}/lan`).handler(request, response)
-          return
-        }
-        const active = lanGateway
-        if (active === undefined) throw new HttpError(409, 'gateway_stopped')
-        await active.localAdminRoute().handler(request, response)
+        throw new HttpError(404, 'not_found')
       } catch (error) {
-        const mapped = mapAdminError(error)
+        const mapped = error instanceof HttpError ? error : new HttpError(500, 'internal_error')
         if (response.headersSent) response.destroy()
         else sendFailure(response, mapped.status, mapped.code, false)
       }
     },
   }
 
-  // Pairing-free mobile-frontend assets for the remote (Tailscale Serve)
-  // channel: the LAN gateway serves them behind device pairing on its own
-  // listener, so the DSH WebServer mirrors them for the phone reachable via
-  // the passthrough proxy (tailnet membership is the access control there).
-  const mobileFrontendRoute: WebRoute = {
-    kind: 'prefix',
-    path: AUTH_PREFIX,
-    handler: async (request, response) => {
-      const active = lanGateway
-      if (active === undefined) throw new HttpError(409, 'gateway_stopped')
-      await active.mobileFrontendRoute().handler(request, response)
-    },
-  }
+  // Custom phone assets (stylesheet, custom script, dedicated layout bundle,
+  // extensions) for the remote channel: the phone reaches them through the
+  // passthrough proxy as `${AUTH_PREFIX}/**` on the loopback DSH web server,
+  // where tailnet membership is the access control.
+  const mobileFrontendRoute: WebRoute = assetRoute.route()
 
   await ctx.effect(async () => {
     const unregister = ctx.webServer.register(adminRoute)
@@ -432,17 +236,14 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
       },
     })
     try {
-      await mobileAccess.startLocal(template.extensionsDir, ctx)
-      await lanController.initialize()
+      await mobileAccess.startLocal(resolved.extensionsDir, ctx)
       await remoteControllers.tailscale.initialize()
     } catch (error) {
       unregister()
       unregisterFrontend()
       disposeMobileCommand()
       await remoteControllers.tailscale.close()
-      await lanController.close()
       await mobileAccess.stopLocal()
-      unregisterBuiltin()
       throw error
     }
     return async () => {
@@ -450,9 +251,7 @@ export async function apply(ctx: Context, config: PluginConfig): Promise<void> {
       unregisterFrontend()
       disposeMobileCommand()
       await remoteControllers.tailscale.close()
-      await lanController.close()
       await mobileAccess.stopLocal()
-      unregisterBuiltin()
     }
-  }, 'dsh-mobile: independent LAN and selectable remote access with /mobile command')
+  }, 'dsh-mobile: Tailscale Serve remote access with /mobile command')
 }

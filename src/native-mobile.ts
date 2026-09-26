@@ -436,9 +436,9 @@ export function installNativeMobileSurface(): () => void {
     if (!(target instanceof HTMLElement)) return
     if (!isMenuSearchFocus(target)) return
     // Only a phone raises a soft keyboard. On a desktop browser reaching this
-    // page over the LAN, the field must be left exactly as it is — the same
-    // touch-mode gate the composer guard above uses. Opening the menu is always
-    // a touch here, so the phone path is unaffected.
+    // page over the remote channel, the field must be left exactly as it is —
+    // the same touch-mode gate the composer guard above uses. Opening the menu
+    // is always a touch here, so the phone path is unaffected.
     if (document.documentElement.dataset.dshMobileInput !== 'touch') return
     const tapped = lastSearchPointerTarget !== undefined
       && (target === lastSearchPointerTarget || target.contains(lastSearchPointerTarget))

@@ -7,40 +7,48 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { Config, parseGatewayConfig } from '../src/config.js'
-import { parseCidr, RequestTrustPolicy } from '../src/network.js'
+import { Config } from '../src/config.js'
 import { apply, inject } from '../src/plugin.js'
-import { DSH_MOBILE_VERSION, MINIMUM_ANDROID_APP_VERSION } from '../src/version.js'
+import { DSH_MOBILE_VERSION } from '../src/version.js'
 
 const contexts: Context[] = []
 const temporaryDirectories: string[] = []
 
 afterEach(async () => {
-  await Promise.all(contexts.splice(0).map(context => context.fiber.dispose()))
+  await Promise.all(contexts.splice(0).map(async context => {
+    // A real Tailscale node may own the 443 serve entry on this machine; the
+    // controller's own teardown must not fail the suite because of it.
+    await context.fiber.dispose().catch(() => undefined)
+  }))
   await Promise.all(temporaryDirectories.splice(0).map(directory => rm(directory, { recursive: true, force: true })))
 })
 
-async function invoke(route: WebRoute, method: 'GET' | 'POST', path: string, body = ''): Promise<{ status: number; body: string }> {
+interface InvokeOptions {
+  readonly body?: string
+  readonly contentType?: string | null
+}
+
+async function invoke(
+  route: WebRoute,
+  method: 'GET' | 'POST',
+  path: string,
+  options: InvokeOptions = {},
+): Promise<{ status: number; body: string }> {
+  const body = options.body ?? ''
   const server = createServer((request, response) => { void route.handler(request, response) })
   await new Promise<void>(resolve => { server.listen(0, '127.0.0.1', resolve) })
   const port = (server.address() as AddressInfo).port
   try {
     return await new Promise((resolve, reject) => {
-      const request = requestHttp({
-        host: '127.0.0.1',
-        port,
-        method,
-        path,
-        headers: {
-          host: `127.0.0.1:${String(port)}`,
-          ...(method === 'POST' ? {
-            origin: `http://127.0.0.1:${String(port)}`,
-            'sec-fetch-site': 'same-origin',
-            'content-type': 'application/json',
-            'content-length': Buffer.byteLength(body),
-          } : {}),
-        },
-      }, (response) => {
+      const headers: Record<string, string | number> = { host: `127.0.0.1:${String(port)}` }
+      if (method === 'POST') {
+        headers.origin = `http://127.0.0.1:${String(port)}`
+        headers['sec-fetch-site'] = 'same-origin'
+        const contentType = options.contentType === undefined ? 'application/json' : options.contentType
+        if (contentType !== null) headers['content-type'] = contentType
+        headers['content-length'] = Buffer.byteLength(body)
+      }
+      const request = requestHttp({ host: '127.0.0.1', port, method, path, headers }, (response) => {
         const chunks: Buffer[] = []
         response.on('data', chunk => chunks.push(Buffer.from(chunk)))
         response.on('end', () => resolve({
@@ -57,7 +65,14 @@ async function invoke(route: WebRoute, method: 'GET' | 'POST', path: string, bod
   }
 }
 
-async function mount(initiallyEnabled = false): Promise<{ context: Context; route: WebRoute; command: CommandDefinition }> {
+interface Mounted {
+  readonly context: Context
+  readonly adminRoute: WebRoute
+  readonly assetRoute: WebRoute
+  readonly command: CommandDefinition
+}
+
+async function mount(): Promise<Mounted> {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-mobile-plugin-'))
   temporaryDirectories.push(directory)
   const routes: WebRoute[] = []
@@ -85,57 +100,110 @@ async function mount(initiallyEnabled = false): Promise<{ context: Context; rout
     },
   } as never)
   await context.plugin({ Config, inject, apply }, {
-    listenPort: 38083,
-    stateFile: join(directory, 'devices.json'),
-    controlFile: join(directory, 'control.json'),
+    stateFile: join(directory, 'mobile-access.json'),
     customCssFile: join(directory, 'mobile.css'),
     customScriptFile: join(directory, 'mobile.js'),
-    initiallyEnabled,
-    tls: { mode: 'disabled' },
   })
-  const route = routes.find(candidate => candidate.kind === 'prefix' && candidate.path === '/api/mobile-access')
-  if (route === undefined) throw new Error('plugin did not register its control route')
+  const adminRoute = routes.find(candidate => candidate.kind === 'prefix' && candidate.path === '/api/mobile-access')
+  if (adminRoute === undefined) throw new Error('plugin did not register its control route')
+  const assetRoute = routes.find(candidate => candidate.kind === 'prefix' && candidate.path === '/mobile-access')
+  if (assetRoute === undefined) throw new Error('plugin did not register its phone asset route')
   if (command === undefined) throw new Error('plugin did not register its /mobile command')
-  return { context, route, command }
+  return { context, adminRoute, assetRoute, command }
 }
 
-describe('stock DSH lifecycle', () => {
+describe('remote-channel plugin lifecycle', () => {
   it('requires the WebServer, commands, and Connection services', () => {
     expect(inject).toEqual(['webServer', 'commands', 'connection'])
   })
 
-  it('keeps a loopback control route available while the LAN listener is stopped', async () => {
+  it('keeps the loopback admin route available while remote access is stopped', async () => {
     const mounted = await mount()
-    expect(mounted.route).toMatchObject({ kind: 'prefix', path: '/api/mobile-access' })
-    const status = await invoke(mounted.route, 'GET', '/api/mobile-access/control')
-    expect(status.status).toBe(200)
-    expect(JSON.parse(status.body)).toEqual({ running: false })
-    const remote = await invoke(mounted.route, 'GET', '/api/mobile-access/remote/control')
+    expect(mounted.adminRoute).toMatchObject({ kind: 'prefix', path: '/api/mobile-access' })
+
+    const remote = await invoke(mounted.adminRoute, 'GET', '/api/mobile-access/remote/control')
     expect(remote.status).toBe(200)
-    expect(JSON.parse(remote.body)).toMatchObject({
-      provider: 'tailscale',
-      running: false,
-      state: 'off',
+    expect(JSON.parse(remote.body)).toEqual({ provider: 'tailscale', running: false, state: 'off' })
+
+    // Disabling an already-disabled remote is a local no-op: it must not run
+    // the Tailscale CLI or touch the machine's serve configuration.
+    const stopped = await invoke(mounted.adminRoute, 'POST', '/api/mobile-access/remote/control', {
+      body: JSON.stringify({ running: false }),
     })
-    const diagnostics = await invoke(mounted.route, 'GET', '/api/mobile-access/diagnostics')
+    expect(stopped.status).toBe(200)
+    expect(JSON.parse(stopped.body)).toEqual({ provider: 'tailscale', running: false, state: 'off' })
+
+    const diagnostics = await invoke(mounted.adminRoute, 'GET', '/api/mobile-access/diagnostics')
     expect(diagnostics.status).toBe(200)
-    expect(JSON.parse(diagnostics.body)).toMatchObject({
+    const payload = JSON.parse(diagnostics.body) as {
+      versions: Record<string, string>
+      checks: { id: string }[]
+    }
+    expect(payload).toMatchObject({
       version: 1,
-      overall: expect.stringMatching(/^(?:ok|attention|error)$/),
-      versions: { plugin: DSH_MOBILE_VERSION, minimumAndroidApp: MINIMUM_ANDROID_APP_VERSION },
-      checks: expect.any(Array),
+      overall: 'ok',
+      versions: { plugin: DSH_MOBILE_VERSION, dsh: expect.any(String) },
       report: expect.stringContaining('DSH Mobile 诊断报告'),
     })
+    expect(payload.versions).not.toHaveProperty('minimumAndroidApp')
+    expect(payload.checks.map(entry => entry.id)).toEqual(['versions', 'remote', 'phone-network'])
   })
 
-  it('starts and stops the gateway through the local control route', async () => {
+  it('rejects malformed admin requests without reaching the remote provider', async () => {
     const mounted = await mount()
-    const started = await invoke(mounted.route, 'POST', '/api/mobile-access/control', JSON.stringify({ running: true }))
-    expect(started.status).toBe(200)
-    expect(JSON.parse(started.body)).toMatchObject({ running: true })
-    const stopped = await invoke(mounted.route, 'POST', '/api/mobile-access/control', JSON.stringify({ running: false }))
-    expect(stopped.status).toBe(200)
-    expect(JSON.parse(stopped.body)).toEqual({ running: false })
+
+    const badRunning = await invoke(mounted.adminRoute, 'POST', '/api/mobile-access/remote/control', {
+      body: JSON.stringify({ running: 'yes' }),
+    })
+    expect(badRunning.status).toBe(400)
+    expect(JSON.parse(badRunning.body)).toEqual({ error: 'bad_request' })
+
+    const missingRunning = await invoke(mounted.adminRoute, 'POST', '/api/mobile-access/remote/control', {
+      body: JSON.stringify({}),
+    })
+    expect(missingRunning.status).toBe(400)
+
+    const wrongType = await invoke(mounted.adminRoute, 'POST', '/api/mobile-access/remote/control', {
+      body: '{}',
+      contentType: 'text/plain',
+    })
+    expect(wrongType.status).toBe(415)
+    expect(JSON.parse(wrongType.body)).toEqual({ error: 'unsupported_media_type' })
+
+    const unconfirmedReset = await invoke(mounted.adminRoute, 'POST', '/api/mobile-access/remote/reset', {
+      body: JSON.stringify({}),
+    })
+    expect(unconfirmedReset.status).toBe(400)
+
+    const unknown = await invoke(mounted.adminRoute, 'GET', '/api/mobile-access/nope')
+    expect(unknown.status).toBe(404)
+    expect(JSON.parse(unknown.body)).toEqual({ error: 'not_found' })
+
+    const queried = await invoke(mounted.adminRoute, 'GET', '/api/mobile-access/remote/control?x=1')
+    expect(queried.status).toBe(400)
+    expect(JSON.parse(queried.body)).toEqual({ error: 'bad_request' })
+
+    const wrongMethod = await invoke(mounted.adminRoute, 'POST', '/api/mobile-access/diagnostics', {
+      body: '{}',
+    })
+    expect(wrongMethod.status).toBe(404)
+  })
+
+  it('serves the phone asset surface from the same plugin activation', async () => {
+    const mounted = await mount()
+    expect(mounted.assetRoute).toMatchObject({ kind: 'prefix', path: '/mobile-access' })
+
+    const metadata = await invoke(mounted.assetRoute, 'GET', '/mobile-access/metadata')
+    expect(metadata.status).toBe(200)
+    expect(JSON.parse(metadata.body)).toEqual({ version: 1, pluginVersion: DSH_MOBILE_VERSION })
+
+    const css = await invoke(mounted.assetRoute, 'GET', '/mobile-access/custom.css')
+    expect(css.status).toBe(200)
+    expect(css.body).toContain('mobile-access/mobile.css')
+
+    const missingLayout = await invoke(mounted.assetRoute, 'GET', '/mobile-access/mobile-layout.js')
+    expect(missingLayout.status).toBe(503)
+    expect(JSON.parse(missingLayout.body)).toEqual({ error: 'mobile_frontend_unavailable' })
   })
 
   it('registers a /mobile command that steers the agent with the customization guide', async () => {
@@ -152,16 +220,16 @@ describe('stock DSH lifecycle', () => {
       },
       whenIdle: async (): Promise<void> => undefined,
     }
-    const invoke = (rawInput: string) => mounted.command.handler({
+    const invokeCommand = (rawInput: string) => mounted.command.handler({
       agent,
       commandId: 'id' as never,
       signal: new AbortController().signal,
       rawInput,
     } as never)
-    const empty = invoke('  ')
+    const empty = invokeCommand('  ')
     expect(empty).toMatchObject({ kind: 'error' })
     expect(steered).toEqual([])
-    const result = invoke('make the phone UI dark')
+    const result = invokeCommand('make the phone UI dark')
     expect(result).toMatchObject({ kind: 'success' })
     expect(steered.length).toBe(1)
     const [steeredMessage] = steered

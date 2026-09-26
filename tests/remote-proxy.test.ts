@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RemotePassthroughProxy } from '../src/remote-proxy.js'
-import { websocketAccept } from '../src/gateway.js'
+import { websocketAccept } from '../src/mobile-frontend.js'
 import { resolveLiveUpstream } from '../src/upstream.js'
 
 const packageName = (createRequire(import.meta.url)('../package.json') as { name: string }).name

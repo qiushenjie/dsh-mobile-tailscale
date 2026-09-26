@@ -49,7 +49,7 @@ import {
   type MobileBootBatchEntry,
   type MobileBootBatchPlan,
   type MobileLayoutMode,
-} from './gateway.js'
+} from './mobile-frontend.js'
 
 /**
  * History page a tailnet client receives. DSH's browser client asks for up to

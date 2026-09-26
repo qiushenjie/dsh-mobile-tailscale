@@ -1,72 +1,37 @@
 # DeepSeek Harness Android App
 
+> **不再维护 / No longer maintained.** This Android WebView shell is abandoned. It is **not part of any supported flow**: as of plugin 0.4.0 the only way in is the Tailscale Serve address opened in a phone browser. The app source is kept in the repository for reference only; it is not built, released, or supported. The iOS client was only ever an unpublished local experiment.
+>
+> The app was designed around the local-network gateway, pairing links, and `dsh-mobile setup`, all of which were removed in 0.4.0. Nothing below is a working setup guide; it records what the app used to be.
+
 [简体中文](README.zh-CN.md) · [Back to the project](../../README.en.md)
 
-DeepSeek Harness is the display name of this lightweight, community-maintained Android WebView shell. It does not bundle a second DSH frontend. The app and mobile browsers load the same authenticated HTTPS origin, so both receive the same DSH features plus live-editable `mobile.css` presentation and `mobile.js` functionality.
+DeepSeek Harness was the display name of this lightweight, community-maintained Android WebView shell. It did not bundle a second DSH frontend: the app and a mobile browser loaded the same HTTPS origin, so both received the same DSH features plus live-editable `mobile.css` presentation and `mobile.js` functionality.
 
-Android is the only supported native target. The iOS client remains an unpublished local experiment and is outside the build, release, and support scope.
+## What it used to do
 
-## Use the app
+- Load a DSH HTTPS origin with no browser address or tab bars.
+- Navigate same-origin WebView history with the system Back button first.
+- Use narrow native implementations for file selection, same-origin downloads, sharing, and site-data clearing.
+- Expose a `dshMobile` bridge for `files.pick`, `camera.capture`, `share`, `clipboard.read`, and `clipboard.write`.
 
-1. Complete the plugin quick start and run `dsh-mobile setup`.
-2. Install the Android APK from GitHub Releases.
-3. Choose **Local network** or **Remote access** on the app home screen.
-4. For LAN, open **Mobile Access → Local network** on the computer and select **Generate pairing link**, then either scan the QR code the panel shows below the button or open the copied link in the app. Remote access supports Tailscale Serve only and has no pairing: install Tailscale on the phone, join the same tailnet, and open the `https://<host>.ts.net` address shown under **Mobile Access → Remote**.
-5. The two paths store separate device credentials. LAN certificate trust stays private to the app; the remote address is served by Tailscale Serve with a public HTTPS certificate issued for the `*.ts.net` name, and the phone must be on the same tailnet to reach it.
+Its connection flow depended on the removed LAN channel: a `dsh-mobile setup` step, a pairing link or QR code from the desktop panel, a pinned self-signed CA, and DNS-SD/mDNS discovery on port `3443`. None of that exists anymore. The remote channel it also knew about — Tailscale Serve, with no pairing and tailnet membership as the access control — is the only channel the plugin now has.
 
-After the first LAN pairing, the app encrypts a revocable, long-lived device token with Android Keystore. Every later launch uses it to renew a short Web session before opening DSH, so the pairing key is not requested again unless the device is revoked, the trust expires, or app data is cleared. The remote channel stores no device token: the plugin serves a pairing-free mirror on the `*.ts.net` origin, where tailnet membership is the access control. If the computer receives another LAN address, the app scans the default port, matches the stable DSH installation identifier, and updates the saved origin automatically. Discovery never exposes the device token or Session credentials.
-
-Before pairing, the app reads separate version metadata to distinguish an outdated app, an outdated plugin, and an unsupported protocol. A legacy plugin without that endpoint continues through the original flow. After pairing, the connection chooser remains immediately usable while the saved connection restores in the background. Bounded automatic retries cover only transient network conditions and remote-channel errors such as a Tailscale Serve startup failure or a port-443 conflict.
-
-Discovery listens to DNS-SD/mDNS and periodic UDP announcements at the same time, sends an active UDP query on port `3443`, and retains bounded HTTPS scans of visible private Wi-Fi and phone-hotspot `/24` networks as a compatibility fallback. Every discovery path carries metadata only and results are merged by stable installation identifier, so a changed address updates the existing device. The first screen offers a QR scan action, a local-network scan, a result list, and a manual address or pairing-link field (scan the QR code shown by **Generate pairing link** on the computer, or paste the link it copies, to pair without typing a key; enter `https://IP:port` to connect when discovery fails, e.g. across subnets, on a non-default port, or behind a firewall); select one DSH before entering its key. For a browser's first connection, open the link copied by **Generate pairing link** on the computer (the pairing code is prefilled, as in `https://<lan-ip>:3443/mobile-access/pair#instance=<id>&token=<43-character code>`), or visit `/mobile-access/pair` on the shown HTTPS origin and enter the same 43-character code.
-
-The CA is not discovery data. After selection and key entry, Android retrieves it from the chosen origin without sending credentials, checks that its SHA-256 fingerprint matches the key and installation identifier, and stores it with the encrypted device credential. Native requests use an app-private trust store. WebView accepts only an otherwise-untrusted leaf signed by that pinned CA for the exact origin and validity period; every other TLS error is cancelled. No system CA installation is required.
-
-## Mobile extension bridge
-
-The authenticated page can call the Android bridge through `dshMobile` extensions. The bridge is injected only into the paired HTTPS origin and only for the top-level WebView frame. It does not expose cookies, device tokens, pairing keys, CA private keys, or arbitrary Android APIs.
-
-Available actions are `files.pick`, `camera.capture`, `share`, `clipboard.read`, and `clipboard.write`. File and camera results are returned to the page as browser `File` objects. Only one interactive Android result (file picker or camera) runs at a time; cancellation, rotation, WebView destruction, and a 60-second timeout reject the pending request. Browsers use the corresponding Web APIs and return `unsupported` when a capability is unavailable.
-
-Computer-side extensions are separate: their `host.mjs` runs as trusted local Node.js code on the DSH host, while `mobile.js` calls its scoped actions and routes. The app bridge cannot edit or upload extension source files.
-
-## Why use the app
-
-- No browser address or tab bars.
-- System Back navigates same-origin WebView history first.
-- File selection, same-origin downloads, sharing, and site-data clearing use narrow native implementations.
-- The app remains a shell around the same Web UI and protocol used by browsers.
-
-A mobile browser is always a first-class alternative; the app is optional.
-
-## Security properties
-
-| Control | Android behavior |
-| --- | --- |
-| Transport | HTTPS origins only; cleartext traffic is disabled. |
-| TLS | The pairing-key CA is stored privately. Only `SSL_UNTRUSTED` for its valid, exact-host leaf is accepted; every other TLS error is cancelled. |
-| Origin | Only scheme, normalized host, and port persist. Ordinary paths, queries, and fragments do not. |
-| Navigation | Same-origin main frames stay inside; user-initiated external HTTPS links open in the system browser. |
-| Permissions | File input uses the system document picker; the camera is requested only when the user taps **Scan QR code**, to read the pairing QR. |
-| Downloads | Foreground GET from the exact origin only; authentication control paths are never downloads. |
-| Data | The device token is encrypted by Android Keystore; Web storage stays in the app sandbox; Clear Site Data removes the credential, origin, cookies, cache, and Web storage. |
-| Backup | App backup is disabled; TLS private keys and signing keys must remain outside the repository. |
-
-The network security configuration does not trust user-installed CAs. The plugin signs a fresh SAN for the selected interface's current address while the app retains the stable CA pin in its encrypted credential record.
+A mobile browser is and always was a first-class alternative; the app was optional even when it was maintained.
 
 ## Build
 
-Requirements: Android Studio or Android SDK 36 and JDK 17. The repository includes the Gradle 8.11.1 Wrapper.
+The source is retained for historical reference. Requirements were Android Studio or Android SDK 36 and JDK 17; the repository includes the Gradle 8.11.1 Wrapper.
 
 ```powershell
 Set-Location apps/mobile/android
 ./gradlew.bat :app:lintDebug :app:testDebugUnitTest :app:assembleDebug -x :app:lintAnalyzeDebugUnitTest -x :app:lintAnalyzeDebugAndroidTest
 ```
 
-The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`. GitHub Releases build a signed release APK with a stable signing key stored only in repository secrets; signing keys and passwords never enter the source tree or build artifacts.
+The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`. No supported release is published from this source any more.
 
 ## Acceptance
 
-Shared URL-policy tests cover origin normalization, pairing entry, same-origin navigation, and download paths. Device acceptance must still cover small screens, landscape, cutouts and gestures, the keyboard, font scaling, valid and invalid TLS, file input, downloads, Back, rotation, and reauthentication after clearing data.
+Shared URL-policy tests covered origin normalization, pairing entry, same-origin navigation, and download paths. Device acceptance used to cover small screens, landscape, cutouts and gestures, the keyboard, font scaling, valid and invalid TLS, file input, downloads, Back, rotation, and reauthentication after clearing data. None of this is an active commitment.
 
 Apache-2.0 licensed. See [LICENSE](../../LICENSE).

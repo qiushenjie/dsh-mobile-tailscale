@@ -1,13 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { addressAllowed, isLoopbackAddress, RequestTrustPolicy } from './network.js'
+import { isLoopbackAddress } from './network.js'
 
-export const DEVICE_COOKIE = 'dsh_ma_device'
-export const SESSION_COOKIE = 'dsh_ma_session'
-export const CSRF_COOKIE = 'dsh_ma_csrf'
-export const CSRF_HEADER = 'x-dsh-mobile-csrf'
 export const LOCAL_ADMIN_PREFIX = '/api/mobile-access'
 export const AUTH_PREFIX = '/mobile-access'
-export const WS_PATHS = new Set(['/api/events.mux', '/api/events.host', '/api/remote.mux'])
 
 /** Terse request failure safe to expose without internal diagnostics. */
 export class HttpError extends Error {
@@ -113,24 +108,6 @@ export async function readJsonObject(request: IncomingMessage, maximumBytes: num
   return parsed as Record<string, unknown>
 }
 
-/** Strict cookie parser: malformed or duplicate names invalidate the whole header. */
-export function parseCookies(header: string | undefined): ReadonlyMap<string, string> | undefined {
-  if (header === undefined) return new Map()
-  if (header.length > 8192) return undefined
-  const cookies = new Map<string, string>()
-  for (const part of header.split(';')) {
-    const equals = part.indexOf('=')
-    if (equals <= 0) return undefined
-    const name = part.slice(0, equals).trim()
-    const value = part.slice(equals + 1).trim()
-    if (!/^[!#$%&'*+\-.^_`|~\dA-Za-z]+$/u.test(name) || !/^[\w\-.~+/=]*$/u.test(value) || cookies.has(name)) {
-      return undefined
-    }
-    cookies.set(name, value)
-  }
-  return cookies
-}
-
 /** Serialize a host-only Cookie with no Domain attribute. */
 export function cookie(
   name: string,
@@ -147,18 +124,6 @@ export function cookie(
   if (options.tls) parts.push('Secure')
   if (options.httpOnly) parts.push('HttpOnly')
   return parts.join('; ')
-}
-
-/** Enforce direct CIDR, exact Host, and browser same-origin facts. */
-export function assertExternalTrust(request: IncomingMessage, policy: RequestTrustPolicy, requireOrigin: boolean): void {
-  if (!addressAllowed(request.socket.remoteAddress, policy.cidrs) || !policy.acceptsHost(request.headers.host)) {
-    throw new HttpError(403, 'forbidden')
-  }
-  const origin = request.headers.origin
-  if (origin !== undefined && !policy.acceptsOrigin(origin)) throw new HttpError(403, 'forbidden')
-  const site = request.headers['sec-fetch-site']
-  if (site !== undefined && site !== 'same-origin' && site !== 'none') throw new HttpError(403, 'forbidden')
-  if (requireOrigin && (!policy.acceptsOrigin(origin) || site !== 'same-origin')) throw new HttpError(403, 'forbidden')
 }
 
 function localAuthority(header: string | undefined): { hostname: string; authority: string } | undefined {

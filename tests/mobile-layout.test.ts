@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module'
 import { describe, expect, it } from 'vitest'
-import { rewriteMobileIndex, rewriteRemoteMobileIndex, rewriteRemoteMobileIndexWithBatches } from '../src/gateway.js'
+import { rewriteRemoteMobileIndex, rewriteRemoteMobileIndexWithBatches } from '../src/mobile-frontend.js'
 import { MOBILE_LAYOUT_STYLES } from '../src/mobile-layout.js'
 import { DSH_MOBILE_MODULE_ID } from '../src/version.js'
 
@@ -17,9 +17,9 @@ function currentIndex(entries: unknown[]): string {
   return `<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = ${JSON.stringify({ rev: 'stock', entries })};</script></head><body></body></html>`
 }
 
-describe('dedicated mobile layout boot', () => {
-  it('replaces only the stock layout bundle and marks the page as dedicated', () => {
-    const output = rewriteMobileIndex(index([
+describe('remote phone boot rewrite', () => {
+  it('injects the remote boot contract while keeping the stock layout bundle', () => {
+    const output = rewriteRemoteMobileIndex(index([
       { id: '@deepseek-ai/dsh-client-runtime', url: '/runtime.js', rev: 'runtime' },
       {
         id: '@deepseek-ai/dsh-client-ui-layout',
@@ -30,19 +30,21 @@ describe('dedicated mobile layout boot', () => {
       { id: '@deepseek-ai/dsh-client-ui-conversation', url: '/conversation.js', rev: 'conversation' },
     ]))
 
-    expect(output).toContain('window.__DSH_MOBILE_FRONTEND__="dedicated"')
-    expect(output).toContain('window.fetch=(input,init)=>')
-    expect(output).toContain('x-dsh-mobile-csrf')
-    expect(output.indexOf('window.fetch=(input,init)=>')).toBeLessThan(output.indexOf('window.__DSH_BOOT__'))
-    expect(output).toContain('"url":"/mobile-access/mobile-layout.js"')
-    expect(output).toContain('"inject":["@deepseek-ai/dsh-client-runtime","@deepseek-ai/dsh-client-ui-theme"]')
+    // The remote channel has no gateway to mint a session or a CSRF token, so
+    // it declares the authenticated transport and a trusted page instead.
+    expect(output).toContain('window.__DSH_TRANSPORT__')
+    expect(output).toContain('window.__DSH_MOBILE_TRUSTED_GATEWAY__=true')
+    expect(output.indexOf('window.__DSH_TRANSPORT__')).toBeLessThan(output.indexOf('window.__DSH_BOOT__'))
+    expect(output).not.toContain('window.__DSH_MOBILE_FRONTEND__')
+    expect(output).not.toContain('x-dsh-mobile-csrf')
+    expect(output).toContain('"url":"/layout.js"')
+    expect(output).not.toContain('/mobile-access/mobile-layout.js')
     expect(output).toContain('"url":"/conversation.js"')
-    expect(output).not.toContain('"url":"/layout.js"')
     expect(output).toContain('viewport-fit=cover')
   })
 
   it('orders the authenticated mobile client before settings without retaining the sidebar cycle', () => {
-    const output = rewriteMobileIndex(index([
+    const output = rewriteRemoteMobileIndex(index([
       { id: '@deepseek-ai/dsh-client-connection', url: '/connection.js', rev: 'connection', inject: [] },
       { id: '@deepseek-ai/dsh-client-runtime', url: '/runtime.js', rev: 'runtime', inject: ['@deepseek-ai/dsh-client-connection'] },
       {
@@ -79,7 +81,7 @@ describe('dedicated mobile layout boot', () => {
   })
 
   it('orders the API gateway after the mobile client on the remote-backed settings graph', () => {
-    const output = rewriteMobileIndex(index([
+    const output = rewriteRemoteMobileIndex(index([
       { id: '@deepseek-ai/dsh-client-connection', url: '/connection.js', rev: 'connection', inject: [] },
       { id: '@deepseek-ai/dsh-client-runtime', url: '/runtime.js', rev: 'runtime', inject: ['@deepseek-ai/dsh-client-connection'] },
       {
@@ -115,10 +117,10 @@ describe('dedicated mobile layout boot', () => {
     expect(output.indexOf('window.__DSH_TRANSPORT__')).toBeLessThan(output.indexOf('window.__DSH_BOOT__'))
   })
 
-  it('does not demand the API gateway on an older connection-based settings graph', () => {
+  it('orders settings after the mobile client on an older connection-based settings graph', () => {
     // A DSH release with settings still depending on connection has no remote
-    // settings graph: the extra ordering edge is skipped, not required.
-    const output = rewriteMobileIndex(index([
+    // settings graph: the extra api-gateway ordering edge is skipped, not required.
+    const output = rewriteRemoteMobileIndex(index([
       { id: '@deepseek-ai/dsh-client-connection', url: '/connection.js', rev: 'connection', inject: [] },
       { id: '@deepseek-ai/dsh-client-runtime', url: '/runtime.js', rev: 'runtime', inject: ['@deepseek-ai/dsh-client-connection'] },
       {
@@ -143,11 +145,10 @@ describe('dedicated mobile layout boot', () => {
     ]))
 
     expect(output).toContain(`"inject":["@deepseek-ai/dsh-client-connection","${packageName}"]`)
-    // No remote-backed settings graph: upstream injects no transport override.
-    expect(output).not.toContain('window.__DSH_TRANSPORT__')
+    expect(output).not.toContain('"id":"@deepseek-ai/dsh-api-gateway"')
   })
 
-  it('rebuilds the DSH 0.1.2 application batch around the dedicated layout', () => {
+  it('rebuilds the DSH 0.1.2 application batch for the remote channel', () => {
     const entries = [
       { id: '@deepseek-ai/dsh-client-connection', url: '/plugins/connection.js?rev=connection', rev: 'connection', inject: [] },
       { id: '@deepseek-ai/dsh-client-ui-renderer', url: '/plugins/renderer.js?rev=renderer', rev: 'renderer', inject: [] },
@@ -181,10 +182,10 @@ describe('dedicated mobile layout boot', () => {
       entries,
       batches: [{ phase: 'application', url: '/plugins/application.js?rev=stock', rev: 'stock-batch', entries: entries.map(entry => entry.id) }],
     })};</script></head><body></body></html>`
-    const output = rewriteMobileIndex(source)
+    const output = rewriteRemoteMobileIndex(source)
 
-    expect(output).toContain('"url":"/mobile-access/mobile-layout.js"')
-    expect(output).toContain('"inject":["@deepseek-ai/dsh-client-connection","@deepseek-ai/dsh-client-ui-renderer"]')
+    expect(output).toContain('"url":"/plugins/layout.js?rev=layout"')
+    expect(output).not.toContain('"url":"/mobile-access/mobile-layout.js"')
     expect(output).toContain(`"inject":["@deepseek-ai/dsh-api-remotes","${packageName}"]`)
     expect(output).toMatch(/"url":"\/mobile-access\/mobile-boot\/[a-f\d]{64}\.js"/u)
     expect(output).not.toContain('/plugins/application.js?rev=stock')
@@ -218,7 +219,7 @@ describe('dedicated mobile layout boot', () => {
       entries,
       batches: [{ phase: 'application', url: '/plugins/application.js?rev=stock', rev: 'stock-batch', entries: entries.map(entry => entry.id) }],
     })};</script></head><body></body></html>`
-    const output = rewriteMobileIndex(source)
+    const output = rewriteRemoteMobileIndex(source)
 
     expect(output).toContain('"url":"/layout.js"')
     expect(output).not.toContain('/mobile-access/mobile-layout.js')
@@ -244,7 +245,7 @@ describe('dedicated mobile layout boot', () => {
       batches: [{ phase: 'application', url: '/plugins/application.js?rev=stock', rev: 'stock', entries: entries.map(entry => entry.id) }],
     })};</script></head><body></body></html>`
 
-    const output = rewriteMobileIndex(source)
+    const output = rewriteRemoteMobileIndex(source)
 
     expect(output).not.toContain('settings-account')
     // The rewritten batch is served by this plugin, so the module's bytes never
@@ -267,13 +268,12 @@ describe('dedicated mobile layout boot', () => {
     ]
     const source = currentIndex(entries)
 
-    for (const output of [rewriteMobileIndex(source), rewriteRemoteMobileIndex(source)]) {
-      expect(output).not.toContain('dsh-better-sidebar')
-      expect(output).not.toContain('dsh-rewind-plugin')
-      // The remaining graph still activates, including this plugin's own client.
-      expect(output).toContain(packageName)
-      expect(output).toContain('@deepseek-ai/dsh-client-ui-layout')
-    }
+    const output = rewriteRemoteMobileIndex(source)
+    expect(output).not.toContain('dsh-better-sidebar')
+    expect(output).not.toContain('dsh-rewind-plugin')
+    // The remaining graph still activates, including this plugin's own client.
+    expect(output).toContain(packageName)
+    expect(output).toContain('@deepseek-ai/dsh-client-ui-layout')
   })
 
   it('does not activate desktop-shell-only modules on a phone page', () => {
@@ -290,12 +290,11 @@ describe('dedicated mobile layout boot', () => {
       batches: [{ phase: 'application', url: '/plugins/application.js?rev=stock', rev: 'stock-batch', entries: entries.map(entry => entry.id) }],
     })};</script></head><body></body></html>`
 
-    expect(rewriteMobileIndex(source)).not.toContain('dsh-desktop-next')
     expect(rewriteRemoteMobileIndex(source)).not.toContain('dsh-desktop-next')
   })
 
   it('accepts the DSH 0.1.1 global injection syntax', () => {
-    const output = rewriteMobileIndex(currentIndex([
+    const output = rewriteRemoteMobileIndex(currentIndex([
       {
         id: '@deepseek-ai/dsh-client-ui-layout',
         url: '/layout.js',
@@ -304,9 +303,9 @@ describe('dedicated mobile layout boot', () => {
       },
     ]))
 
-    expect(output).toContain('window.__DSH_MOBILE_FRONTEND__="dedicated"')
     expect(output).toContain('globalThis["__DSH_BOOT__"] = {')
-    expect(output).toContain('"url":"/mobile-access/mobile-layout.js"')
+    expect(output).toContain('"url":"/layout.js"')
+    expect(output).not.toContain('/mobile-access/mobile-layout.js')
   })
 
   it('adapts stable DSH question surfaces for touch screens', () => {
@@ -321,12 +320,12 @@ describe('dedicated mobile layout boot', () => {
   })
 
   it('fails closed when the upstream page cannot identify one layout module', () => {
-    expect(() => rewriteMobileIndex(index([]))).toThrow('no unique layout module')
-    expect(() => rewriteMobileIndex('<html></html>')).toThrow('no boot manifest')
+    expect(() => rewriteRemoteMobileIndex(index([]))).toThrow('no unique layout module')
+    expect(() => rewriteRemoteMobileIndex('<html></html>')).toThrow('no boot manifest')
   })
 
   it('fails closed when the stock layout dependency contract changes', () => {
-    expect(() => rewriteMobileIndex(index([
+    expect(() => rewriteRemoteMobileIndex(index([
       { id: '@deepseek-ai/dsh-client-ui-layout', url: '/layout.js', rev: 'layout', inject: ['new-runtime'] },
     ]))).toThrow('unsupported dependencies')
   })
@@ -432,7 +431,7 @@ describe('remote mobile index rewrite', () => {
   })
 })
 
-describe('stock boot preload hints', () => {
+describe('remote boot preload hints', () => {
   const entries = [
     { id: '@deepseek-ai/dsh-client-runtime', url: '/runtime.js', rev: 'runtime' },
     {
@@ -454,16 +453,15 @@ describe('stock boot preload hints', () => {
 
   // A hint still fetches the combination DSH built, which is the whole unpruned
   // graph — including the module the served manifest no longer activates.
-  it('drops hints for a stock combined boot request on both channels', () => {
-    for (const output of [rewriteMobileIndex(source), rewriteRemoteMobileIndex(source)]) {
-      expect(output).not.toContain('rel="preload" as="script" href="plugins/??')
-      expect(output).not.toContain('rel="modulepreload" crossorigin href="plugins/??')
-      // Only the boot hints go: every other head resource and the bootstrap script
-      // tag that loads the client module loader stay untouched.
-      expect(output).toContain('href="./assets/vendor-CCJJTK99.js"')
-      expect(output).toContain('rel="stylesheet" crossorigin href="./assets/index-DUvMhLle.css"')
-      expect(output).toContain('src="plugins/??@deepseek-ai/dsh-client-modules/client.js&amp;rev=31537f9b310b"')
-    }
+  it('drops hints for a stock combined boot request on the remote channel', () => {
+    const output = rewriteRemoteMobileIndex(source)
+    expect(output).not.toContain('rel="preload" as="script" href="plugins/??')
+    expect(output).not.toContain('rel="modulepreload" crossorigin href="plugins/??')
+    // Only the boot hints go: every other head resource and the bootstrap script
+    // tag that loads the client module loader stay untouched.
+    expect(output).toContain('href="./assets/vendor-CCJJTK99.js"')
+    expect(output).toContain('rel="stylesheet" crossorigin href="./assets/index-DUvMhLle.css"')
+    expect(output).toContain('src="plugins/??@deepseek-ai/dsh-client-modules/client.js&amp;rev=31537f9b310b"')
   })
 })
 
@@ -515,34 +513,32 @@ describe('phone session window cap', () => {
   // DSH 0.1.7 sends session/follow over the WebSocket mux with the desktop's
   // 500-message window. A phone that opens a long conversation then renders all
   // of it, which is what makes opening it slow and every later tap in it slow.
-  it('is installed before the boot manifest on both channels', () => {
-    for (const output of [rewriteMobileIndex(source), rewriteRemoteMobileIndex(source)]) {
-      expect(output).toContain('WebSocket.prototype.send=function(data)')
-      expect(output.indexOf('WebSocket.prototype.send')).toBeLessThan(output.indexOf('__DSH_BOOT__'))
-    }
+  it('is installed before the boot manifest', () => {
+    const output = rewriteRemoteMobileIndex(source)
+    expect(output).toContain('WebSocket.prototype.send=function(data)')
+    expect(output.indexOf('WebSocket.prototype.send')).toBeLessThan(output.indexOf('__DSH_BOOT__'))
   })
 
   it('clamps the opening window and drops the Turn floor that outgrows it', () => {
-    for (const output of [rewriteMobileIndex(source), rewriteRemoteMobileIndex(source)]) {
-      const forwarded = JSON.parse(dispatchedByBootstrap(output, followFrame(500))) as {
-        payload: { args: { request: { maxMessages: number; turnWindow?: unknown } } }
-      }
-      // `paginate` cuts at the message count only when no Turn floor is set, and a
-      // floor of 2 Turns handed back 291 records for a 50-message request.
-      expect(forwarded.payload.args.request.maxMessages).toBe(10)
-      expect(forwarded.payload.args.request.turnWindow).toBeUndefined()
+    const output = rewriteRemoteMobileIndex(source)
+    const forwarded = JSON.parse(dispatchedByBootstrap(output, followFrame(500))) as {
+      payload: { args: { request: { maxMessages: number; turnWindow?: unknown } } }
     }
+    // `paginate` cuts at the message count only when no Turn floor is set, and a
+    // floor of 2 Turns handed back 291 records for a 50-message request.
+    expect(forwarded.payload.args.request.maxMessages).toBe(10)
+    expect(forwarded.payload.args.request.turnWindow).toBeUndefined()
   })
 
   it('forwards every other frame untouched and keeps a smaller window', () => {
-    const [output] = [rewriteMobileIndex(source)]
-    const smaller = JSON.parse(dispatchedByBootstrap(String(output), followFrame(4))) as {
+    const output = rewriteRemoteMobileIndex(source)
+    const smaller = JSON.parse(dispatchedByBootstrap(output, followFrame(4))) as {
       payload: { args: { request: { maxMessages: number; turnWindow?: unknown } } }
     }
     expect(smaller.payload.args.request.maxMessages).toBe(4)
     expect(smaller.payload.args.request.turnWindow).toBeUndefined()
     const other = JSON.stringify({ type: 'open', endpoint: 'session/page', payload: { args: { request: { maxMessages: 500 } } } })
-    expect(dispatchedByBootstrap(String(output), other)).toBe(other)
+    expect(dispatchedByBootstrap(output, other)).toBe(other)
   })
 })
 
@@ -581,7 +577,11 @@ describe('current-generation dedicated layout', () => {
 
   it('keeps DSH own layout on the current generation unless mobileLayout is mobile', () => {
     const source = currentIndex(markerEntries)
-    for (const output of [rewriteMobileIndex(source), rewriteMobileIndex(source, 'auto'), rewriteMobileIndex(source, 'stock')]) {
+    for (const output of [
+      rewriteRemoteMobileIndex(source),
+      rewriteRemoteMobileIndex(source, 'auto'),
+      rewriteRemoteMobileIndex(source, 'stock'),
+    ]) {
       expect(layoutEntry(output).url).toBe('/layout.js')
     }
     const remote = rewriteRemoteMobileIndexWithBatches(source, 'auto')
@@ -591,7 +591,6 @@ describe('current-generation dedicated layout', () => {
   it('serves the current-generation layout module when asked', () => {
     const source = currentIndex(markerEntries)
     for (const output of [
-      rewriteMobileIndex(source, 'mobile'),
       rewriteRemoteMobileIndex(source, 'mobile'),
       rewriteRemoteMobileIndexWithBatches(source, 'mobile').html,
     ]) {
@@ -603,7 +602,10 @@ describe('current-generation dedicated layout', () => {
   it('does not serve the current-generation module to an older manifest', () => {
     const source = currentIndex(legacyEntries)
     // `mobile` may replace only the generation the module implements: an older
-    // three-child root still needs the original dedicated layout.
-    expect(layoutEntry(rewriteMobileIndex(source, 'mobile')).url).toBe('/mobile-access/mobile-layout.js')
+    // three-child root has no substitute on the remote channel, so it keeps the
+    // stock layout rather than the current-generation bundle.
+    const output = rewriteRemoteMobileIndex(source, 'mobile')
+    expect(layoutEntry(output).url).toBe('/layout.js')
+    expect(layoutEntry(output).url).not.toBe('/mobile-access/mobile-layout-next.js')
   })
 })

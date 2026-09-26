@@ -49,25 +49,22 @@ describe('stock DSH bundle patch', () => {
     expect(source).not.toMatch(/^\s*- id: connection$/mu)
   })
 
-  it('starts disabled until the setup CLI writes the durable control state', () => {
+  it('carries no LAN listener, TLS, or pairing keys', () => {
     const config = record(mobileRow().config)
-    expect(config.initiallyEnabled).toBe(false)
-    expect(config.tls).toEqual({ mode: 'disabled' })
+    for (const key of ['listenHost', 'listenPort', 'allowedCidrs', 'publicOrigin', 'publicAuthorities', 'tls', 'setupFile', 'controlFile']) {
+      expect(config).not.toHaveProperty(key)
+    }
   })
 
   it('keeps generated files under DSH_HOME without assuming a local checkout path', () => {
     const config = record(mobileRow().config)
-    expect(evaluate(config.setupFile)).toBe('/dsh-home/mobile-access/setup.json')
-    expect(evaluate(config.stateFile)).toBe('/dsh-home/mobile-access/devices.json')
-    expect(evaluate(config.controlFile)).toBe('/dsh-home/mobile-access/control.json')
+    expect(evaluate(config.stateFile)).toBe('/dsh-home/mobile-access/state.json')
     expect(evaluate(config.customCssFile)).toBe('/dsh-home/mobile-access/mobile.css')
     expect(evaluate(config.customScriptFile)).toBe('/dsh-home/mobile-access/mobile.js')
-  })
-
-  it('keeps the inert fallback listener loopback-only', () => {
-    const config = record(mobileRow().config)
-    expect(config.listenHost).toBe('127.0.0.1')
-    expect(config.allowedCidrs).toEqual(['127.0.0.0/8'])
+    // The dedicated layout bundles ship inside the plugin package, so the stock
+    // bundle never points at a checkout path for them.
+    expect(config.mobileLayoutFile).toBeUndefined()
+    expect(config.mobileLayoutNextFile).toBeUndefined()
   })
 })
 

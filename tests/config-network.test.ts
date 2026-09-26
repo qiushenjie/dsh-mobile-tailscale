@@ -1,203 +1,51 @@
-import { join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
-import { Config, parseControlFile, parseGatewayConfig } from '../src/config.js'
-import {
-  addressAllowed,
-  parseAuthority,
-  parseCidr,
-  RequestTrustPolicy,
-  resolveAuthority,
-} from '../src/network.js'
+import { Config, parseMobileConfig, parseUpstream } from '../src/config.js'
 
 const stateFile = join(tmpdir(), 'dsh-mobile-access-config-test.json')
-const controlFile = join(tmpdir(), 'dsh-mobile-access-control-test.json')
 
-describe('gateway configuration', () => {
-  it('keeps an additional TLS chain optional in the Loader schema', () => {
-    const value = Config({
+describe('remote-channel configuration', () => {
+  it('keeps durable state required at the Loader boundary', () => {
+    const load = Config as unknown as (value?: unknown) => unknown
+    expect(() => load()).toThrow(/stateFile missing required value/)
+    expect(() => load({})).toThrow(/stateFile missing required value/)
+  })
+
+  it('tolerates unknown keys and applies the remote-channel defaults', () => {
+    const resolved = parseMobileConfig({
       stateFile,
-      controlFile,
+      // Keys from the deleted LAN gateway must be ignored, not rejected.
+      listenPort: 3443,
+      controlFile: '/tmp/control.json',
       initiallyEnabled: false,
-      tls: {
-        mode: 'provided',
-        certFile: join(tmpdir(), 'server-cert.pem'),
-        keyFile: join(tmpdir(), 'server-key.pem'),
-      },
+      tls: { mode: 'disabled' },
     })
 
-    expect(value.tls?.caFile).toBeUndefined()
-    const resolved = parseGatewayConfig(value)
-    expect(resolved).toMatchObject({
-      listenHost: '127.0.0.1',
-      listenPort: 3443,
-      tls: { mode: 'provided' },
-    })
     expect(resolved.upstreamOrigin.origin).toBe('http://127.0.0.1:3080')
-    expect(resolved.allowedCidrs).toHaveLength(2)
-    expect(resolved.customCssFile).toBe(join(tmpdir(), 'mobile.css'))
-    expect(resolved.customScriptFile).toBe(join(tmpdir(), 'mobile.js'))
+    expect(resolved.stateFile).toBe(stateFile)
+    expect(resolved.stateDirectory).toBe(dirname(stateFile))
+    expect(resolved.extensionsDir).toBe(join(dirname(stateFile), 'extensions'))
+    expect(resolved.customCssFile).toBe(join(dirname(stateFile), 'mobile.css'))
+    expect(resolved.customScriptFile).toBe(join(dirname(stateFile), 'mobile.js'))
+    expect(isAbsolute(resolved.mobileLayoutFile)).toBe(true)
+    expect(resolved.mobileLayoutFile.endsWith('mobile-layout.js')).toBe(true)
+    expect(isAbsolute(resolved.mobileLayoutNextFile)).toBe(true)
+    expect(resolved.mobileLayoutNextFile.endsWith('mobile-layout-next.js')).toBe(true)
+    expect(resolved.mobileLayout).toBe('auto')
+    expect(resolved.maxWebSockets).toBe(16)
+    expect(resolved.maxBodyBytes).toBe(160 * 1024 * 1024)
+    expect(resolved.upstreamTimeoutMs).toBe(30_000)
+    expect(Object.isFrozen(resolved)).toBe(true)
   })
 
-  it('keeps durable device state required at the Loader boundary', () => {
-    expect(() => Config()).toThrow(/stateFile missing required value/)
-  })
-
-  it('requires an absolute hidden control-state file', () => {
-    expect(parseControlFile(controlFile)).toBe(controlFile)
-    expect(() => parseControlFile('control.json')).toThrow(/controlFile must be an absolute file path/)
-    expect(() => Config({
-      stateFile,
-      controlFile: undefined as never,
-      initiallyEnabled: false,
-    })).toThrow(/controlFile missing required value/)
-    expect(() => Config({
-      stateFile,
-      controlFile,
-      initiallyEnabled: undefined as never,
-    })).toThrow(/initiallyEnabled missing required value/)
-  })
-
-  it('derives the listener port and sole authority from a public HTTPS origin', () => {
-    const quick = Config({
-      publicOrigin: 'https://192.168.50.23:3443',
-      allowedCidrs: ['192.168.50.0/24'],
-      stateFile,
-      controlFile,
-      initiallyEnabled: true,
-      tls: {
-        mode: 'provided',
-        certFile: join(tmpdir(), 'quick-cert.pem'),
-        keyFile: join(tmpdir(), 'quick-key.pem'),
-      },
-    })
-    expect(quick.publicAuthorities).toBeUndefined()
-    const resolved = parseGatewayConfig(quick)
-
-    expect(resolved.listenHost).toBe('0.0.0.0')
-    expect(resolved.listenPort).toBe(3443)
-    expect(resolved.authorities).toEqual([{ hostname: '192.168.50.23', port: 3443 }])
-
-    const defaultPort = parseGatewayConfig({
-      publicOrigin: 'https://dsh.home.arpa/',
-      allowedCidrs: ['192.168.50.0/24'],
-      stateFile,
-      tls: {
-        mode: 'provided',
-        certFile: join(tmpdir(), 'default-port-cert.pem'),
-        keyFile: join(tmpdir(), 'default-port-key.pem'),
-      },
-    })
-    expect(defaultPort.listenPort).toBe(443)
-    expect(defaultPort.authorities).toEqual([{ hostname: 'dsh.home.arpa' }])
-  })
-
-  it.each([
-    'http://192.168.50.23:3443',
-    'https://user:password@192.168.50.23:3443',
-    'https://192.168.50.23:3443/path',
-    'https://192.168.50.23:3443/?query=value',
-    'https://192.168.50.23:3443/#fragment',
-    'https://0.0.0.0:3443',
-  ])('rejects unsafe public origin %s', (publicOrigin) => {
-    expect(() => parseGatewayConfig({
-      publicOrigin,
-      allowedCidrs: ['192.168.50.0/24'],
-      stateFile,
-      tls: {
-        mode: 'provided',
-        certFile: join(tmpdir(), 'invalid-origin-cert.pem'),
-        keyFile: join(tmpdir(), 'invalid-origin-key.pem'),
-      },
-    })).toThrow(/publicOrigin/)
-  })
-
-  it('rejects ambiguous quick and advanced public network configuration', () => {
-    const tls = {
-      mode: 'provided' as const,
-      certFile: join(tmpdir(), 'conflict-cert.pem'),
-      keyFile: join(tmpdir(), 'conflict-key.pem'),
-    }
-    expect(() => parseGatewayConfig({
-      publicOrigin: 'https://192.168.50.23:3443',
-      listenPort: 3443,
-      allowedCidrs: ['192.168.50.0/24'],
-      stateFile,
-      tls,
-    })).toThrow(/publicOrigin cannot be combined with listenPort/)
-    expect(() => parseGatewayConfig({
-      publicOrigin: 'https://192.168.50.23:3443',
-      publicAuthorities: ['192.168.50.23:3443'],
-      allowedCidrs: ['192.168.50.0/24'],
-      stateFile,
-      tls,
-    })).toThrow(/publicOrigin cannot be combined with publicAuthorities/)
-    expect(() => parseGatewayConfig({
-      publicOrigin: 'https://127.0.0.1:3443',
-      listenHost: '127.0.0.1',
-      stateFile,
-      tls: { mode: 'disabled' },
-    })).toThrow(/publicOrigin requires TLS/)
-  })
-
-  it('rejects sessions that could outlive their device credential', () => {
-    expect(() => parseGatewayConfig({
-      stateFile,
-      tls: { mode: 'disabled' },
-      deviceTtlMs: 60_000,
-      sessionTtlMs: 60_001,
-    })).toThrow(/sessionTtlMs must not exceed deviceTtlMs/)
-  })
-
-  it('accepts a loopback-only HTTP development listener', () => {
-    const config = parseGatewayConfig({
-      listenHost: '127.0.0.1',
-      listenPort: 3443,
-      upstreamOrigin: 'http://127.0.0.1:3080',
-      publicAuthorities: ['127.0.0.1:3443'],
-      allowedCidrs: ['127.0.0.0/8'],
-      stateFile,
-      tls: { mode: 'disabled' },
-    })
-    expect(config.tls).toEqual({ mode: 'disabled' })
-    expect(config.upstreamOrigin.origin).toBe('http://127.0.0.1:3080')
-    expect(config.maxConnections).toBe(64)
-    expect(config.sessionTtlMs).toBe(8 * 60 * 60_000)
-  })
-
-  it('requires TLS, authorities, CIDRs, and absolute state for network exposure', () => {
-    expect(() => parseGatewayConfig({
-      listenHost: '0.0.0.0',
-      listenPort: 3443,
-      upstreamOrigin: 'http://127.0.0.1:3080',
-      publicAuthorities: ['192.168.1.2:3443'],
-      allowedCidrs: ['192.168.0.0/16'],
-      stateFile,
-      tls: { mode: 'disabled' },
-    })).toThrow(/TLS may be disabled only/)
-
-    expect(() => parseGatewayConfig({
-      listenHost: '0.0.0.0',
-      listenPort: 3443,
-      upstreamOrigin: 'http://127.0.0.1:3080',
-      allowedCidrs: ['192.168.0.0/16'],
-      stateFile,
-      tls: { mode: 'provided', certFile: join(tmpdir(), 'cert.pem'), keyFile: join(tmpdir(), 'key.pem') },
-    })).toThrow(/publicAuthorities/)
-
-    expect(() => parseGatewayConfig({
-      listenHost: '0.0.0.0',
-      listenPort: 3443,
-      upstreamOrigin: 'http://127.0.0.1:3080',
-      publicAuthorities: ['192.168.1.2:3443'],
-      stateFile,
-      tls: { mode: 'provided', certFile: join(tmpdir(), 'cert.pem'), keyFile: join(tmpdir(), 'key.pem') },
-    })).toThrow(/allowedCidrs/)
-
-    expect(() => parseGatewayConfig({
-      stateFile: 'devices.json',
-      tls: { mode: 'disabled' },
-    })).toThrow(/absolute file path/)
+  it('requires an absolute state file and rejects non-object configuration', () => {
+    expect(() => parseMobileConfig({ stateFile: 'devices.json' })).toThrow(/stateFile must be an absolute file path/)
+    expect(() => parseMobileConfig({ stateFile: '' })).toThrow(/stateFile must be an absolute file path/)
+    expect(() => parseMobileConfig({ stateFile: 42 })).toThrow(/stateFile must be an absolute file path/)
+    expect(() => parseMobileConfig(undefined)).toThrow(/mobile-access config must be an object/)
+    expect(() => parseMobileConfig(null)).toThrow(/mobile-access config must be an object/)
+    expect(() => parseMobileConfig([])).toThrow(/mobile-access config must be an object/)
   })
 
   it.each([
@@ -206,80 +54,63 @@ describe('gateway configuration', () => {
     'http://user:pass@127.0.0.1:3080',
     'http://127.0.0.1:3080/path',
     'http://127.0.0.1',
+    'http://localhost:3080',
   ])('rejects unsafe upstream %s', (upstreamOrigin) => {
-    expect(() => parseGatewayConfig({ stateFile, upstreamOrigin, tls: { mode: 'disabled' } })).toThrow(/upstreamOrigin/)
+    expect(() => parseMobileConfig({ stateFile, upstreamOrigin })).toThrow(/upstreamOrigin/)
   })
 
-  it('rejects ambiguous authority and CIDR entries', () => {
-    expect(() => parseGatewayConfig({
-      stateFile,
-      tls: { mode: 'disabled' },
-      publicAuthorities: ['127.0.0.1:3555'],
-      listenPort: 3443,
-    })).toThrow(/authority port/)
-    expect(() => parseGatewayConfig({
-      stateFile,
-      tls: { mode: 'disabled' },
-      allowedCidrs: ['192.168.1.7/24'],
-    })).toThrow(/host bits/)
-    expect(() => parseGatewayConfig({
-      stateFile,
-      tls: { mode: 'disabled' },
-      publicAuthorities: ['https://127.0.0.1:3443'],
-    })).toThrow(/authority/)
-    expect(() => parseGatewayConfig({
-      stateFile,
-      listenPort: 0,
-      tls: { mode: 'disabled' },
-      publicAuthorities: ['127.0.0.1:3443'],
-    })).toThrow(/non-zero listenPort/)
-    expect(() => parseGatewayConfig({
-      stateFile,
-      tls: { mode: 'disabled' },
-      allowedCidrs: ['127.0.0.0/8', '127.0.0.0/008'],
-    })).toThrow(/duplicates/)
-    expect(() => parseGatewayConfig({
-      stateFile,
-      tls: { mode: 'disabled' },
-      maxConnections: 0,
-    })).toThrow(/maxConnections/)
-  })
-})
-
-describe('network trust policy', () => {
-  it('matches IPv4, mapped IPv4, and IPv6 without broadening prefixes', () => {
-    const cidrs = [parseCidr('192.168.0.0/16'), parseCidr('::1/128')]
-    expect(addressAllowed('192.168.4.7', cidrs)).toBe(true)
-    expect(addressAllowed('::ffff:192.168.4.7', cidrs)).toBe(true)
-    expect(addressAllowed('192.169.4.7', cidrs)).toBe(false)
-    expect(addressAllowed('::1', cidrs)).toBe(true)
-    expect(addressAllowed(undefined, cidrs)).toBe(false)
+  it('accepts loopback HTTP upstreams with an explicit port', () => {
+    expect(parseMobileConfig({ stateFile, upstreamOrigin: 'http://127.0.0.1:3080' }).upstreamOrigin.origin)
+      .toBe('http://127.0.0.1:3080')
+    expect(parseUpstream(undefined).origin).toBe('http://127.0.0.1:3080')
+    expect(() => parseUpstream(12)).toThrow(/upstreamOrigin must be a string/)
   })
 
-  it('requires exact authority and origin including the listener port', () => {
-    const spec = parseAuthority('Harness.Example')
-    expect(resolveAuthority(spec, 3443)).toBe('harness.example:3443')
-    const policy = new RequestTrustPolicy([spec], 3443, [parseCidr('10.0.0.0/8')], true)
-    expect(policy.acceptsHost('harness.example:3443')).toBe(true)
-    expect(policy.acceptsHost('harness.example')).toBe(false)
-    expect(policy.acceptsHost('harness.example:3444')).toBe(false)
-    expect(policy.acceptsOrigin('https://harness.example:3443')).toBe(true)
-    expect(policy.acceptsOrigin('http://harness.example:3443')).toBe(false)
-    expect(policy.acceptsOrigin('https://harness.example:3443/path')).toBe(false)
+  it('rejects an IPv6 loopback literal because WHATWG hostnames keep the brackets', () => {
+    // src/config.ts:92 hands `url.hostname` straight to isLoopbackAddress, and
+    // `new URL('http://[::1]:8080').hostname` is the bracketed "[::1]" which
+    // node:net no longer classifies as an IP address: only 127.x works today.
+    expect(() => parseMobileConfig({ stateFile, upstreamOrigin: 'http://[::1]:8080' }))
+      .toThrow(/upstreamOrigin must be an HTTP loopback origin/)
   })
 
-  it.each([
-    { port: 443, tls: true, origin: 'https://harness.example' },
-    { port: 80, tls: false, origin: 'http://harness.example' },
-  ])('canonicalizes the default port for $origin', ({ port, tls, origin }) => {
-    const policy = new RequestTrustPolicy(
-      [parseAuthority('harness.example')],
-      port,
-      [parseCidr('10.0.0.0/8')],
-      tls,
-    )
-    expect(policy.acceptsHost('harness.example')).toBe(true)
-    expect(policy.acceptsOrigin(origin)).toBe(true)
-    expect(policy.acceptsOrigin(`${origin}:${String(port)}`)).toBe(true)
+  it('honours explicit asset overrides and the layout mode', () => {
+    const resolved = parseMobileConfig({
+      stateFile,
+      upstreamOrigin: 'http://127.0.0.1:3080',
+      customCssFile: join(tmpdir(), 'custom.css'),
+      customScriptFile: join(tmpdir(), 'custom.js'),
+      mobileLayoutFile: join(tmpdir(), 'layout.js'),
+      mobileLayoutNextFile: join(tmpdir(), 'layout-next.js'),
+      mobileLayout: 'stock',
+      maxWebSockets: 64,
+      maxBodyBytes: 1024,
+      upstreamTimeoutMs: 300_000,
+    })
+    expect(resolved.customCssFile).toBe(join(tmpdir(), 'custom.css'))
+    expect(resolved.customScriptFile).toBe(join(tmpdir(), 'custom.js'))
+    expect(resolved.mobileLayoutFile).toBe(join(tmpdir(), 'layout.js'))
+    expect(resolved.mobileLayoutNextFile).toBe(join(tmpdir(), 'layout-next.js'))
+    expect(resolved.mobileLayout).toBe('stock')
+    expect(resolved.maxWebSockets).toBe(64)
+    expect(resolved.maxBodyBytes).toBe(1024)
+    expect(resolved.upstreamTimeoutMs).toBe(300_000)
+  })
+
+  it('rejects relative asset overrides', () => {
+    expect(() => parseMobileConfig({ stateFile, customCssFile: 'mobile.css' })).toThrow(/customCssFile must be an absolute file path/)
+    expect(() => parseMobileConfig({ stateFile, customScriptFile: 'mobile.js' })).toThrow(/customScriptFile must be an absolute file path/)
+    expect(() => parseMobileConfig({ stateFile, mobileLayoutFile: 'layout.js' })).toThrow(/mobile-layout\.js must be an absolute file path/)
+    expect(() => parseMobileConfig({ stateFile, mobileLayoutNextFile: 'layout-next.js' })).toThrow(/mobile-layout-next\.js must be an absolute file path/)
+  })
+
+  it('bounds the resource limits instead of clamping them', () => {
+    expect(() => parseMobileConfig({ stateFile, maxWebSockets: 0 })).toThrow(/maxWebSockets must be an integer from 1 through 256/)
+    expect(() => parseMobileConfig({ stateFile, maxWebSockets: 257 })).toThrow(/maxWebSockets must be an integer from 1 through 256/)
+    expect(() => parseMobileConfig({ stateFile, maxWebSockets: 1.5 })).toThrow(/maxWebSockets must be an integer/)
+    expect(() => parseMobileConfig({ stateFile, maxBodyBytes: 1023 })).toThrow(/maxBodyBytes must be an integer from 1024 through/)
+    expect(() => parseMobileConfig({ stateFile, maxBodyBytes: 256 * 1024 * 1024 + 1 })).toThrow(/maxBodyBytes/)
+    expect(() => parseMobileConfig({ stateFile, upstreamTimeoutMs: 999 })).toThrow(/upstreamTimeoutMs must be an integer from 1000 through 300000/)
+    expect(() => parseMobileConfig({ stateFile, upstreamTimeoutMs: 300_001 })).toThrow(/upstreamTimeoutMs/)
   })
 })

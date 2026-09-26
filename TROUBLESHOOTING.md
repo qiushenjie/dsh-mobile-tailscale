@@ -2,7 +2,11 @@
 
 本文件记录 DSH Mobile 在真实环境中出现过的故障、根因和处置方式。每一条都来自实际发生的现场日志，不是推测。
 
-适用对象：DSH Desktop（macOS / Windows）与通过 `dsh plugin` 安装的 web profile。
+适用对象：DSH Desktop（macOS / Windows）与通过 `dsh plugin` 安装的 web profile。0.4.0 起本插件只保留 Tailscale Serve 一条远程通道，因此这里不再有局域网、配对与证书相关条目。
+
+## 为什么不再有局域网直连
+
+0.3.21 及更早版本在局域网里另开了一个 HTTPS 网关，并配了一套自管理的「DeepSeek Harness Mobile CA」证书来给它签名。但那条链从来没被任何设备信任过：证书既没有装进 Mac 的钥匙串，也没有任何一条路径把它送到手机上，于是手机和 Mac 自己的浏览器都停在证书拦截页上，手机更是连 `:3443` 端口都没到达过。与此同时 `https://<node>.<tailnet>.ts.net` 有 Let's Encrypt 签发的真实证书，访问控制由 tailnet 成员身份承担，既不需要配对也不需要手动信任。两者功能重复而后者可用，因此 0.4.0 把整个局域网通道删掉，只留下 Tailscale Serve。
 
 ## 快速分诊
 
@@ -12,17 +16,18 @@
 | `dsh plugin ... add` 报 `ERR_PNPM_UNEXPECTED_STORE` | [2](#2-err_pnpm_unexpected_store) |
 | 插件报 `unsupported DeepSeek Harness version` | [3](#3-unsupported-deepseek-harness-version) |
 | 远程面板显示 `ready`，但手机打不开地址 | [4](#4-远程通道显示-ready-但不可达) |
+| 手机根本连不上 ts.net 地址 / 提示无法访问 | [7](#7-手机打不开-tsnet-地址) |
 | 日志刷 `TimeoutOverflowWarning` / `upstream_unavailable` | [5](#5-timeoutoverflowwarning--upstream_unavailable) |
 | 插件安装时报 `resolves outside the installation closure` | [6](#6-resolves-outside-the-installation-closure) |
-| 局域网网关起不来 / 3443 未监听 | [7](#7-局域网网关未监听) |
-| 局域网连不上 / 手机上找不到配对入口 | [16](#16-局域网连不上) |
 | 手机端「设置 → 模型」报 `settings are unavailable in this browser`、会话里选不了模型 | [11](#11-手机端设置与模型不可用) |
 | 点开菜单（模型列表、会话行的三个点）却自己关掉或跳转走 | [12](#12-点开的菜单被自己关掉) |
 | 手机端整体卡 / 打开长会话很慢 | [13](#13-手机端卡顿与长会话载入慢) |
-| 远程通道每次打开都重新下载几 MB 资源 | [14](#14-远程通道资源被重复下载) |
-| 面板只剩三个按钮，找不到局域网开关和设备管理 | [15](#15-桌面面板与管理接口) |
+| 每次打开都重新下载几 MB 资源 | [14](#14-远程通道资源被重复下载) |
+| 面板上找不到开关 / 想从命令行操作远程通道 | [15](#15-桌面面板与管理接口) |
+| 想改手机端外观、加扩展，或 `/mobile` 改坏了页面 | [16](#16-自定义文件与扩展) |
 | 某个第三方插件的面板白屏 | [17](#17-第三方插件面板白屏) |
-| 面板显示 `ready`，但 `tailscale serve status` 是空的 | [4](#4-远程通道显示-ready-但不可达) |
+| 想换回 DSH 原生布局 / 专用布局没生效 | [18](#18-手机布局-mobilelayout) |
+| 诊断报了不可达 / 想确认 DSH 版本兼容性 | [19](#19-诊断页与-dsh-版本兼容性) |
 
 ## 0. 先确定日志与状态位置
 
@@ -38,6 +43,7 @@ LOG="$HOME/Library/Logs/DSH Desktop/harness.log"
 
 # 插件状态目录
 ls -la "${DSH_HOME:-$HOME/.dsh}/mobile-access/"
+ls -la "${DSH_HOME:-$HOME/.dsh}/mobile-access/remote/"
 
 # 最近的启动边界，用来把日志按"本次启动"切片
 grep -n "^\[desktop\] starting" "$LOG" | tail -5
@@ -231,9 +237,9 @@ lsof -nP -iTCP -sTCP:LISTEN | grep DSH
 tailscale serve --bg --yes --https=443 http://127.0.0.1:<远程代理端口>
 ```
 
-也可以回「移动访问 → 远程」点**「重新连接」** —— 它会 stop + start 一次并重新注册。
+也可以回「移动访问」面板点**「重新连接」** —— 它会 stop + start 一次并重新注册。
 
-**成因 C：诊断误报「提供方显示已就绪，但公共地址暂不可达」（0.3.21 前）。** 诊断探针请求 `GET /mobile-access/health`，而**远程代理当时没有这个路由**，请求落到上游被 404，探针据此判为不可达（`src/diagnostics.ts:151-163`、`:246`）。0.3.21 起两个通道都提供该路由（局域网 `src/gateway.ts:1827`，远程 `src/remote-proxy.ts:249-260`），这个误报消失。若 0.3.21+ 仍出现同一条提示，说明 ts.net **真的**不可达 —— 先按成因 B 修 `serve`。
+**成因 C：诊断误报「提供方显示已就绪，但公共地址暂不可达」（0.3.21 前）。** 诊断探针请求 `GET /mobile-access/health`，而**远程代理当时没有这个路由**，请求落到上游被 404，探针据此判为不可达。0.3.21 起远程代理自己应答该路由（`src/remote-proxy.ts:249-260`），这个误报消失。若 0.3.21+ 仍出现同一条提示，说明 ts.net **真的**不可达 —— 先按成因 B 修 `serve`。
 
 **判定命令**：
 
@@ -289,7 +295,7 @@ PY
 
 **处置**：升级到 0.3.3+。修复后本次启动应为 **0 / 0**。
 
-> 附带说明：远程免配对通道**现在也直接回答 `GET /mobile-access/health`**（`src/remote-proxy.ts:249-260`，它由代理自己应答、不转发给上游），所以远程诊断探针不再是 404。该镜像提供的资产是 `metadata`、`custom.css`、`custom.js`、`mobile-layout.js`、`mobile-layout-next.js`、`mobile-boot/<key>.js` 与扩展清单（`src/gateway.ts:2802-2913`、`src/remote-proxy.ts:263-296`）。
+> 附带说明：远程通道**现在也直接回答 `GET /mobile-access/health`**（`src/remote-proxy.ts:249-260`，它由代理自己应答、不转发给上游），所以远程诊断探针不再是 404。该镜像提供的资产是 `metadata`、`custom.css`、`custom.js`、`mobile-layout.js`、`mobile-layout-next.js`、`mobile-boot/<key>.js` 与扩展清单（`src/mobile-frontend.ts`、`src/remote-proxy.ts:263-296`）。
 
 ## 6. `resolves outside the installation closure`
 
@@ -324,33 +330,29 @@ rm -rf "$PROBE"
 
 **处置**：若 `@deepseek-ai/*` / `react` 已不在 `problems` 中，**不要改 `peerDependencies`** —— 在已验证可用的清单上做投机改动只会引入新风险。
 
-## 7. 局域网网关未监听
+## 7. 手机打不开 ts.net 地址
 
-**判定命令**：
+**现象**：电脑上 `tailscale serve status` 正常、面板也显示就绪，但手机浏览器打开 `https://<machine>.<tailnet>.ts.net` 报无法访问、超时或找不到服务器。
+
+**根因**：这是**手机到 tailnet** 这一段的问题，而不是插件的注册问题。按下面的顺序排除：
+
+1. **手机上 Tailscale 没运行**：打开 Tailscale App，确认已登录且开关是开的。手机不在线时，地址根本无法解析到电脑。
+2. **不在同一个 tailnet**：手机登录的是另一个 tailnet（例如工作账号 vs 个人账号）。`tailscale status` 两端都应能看到对方。
+3. **Mac 上的 Tailscale 离线**：电脑睡眠、退出登录或 Tailscale 未运行都会让 node 下线。
+4. **手机网络拦截 DNS**：个别企业/公共 Wi-Fi 会拦 MagicDNS 名称。切换到蜂窝网络试一次，能通就是 DNS 被拦。
+5. **地址抄错**：面板显示的地址以 `https://` 开头、以 `.ts.net` 结尾，且**不要**带端口或路径。手输容易漏字符，优先用面板的复制操作。
+
+**判定命令**（在电脑上跑）：
 
 ```bash
-lsof -nP -iTCP:3443 -sTCP:LISTEN
-lsof -nP -iUDP:3443        # 设备发现广播
-curl -sk -o /dev/null -w "%{http_code}\n" https://<LAN-IP>:3443/mobile-access/health
-# 200 = 健康
-
-# 插件自报状态（<web-port> 用 DSH WebServer 的端口）
-curl -s -H "Host: 127.0.0.1" http://127.0.0.1:<web-port>/api/mobile-access/control
-curl -s -H "Host: 127.0.0.1" http://127.0.0.1:<web-port>/api/mobile-access/remote/control
-# 期望：{"running":true,"origin":"https://<LAN-IP>:3443",...}
-#      {"provider":"tailscale","running":true,"state":"ready","origin":"https://...ts.net/"}
+tailscale status                       # 两端都应为 online / idle，不能是 offline
+tailscale status --json | python3 -c "import json,sys;d=json.load(sys.stdin);print(d['Self']['DNSName'])"
+curl -s -o /dev/null -w "%{http_code}\n" https://<machine>.<tailnet>.ts.net/   # 200 = 电脑侧通
 ```
 
-**常见原因**：
+电脑侧 curl 是 200、手机却打不开，问题就在手机侧（第 1–4 条）。
 
-- 插件没装 / 没加载 → 先看 [1](#1-dsh-desktop-进入-safe-mode)、[3](#3-unsupported-deepseek-harness-version)。
-- `control.json` 里开关是关的：
-  ```bash
-  cat "$DSH_HOME/mobile-access/control.json"        # {"version":1,"enabled":true}
-  cat "$DSH_HOME/mobile-access/remote/control.json"
-  ```
-- 局域网地址变了 / 选错网卡：`setup.json` 记录的是网卡名，插件会自动跟随地址变化；必要时用
-  `dsh plugin --profile <profile> exec dsh-mobile setup --address 192.168.x.x` 重选。
+**处置**：确保手机与 Mac 登录同一 tailnet 且 Tailscale 都在运行；换一个网络验证是否 DNS 被拦；地址一律从面板复制。
 
 ## 8. 从 profile 摘除一个插件
 
@@ -393,29 +395,26 @@ grep -c "<package-name>" "$DSH_HOME/profiles/<profile>/pnpm-lock.yaml"   # 应�
 
 ## 9. 健康检查清单
 
-手机功能出问题时，按顺序跑完这四项再下结论：
+远程通道出问题时，按顺序跑完这几项再下结论：
 
 ```bash
 # 1) 插件在 profile 里且已加载
 grep -n "DSH entry loaded" "$LOG" | tail -1
 
-# 2) 局域网网关
-curl -sk -o /dev/null -w "LAN %{http_code}\n" https://<LAN-IP>:3443/mobile-access/health
-
-# 3) 远程 443 归属
+# 2) 远程 443 归属
 tailscale serve status --json
 
-# 4) 远程端到端
+# 3) 远程端到端
 curl -s -o /dev/null -w "remote %{http_code}\n" https://<machine>.<tailnet>.ts.net/
 
-# 5) 本次启动无定时器溢出
+# 4) 本次启动无定时器溢出
 python3 -c "
 import re;s=open('$LOG',encoding='utf8',errors='replace').read()
 t=s[s.rfind('[desktop] starting'):];print('TimeoutOverflowWarning:', len(re.findall('TimeoutOverflowWarning', t)))
 "
 ```
 
-期望：`DSH entry loaded` / `LAN 200` / `TCP.443.HTTPS = true` / `remote 200` / `TimeoutOverflowWarning: 0`。
+期望：`DSH entry loaded` / `TCP.443.HTTPS = true` / `remote 200` / `TimeoutOverflowWarning: 0`。
 
 ## 10. 卸载与数据清理
 
@@ -424,11 +423,13 @@ dsh plugin --profile <profile> exec dsh-mobile purge --yes
 dsh plugin --profile <profile> remove dsh-mobile-tailscale
 ```
 
-`purge` 删除 `$DSH_HOME/mobile-access/`（设置、证书、设备、自定义文件、扩展）。注意其中 `tls/` 与 `devices.json` 含**凭据**，外发或打包前请先清除。
+`purge` 删除整个 `$DSH_HOME/mobile-access/`（远程状态、自定义文件、扩展）。0.4.0 起这里不再有证书或配对设备凭据；局域网时代的 `tls/` 与 `devices.json` 若还留在磁盘上，只可能是从 0.3.x 升级前的遗留文件，`purge` 会一并删除。
+
+> **`dsh-mobile setup` 已不存在。** 它是随局域网通道移除的，运行它只会得到 `unknown command: setup`。
 
 ## 11. 手机端设置与模型不可用
 
-**现象**：手机（局域网或 tailnet）上「设置 → 模型」报 `settings are unavailable in this browser` / `加载提供方目录失败`，会话里的模型选择器也拿不到模型列表。桌面端一切正常。
+**现象**：手机上（经 ts.net 远程通道）「设置 → 模型」报 `settings are unavailable in this browser` / `加载提供方目录失败`，会话里的模型选择器也拿不到模型列表。桌面端一切正常。
 
 **根因**：DSH 在插件激活时**只读一次**宿主信任提示来决定设置后端（`ctx.remote.$host.isLoopback ? "host" : "memory"`）。取值是 `memory` 时就没有宿主支持的设置面，模型目录随之加载失败。
 
@@ -437,16 +438,16 @@ dsh plugin --profile <profile> remove dsh-mobile-tailscale
 1. 页面带有本插件注入的信任标志（`window.__DSH_MOBILE_TRUSTED_GATEWAY__`），客户端才会把 `connection.isLoopback` 置真。
 2. **启动清单里 settings 模块的 `inject` 必须包含本插件**，本插件才会先于 settings 激活。
 
-第 2 条由 `orderAuthenticatedSettings` 写入（`src/gateway.ts:566-608`）。它比对的模块 id 现在全是常量，别再凭旧文档里的字面量判断：
+第 2 条由 `orderAuthenticatedSettings` 写入（`src/mobile-frontend.ts:566-608`）。它比对的模块 id 现在全是常量，别再凭旧文档里的字面量判断：
 
-- 本插件客户端条目 id = **包名** `dsh-mobile-tailscale`（`MOBILE_CLIENT_MODULE = DSH_MOBILE_MODULE_ID`，`src/gateway.ts:136`、`src/version.ts:21`）。
-- 宿主 settings 模块 id = `@deepseek-ai/dsh-client-ui-settings`（`SETTINGS_MODULE`，`src/gateway.ts:141`）。
-- 本插件客户端条目必须在自己的 `inject` 里声明 `@deepseek-ai/dsh-client-connection` 与 `@deepseek-ai/dsh-client-ui-sidebar`，否则改写直接抛 `dsh-mobile client has unsupported dependencies`（`src/gateway.ts:571-575`）；改写后它的 `inject` 会被重写成 `["@deepseek-ai/dsh-client-connection", <布局槽位模块>]`（`src/gateway.ts:605`）。
+- 本插件客户端条目 id = **包名** `dsh-mobile-tailscale`（`MOBILE_CLIENT_MODULE = DSH_MOBILE_MODULE_ID`，`src/mobile-frontend.ts:136`、`src/version.ts:21`）。
+- 宿主 settings 模块 id = `@deepseek-ai/dsh-client-ui-settings`（`SETTINGS_MODULE`，`src/mobile-frontend.ts:141`）。
+- 本插件客户端条目必须在自己的 `inject` 里声明 `@deepseek-ai/dsh-client-connection` 与 `@deepseek-ai/dsh-client-ui-sidebar`，否则改写直接抛 `dsh-mobile client has unsupported dependencies`（`src/mobile-frontend.ts:571-575`）；改写后它的 `inject` 会被重写成 `["@deepseek-ai/dsh-client-connection", <布局槽位模块>]`（`src/mobile-frontend.ts:605`）。
 
 历史漂移（0.3.5 修复，说明为什么这里值得验证）：
 
 - 它曾用写死的模块 id `dsh-mobile` 去找自己，而清单里的条目 id 是包名 —— 找不到就 `return`，排序**静默失效**，客户端与宿主都不报错。测试夹具当时用了同一个过时 id，所以测试全绿而线上失效。
-- 同一处要求 settings 的 `inject` 含 `@deepseek-ai/dsh-client-connection`，而 DSH 0.1.2 的 settings 只声明 `@deepseek-ai/dsh-api-remotes` —— **只修 id 会让它抛错并把移动端首页整体 502**，两处必须一起改。当前实现改为：settings 的 `inject` 里**没有** connection 时，判定设置面走 remote，改把本插件挂到 `@deepseek-ai/dsh-api-gateway` 条目的 `inject` 上，并把本插件追加进 settings 的 `inject`（`src/gateway.ts:596-606`）。
+- 同一处要求 settings 的 `inject` 含 `@deepseek-ai/dsh-client-connection`，而 DSH 0.1.2 的 settings 只声明 `@deepseek-ai/dsh-api-remotes` —— **只修 id 会让它抛错并把移动端首页整体 502**，两处必须一起改。当前实现改为：settings 的 `inject` 里**没有** connection 时，判定设置面走 remote，改把本插件挂到 `@deepseek-ai/dsh-api-gateway` 条目的 `inject` 上，并把本插件追加进 settings 的 `inject`（`src/mobile-frontend.ts:596-606`）。
 
 **判定命令**：直接对运行时首页跑一遍改写，解析改写后的启动清单，看 settings 的 `inject` 有没有被追加、本插件条目的 `inject` 是什么：
 
@@ -509,30 +510,30 @@ const onBlur = (event) => { if (rootRef.current?.contains(event.relatedTarget)) 
 
 **根因**：手机通道**故意把会话窗口改小**——这是设计，不是故障。桌面端一次最多渲染 DSH 自己要求的窗口（客户端页大小 50 条，普通窗口要 500 条），手机上不裁会直接卡死。
 
-- **WebSocket 会话流**：手机页注入的 bootstrap 包了一层 `WebSocket.prototype.send`，凡是 `session/follow` 请求，都把 `request.maxMessages` 压到 `MOBILE_SESSION_WINDOW_MESSAGES = 10`，并 `delete request.turnWindow`（`src/gateway.ts:100`、`:316`）。这段改写**同时注入局域网页和远程页**（`src/gateway.ts:919`、`:969`）。
-- **HTTP 历史页**：局域网通道每页 `MOBILE_HISTORY_PAGE_MESSAGES = 10`（`src/gateway.ts:89`、`:1308`）；远程通道每页 `REMOTE_HISTORY_PAGE_MESSAGES = 50`（`src/remote-proxy.ts:60`、`:304`）。
+- **WebSocket 会话流**：手机页注入的 bootstrap 包了一层 `WebSocket.prototype.send`，凡是 `session/follow` 请求，都把 `request.maxMessages` 压到 `MOBILE_SESSION_WINDOW_MESSAGES = 10`，并 `delete request.turnWindow`（`src/mobile-frontend.ts:100`、`:316`）。
+- **HTTP 历史页**：远程通道每页 `REMOTE_HISTORY_PAGE_MESSAGES = 50`（`src/remote-proxy.ts:60`、`:304`）。
 
 **判定**：先确认改写确实进了页面。
 
 ```bash
-# 在手机浏览器「查看网页源代码」里搜 maxMessages，或把已配对后的页面源码存到本地
+# 在手机浏览器「查看网页源代码」里搜 maxMessages，或把页面源码存到本地
 grep -c "maxMessages" /tmp/dsh-mobile-index.html    # ≥1 = 改写已注入
 ```
 
-若 `session/follow` 帧没被改写，手机会一次拉整个窗口。此时先在桌面端「移动访问 → **诊断**」跑一次检查（版本 / 网卡 / 局域网 / 防火墙 / 远程 / 手机网络），排除链路问题；再确认上面那段 bootstrap 在不在页里。
+若 `session/follow` 帧没被改写，手机会一次拉整个窗口。此时先在面板里跑一次「诊断」（版本 / 远程通道 / Tailscale 提供方 / 手机网络），排除链路问题；再确认上面那段 bootstrap 在不在页里。
 
 **处置**：
 
 - 这个限流是**预期行为**，不要为了"多看几条历史"去改它 —— 那正是卡顿的来源。
-- 诊断全绿但仍然慢，多半是网络或设备本身：换 5GHz Wi-Fi、停掉占带宽的应用，必要时改用局域网通道（比经 tailnet 中继快得多）。
+- 诊断全绿但仍然慢，多半是网络或设备本身：换 5GHz Wi-Fi、停掉占带宽的应用；经 tailnet 中继时延迟较高的节点可以改用直连（DERP 中继 vs 点对点直连），在 `tailscale status` 里能看到当前是 `direct` 还是 `relay`。
 
 ## 14. 远程通道资源被重复下载
 
 **现象**（0.3.15 之前）：手机上每次打开或刷新页面都要重新下载几 MB 脚本与样式（mermaid、three、vendor、shell），即使浏览器缓存是热的。
 
-**根因**：`sanitizeResponseHeaders` 会剥掉上游响应里的 `cache-control` / `expires`（`src/gateway.ts:1211`），于是被代理过的资源既没有缓存新鲜度、也没有校验器，浏览器下一次导航只能全部重下。DSH 0.1.7 上实测**每次页面加载重下 5.66 MB**（其中 mermaid 3.24 MB、three 0.67 MB）（`src/gateway.ts:1276-1281`）。
+**根因**：`sanitizeResponseHeaders` 会剥掉上游响应里的 `cache-control` / `expires`（`src/mobile-frontend.ts:1211`），于是被代理过的资源既没有缓存新鲜度、也没有校验器，浏览器下一次导航只能全部重下。DSH 0.1.7 上实测**每次页面加载重下 5.66 MB**（其中 mermaid 3.24 MB、three 0.67 MB）（`src/mobile-frontend.ts:1276-1281`）。
 
-**修复**：对自带内容标识的 URL 返回长缓存 —— `/plugins/**?rev=<revision>` 与 `/assets/**-<hash>.<ext>` 一律 `private, max-age=31536000, immutable`（`revisionedStaticCacheControl`，`src/gateway.ts:1289-1299`）。远程代理转发响应时会**重新补回**这个头（`src/remote-proxy.ts:333-334`），所以两条通道都生效。
+**修复**：对自带内容标识的 URL 返回长缓存 —— `/plugins/**?rev=<revision>` 与 `/assets/**-<hash>.<ext>` 一律 `private, max-age=31536000, immutable`（`revisionedStaticCacheControl`，`src/mobile-frontend.ts:1289-1299`）。远程代理转发响应时会**重新补回**这个头（`src/remote-proxy.ts:333-334`），所以在唯一的远程通道上生效。
 
 **判定**：在手机浏览器开发者工具里看这两类请求的响应头 `Cache-Control`，应为 `private, max-age=31536000, immutable`；第二次打开页面时它们应直接来自 disk/memory cache。
 
@@ -540,66 +541,66 @@ grep -c "maxMessages" /tmp/dsh-mobile-index.html    # ≥1 = 改写已注入
 
 ## 15. 桌面面板与管理接口
 
-**现象**：0.3.21 起，桌面端「移动访问」面板只剩三个按钮 —— **「浏览器访问 <地址>」**、**「生成配对链接」**、**「诊断」**。局域网开关和已配对设备列表从面板上消失了。
+**现象**：想启用/关闭远程访问、重连或重置，但在面板上找不到入口，或想从命令行直接操作远程通道。
 
-**根因**：这些操作被改成**仅限本机**的管理接口，不再直接铺在面板 UI 上。调用必须来自 loopback（`assertLocalAdminTrust`，`src/http-security.ts:175`），非 loopback（包括手机）的调用会被拒绝；路由见 `src/plugin.ts:329-390` 与 `src/gateway.ts:2718-2791`。
+**面板形状（0.4.0）**：左下角「移动访问」卡片只有一个视图 —— 远程地址（可用 **复制地址** 复制）、启用/关闭开关、一行状态、**重新连接**，以及 **诊断** 区域。没有标签页、没有二维码、没有设备列表；`reset` 接口只留给命令行与工具，面板里没有按钮。
+
+**管理接口仅限电脑本机**：调用必须满足同源与 `sec-fetch-site` 校验（`assertLocalAdminTrust`，`src/http-security.ts`），非本机（包括手机）的调用会被拒绝：
 
 | 接口 | 作用 |
 | --- | --- |
-| `GET/POST /api/mobile-access/lan/control` | 读 / 写局域网网关开关（body `{"running":true\|false}`） |
-| `POST /api/mobile-access/lan/pairing/open` | 开一个配对窗口，201 返回 `{token, expiresAt, pairUrl, appKey, qrSvg}` |
-| `GET /api/mobile-access/lan/devices` | 列出已配对设备 |
-| `POST /api/mobile-access/lan/devices/revoke` | 吊销一台设备（body `deviceId`，32 位十六进制） |
-| `POST /api/mobile-access/lan/devices/reset` | 清空全部设备（body `{"confirm":true}`） |
+| `GET/POST /api/mobile-access/remote/control` | 读 / 写远程开关（body `{"running":true\|false}`） |
+| `POST /api/mobile-access/remote/reconnect` | 停止并重新启动远程通道、重新注册 443 |
+| `POST /api/mobile-access/remote/reset` | 清除插件自己保存的远程状态 |
+| `GET /api/mobile-access/diagnostics` | 跑一次脱敏诊断 |
 
-**配对窗口**：默认 **120 秒**（`pairingTtlMs`），最小 10 秒、最大 600 秒；**一次性、单设备**——用掉即失效（`src/config.ts:323`、`src/access.ts:238-289`）。
-
-**判定命令**（必须在电脑本机跑）：
+**判定命令**（必须在电脑本机跑，`<web-port>` 用 DSH WebServer 的端口）：
 
 ```bash
-curl -s -X POST http://127.0.0.1:<web-port>/api/mobile-access/lan/pairing/open
-# {"token":"...","expiresAt":...,"pairUrl":"https://<lan-ip>:3443/mobile-access/pair#instance=...&token=...", ...}
+curl -s -H "Host: 127.0.0.1" http://127.0.0.1:<web-port>/api/mobile-access/remote/control
+# 期望：{"provider":"tailscale","running":true,"state":"ready","origin":"https://...ts.net/"}
 ```
 
-**处置**：面板上没有的入口用上面的接口（面板上的「生成配对链接」按钮就是调它）。从别的机器调用会被拒——这是设计，不是故障。
+**处置**：面板上没有的入口用上面的接口。从别的机器调用会被拒——这是设计，不是故障。`dsh-mobile setup` 不再提供任何替代初始化命令。
 
-## 16. 局域网连不上
+## 16. 自定义文件与扩展
 
-**现象**：手机打开 `https://<lan-ip>:3443/` 后跳到 `/mobile-access/login`，页面提示到电脑上完成配对；或者手机根本打不开。
+**现象**：用 `/mobile` 改过手机端后页面异常，或想知道自定义文件放在哪、怎么加扩展、怎么恢复默认。
 
-**根因**：局域网通道对未配对设备**不是报错，而是 302 到登录页** —— 顶层 HTML 请求收到 401 时，会被换成一个 `302 .../mobile-access/login?return=<原路径>`（`src/gateway.ts:1958-1966`）。所以"跳到登录页"说明**网关是活的**，只是这台手机还没有凭据。先配对，再谈网络。
+**文件位置**：所有自定义内容都在 `$DSH_HOME/mobile-access/` 下：
 
-**处置（先配对）**：在电脑上「移动访问 → 局域网」点**「生成配对链接」**（2 分钟内有效、只能用一次），把链接给手机打开（面板同时会显示同一链接的二维码，手机相机可以直接扫）。链接形如：
+| 路径 | 内容 |
+| --- | --- |
+| `mobile-access/mobile.css` | 手机端自定义样式。 |
+| `mobile-access/mobile.js` | 手机端自定义脚本。 |
+| `mobile-access/extensions/` | 电脑端扩展目录，每个扩展含 `extension.json` 与以本机权限运行的 `host.mjs`。 |
+| `mobile-access/remote/control.json` | 远程开关状态。 |
+| `mobile-access/remote/provider.json` | 远程提供方选择。 |
 
-```
-https://<lan-ip>:3443/mobile-access/pair#instance=<id>&token=<token>
-```
-
-配对仍有问题时，再往下查网络层：
-
-1. **电脑防火墙**：放行 3443/TCP 与设备发现用的 UDP（Windows 上诊断页会单独检查这一项）。
-2. **手机与电脑同网段**：关掉访客网络 / AP 隔离；公司、校园网常把客户端互相隔离。
-3. **选错网卡**：`setup.json` 记录的是网卡名，必要时重选 —— `dsh plugin --profile <profile> exec dsh-mobile setup --address <lan-ip>`。
-
-**判定命令**：先区分"网络不通"和"只是没配对"：
+**创建扩展脚手架**：
 
 ```bash
-curl -sk -o /dev/null -w "%{http_code}\n" https://<lan-ip>:3443/mobile-access/health   # 200 = 网关活着
-curl -sk -o /dev/null -w "%{http_code} -> %{redirect_url}\n" https://<lan-ip>:3443/     # 302 -> …/mobile-access/login = 只是没配对
+dsh plugin --profile web exec dsh-mobile extension create <id> [--name <name>]
 ```
 
-电脑上 `health` 是 200、手机却打不开同一个地址，说明是**手机到电脑这一段**被挡或被隔离，查上面第 1、2 条。
+或者在 DSH 对话里直接说需求，例如 `/mobile 把手机端改成终端风格`；`/mobile` 会修改 `mobile.css`/`mobile.js`，需要电脑能力时创建 `extensions/` 下的扩展。
+
+**改坏了怎么恢复**：删掉或清空对应文件即可回退 —— 例如把 `mobile.css`、`mobile.js` 清空，或删除出问题的扩展目录；卸载全部自定义内容用 `dsh plugin --profile web exec dsh-mobile purge --yes`（会同时清掉远程状态）。
+
+**判定**：在手机浏览器 Network 里确认 `/mobile-access/custom.css` 与 `/mobile-access/custom.js` 是否 200；若为 404，说明文件不存在，属于正常回退。
+
+**处置**：`host.mjs` 与本机程序拥有相同权限，仅创建和运行你理解并信任的扩展。
 
 ## 17. 第三方插件面板白屏
 
 **现象**：手机端某块面板白屏（典型是右侧栏「文件」页只剩一个「重试」按钮，点几次还是白）；桌面端一切正常或同样报错。
 
-**根因**：有两个第三方插件的客户端模块**在当前 DSH 客户端图上根本无法工作**（`src/gateway.ts:184-207`）：
+**根因**：有两个第三方插件的客户端模块**在当前 DSH 客户端图上根本无法工作**（`src/mobile-frontend.ts:184-207`）：
 
 - `dsh-better-sidebar`：客户端 `require("@deepseek-ai/dsh-client-ui-primitives")`，而当前 DSH 的客户端图里已经没有这个模块（清单 71 个条目里没有它）→ 它渲染的每一页都死于 `Minified React error #130`；它的宿主半边也激活失败（`sctx.settings.register is not a function`）。
 - `dsh-rewind-plugin`：读会话快照里已不再下发的 `snapshot.queue` → `collectPendingTargets` 抛 `TypeError: Cannot read properties of undefined (reading 'filter')`，每次渲染都崩掉 `conversation.session.header.actions` 这个槽位。
 
-**修复**：0.3.17 起，本插件把这两个模块从**手机启动图**里剔除（`MOBILE_BROKEN_ON_DSH_017_MODULES` → `MOBILE_BOOT_EXCLUDED_MODULES` → `PRUNED_CLIENT_MODULES`，`src/gateway.ts:204-207`、`:224-227`、`:739-742`），并在 `/plugins/events` 的 HMR 图上继续挡住它们的单模块请求（`prunedClientModuleRequest`，`src/gateway.ts:763-772`），否则页面会被 HMR 帧"把模块拉回来"。剔除后手机端回到原生侧边栏与消息操作。
+**修复**：0.3.17 起，本插件把这两个模块从**手机启动图**里剔除（`MOBILE_BROKEN_ON_DSH_017_MODULES` → `MOBILE_BOOT_EXCLUDED_MODULES` → `PRUNED_CLIENT_MODULES`，`src/mobile-frontend.ts:204-207`、`:224-227`、`:739-742`），并在 `/plugins/events` 的 HMR 图上继续挡住它们的单模块请求（`prunedClientModuleRequest`，`src/mobile-frontend.ts:763-772`），否则页面会被 HMR 帧"把模块拉回来"。剔除后手机端回到原生侧边栏与消息操作。
 
 **桌面端仍然坏**：剔除只作用于**手机通道**，桌面端照常加载这两个插件。若桌面也白屏/报错，请升级或卸载它们（卸载见 [8](#8-从-profile-摘除一个插件)）。
 
@@ -615,7 +616,7 @@ curl -sk -o /dev/null -w "%{http_code} -> %{redirect_url}\n" https://<lan-ip>:34
 | `mobile` | 在**当前**布局代际上强制启用专用移动布局（`mobile-layout-next.js`）。 |
 | `stock` | 永不替换，永远用 DSH 原生布局。 |
 
-判定逻辑就是 `dedicatedLayoutTarget`（`src/gateway.ts:697-708`）：布局模块的依赖里带了 `@deepseek-ai/dsh-client-shortcuts` 就说明是新一代（`LAYOUT_GENERATION_MARKER`，`src/gateway.ts:238`），此时 `auto` **不**替换、`mobile` 才替换。
+判定逻辑就是 `dedicatedLayoutTarget`（`src/mobile-frontend.ts:697-708`）：布局模块的依赖里带了 `@deepseek-ai/dsh-client-shortcuts` 就说明是新一代（`LAYOUT_GENERATION_MARKER`，`src/mobile-frontend.ts:238`），此时 `auto` **不**替换、`mobile` 才替换。
 
 **配置位置**：profile 的 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 里 `mobile-access` 条目的 `config:` 下（结构与仓库根的 `cordis.patch.yml` 相同）：
 
@@ -626,3 +627,19 @@ config:
 ```
 
 **判定**：在手机浏览器 Network 里看是否加载了 `/mobile-access/mobile-layout.js`（旧代际）或 `/mobile-access/mobile-layout-next.js`（`mobile` 模式）。这两个请求都不出现，就是走 DSH 原生布局。
+
+## 19. 诊断页与 DSH 版本兼容性
+
+**诊断覆盖范围（0.4.0）**：`GET /api/mobile-access/diagnostics`（面板「诊断」区域调用的就是它）只检查远程通道、Tailscale 提供方与 DSH 版本兼容性，并生成**不含凭据与完整地址**的脱敏报告。它不再检查局域网网卡、防火墙或 `:3443` 监听——那些检查已随局域网通道移除。
+
+**判定命令**（在电脑本机跑）：
+
+```bash
+curl -s -H "Host: 127.0.0.1" http://127.0.0.1:<web-port>/api/mobile-access/diagnostics
+```
+
+重点看三项：DSH Host 版本是否在插件的已验证集合内、`tailscale` 提供方是否可用、远程地址探测（`GET /mobile-access/health`，期望 `{"ok":true}`）是否通过。
+
+**版本兼容性**：插件启动时把当前 DSH Host 版本与 README 里的已验证集合比对；**未经验证的版本只记录一条 `DSH_MOBILE_UNVERIFIED_DSH_VERSION` 告警并继续启动，绝不中断宿主**（见 [3](#3-unsupported-deepseek-harness-version)）。但较新的 DSH 会在加载前按插件的 `peerDependencies` 校验运行时版本，不覆盖就直接拒绝激活整个插件（日志形如 `Plugin … is incompatible with dsh …`，并提示 `Exact-version exemption`）；这种情况下插件整条不在树里，需要升级插件或在插件管理器里为该精确版本组合授权豁免。
+
+**处置**：诊断报远程不可达时先按 [4](#4-远程通道显示-ready-但不可达) 排查；报版本不兼容时先升级 dsh-mobile-tailscale。

@@ -1,9 +1,5 @@
-import { execFile as execFileCallback } from 'node:child_process'
 import { lookup } from 'node:dns/promises'
-import { promisify } from 'node:util'
-import { DSH_MOBILE_VERSION, MINIMUM_ANDROID_APP_VERSION } from './version.js'
-
-const execFile = promisify(execFileCallback)
+import { DSH_MOBILE_VERSION } from './version.js'
 
 export type DiagnosticStatus = 'ok' | 'warning' | 'error' | 'info'
 
@@ -19,14 +15,6 @@ export interface DiagnosticCheck {
 /** Runtime facts available without exposing credentials or local file paths. */
 export interface DiagnosticSnapshot {
   readonly dshVersion: string
-  readonly lan: {
-    readonly running: boolean
-    readonly origin?: string
-    readonly configuredInterface?: string
-    readonly interfaceName?: string
-    readonly networkError?: string
-    readonly port?: number
-  }
   readonly remote: {
     readonly provider: 'tailscale'
     readonly running: boolean
@@ -34,10 +22,6 @@ export interface DiagnosticSnapshot {
     readonly origin?: string
     readonly errorCode?: string
   }
-}
-
-interface FirewallObservation {
-  readonly state: 'ready' | 'missing' | 'unknown' | 'not-applicable'
 }
 
 interface RemoteObservation {
@@ -48,7 +32,6 @@ interface RemoteObservation {
 
 /** Injectable probes keep diagnostics deterministic in tests. */
 export interface DiagnosticProbes {
-  readonly firewall?: (port: number | undefined) => Promise<FirewallObservation>
   readonly remote?: (origin: string | undefined) => Promise<RemoteObservation>
 }
 
@@ -60,7 +43,6 @@ export interface ConnectionDiagnostics {
   readonly versions: {
     readonly plugin: string
     readonly dsh: string
-    readonly minimumAndroidApp: string
   }
   readonly summary: string
   readonly checks: readonly DiagnosticCheck[]
@@ -72,10 +54,8 @@ const REMOTE_ERROR_GUIDANCE: Readonly<Record<string, string>> = Object.freeze({
   tailscale_not_logged_in: 'Confirm Tailscale is logged in and on the same tailnet, then reconnect.',
   tailscale_missing: 'Install Tailscale and retry.',
   tailscale_not_running: 'Connect Tailscale (its backend is stopped), then reconnect.',
-  funnel_unavailable: 'Confirm Funnel is enabled in the Tailscale admin console, then retry.',
   permission_denied: 'Run DSH as administrator and retry.',
   serve_failed: 'Check the network, then click Reconnect.',
-  gateway_start_failed: 'Confirm DSH is running, then reconnect.',
 })
 
 function check(
@@ -86,18 +66,6 @@ function check(
   action?: string,
 ): DiagnosticCheck {
   return Object.freeze({ id, status, label, detail, ...(action === undefined ? {} : { action }) })
-}
-
-function maskLanOrigin(origin: string | undefined): string {
-  if (origin === undefined) return '未分配'
-  try {
-    const url = new URL(origin)
-    const octets = url.hostname.split('.')
-    const host = octets.length === 4 ? `${octets[0]}.${octets[1]}.${octets[2]}.x` : '局域网地址'
-    return `${url.protocol}//${host}${url.port === '' ? '' : `:${url.port}`}`
-  } catch {
-    return '地址格式无效'
-  }
 }
 
 function remoteSuffix(origin: string | undefined): string {
@@ -111,37 +79,7 @@ function remoteSuffix(origin: string | undefined): string {
   }
 }
 
-function defaultFirewallProbe(platform: NodeJS.Platform = process.platform): (port: number | undefined) => Promise<FirewallObservation> {
-  return async (port) => {
-    if (platform !== 'win32') return { state: 'not-applicable' }
-    if (port === undefined) return { state: 'unknown' }
-    const script = [
-      "$specs = @(@{ Name = 'DSH Mobile HTTPS'; Protocol = 'TCP' }, @{ Name = 'DSH Mobile Discovery'; Protocol = 'UDP' })",
-      '$ready = $true',
-      '$specs | ForEach-Object {',
-      '  $spec = $_',
-      "  $rule = Get-NetFirewallRule -DisplayName $spec.Name -ErrorAction SilentlyContinue | Where-Object { $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' } | Select-Object -First 1",
-      '  if ($null -eq $rule) { $ready = $false; return }',
-      '  $filters = @($rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue)',
-      `  $matching = @($filters | Where-Object { $_.Protocol -eq $spec.Protocol -and ($_.LocalPort -eq 'Any' -or $_.LocalPort -eq '${String(port)}') })`,
-      '  if ($matching.Count -eq 0) { $ready = $false }',
-      '}',
-      "if ($ready) { 'ready' } else { 'missing' }",
-    ].join('; ')
-    try {
-      const result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
-        encoding: 'utf8',
-        timeout: 3_000,
-        windowsHide: true,
-      })
-      return { state: result.stdout.trim() === 'ready' ? 'ready' : 'missing' }
-    } catch {
-      return { state: 'unknown' }
-    }
-  }
-}
-
-/** Allow remote relays enough time to answer without making diagnostics unbounded. */
+/** Allow the tailnet relay enough time to answer without making diagnostics unbounded. */
 export function remoteDiagnosticTimeoutMs(origin: string): number {
   const hostname = new URL(origin).hostname.toLowerCase()
   if (hostname.endsWith('.ts.net')) return 10_000
@@ -189,10 +127,7 @@ export async function collectConnectionDiagnostics(
   const remoteProbe = snapshot.remote.running && snapshot.remote.state === 'ready' && snapshot.remote.origin !== undefined
     ? (probes.remote ?? defaultRemoteProbe)(snapshot.remote.origin)
     : Promise.resolve<RemoteObservation>({ state: 'not-applicable' })
-  const [firewall, remoteObservation] = await Promise.all([
-    (probes.firewall ?? defaultFirewallProbe())(snapshot.lan.port),
-    remoteProbe,
-  ])
+  const remoteObservation = await remoteProbe
   checks.push(check(
     'versions',
     'ok',
@@ -200,66 +135,39 @@ export async function collectConnectionDiagnostics(
     `插件 ${DSH_MOBILE_VERSION}，DSH ${snapshot.dshVersion}。`,
   ))
 
-  if (snapshot.lan.networkError !== undefined) {
-    checks.push(check('network', 'error', '局域网网卡', '已保存的网卡当前不可用。', '重新运行 dsh-mobile setup。'))
-  } else if (snapshot.lan.configuredInterface !== undefined) {
-    checks.push(check(
-      'network',
-      'ok',
-      '局域网网卡',
-      `正在跟随 ${snapshot.lan.interfaceName ?? snapshot.lan.configuredInterface}。`,
-    ))
-  } else {
-    checks.push(check('network', 'info', '局域网网卡', '当前使用固定网络配置。'))
-  }
-
-  if (snapshot.lan.running && snapshot.lan.origin !== undefined) {
-    checks.push(check('lan', 'ok', '局域网网关', `已监听 ${maskLanOrigin(snapshot.lan.origin)}；未配对的设备需要先在「移动访问 → 局域网」生成配对链接。`))
-  } else {
-    checks.push(check('lan', 'info', '局域网网关', '当前未开启。', '需要手机直连时开启局域网访问。'))
-  }
-
-  if (firewall.state === 'ready') {
-    checks.push(check('firewall', 'ok', 'Windows 防火墙', '局域网 TCP 与发现规则已启用。'))
-  } else if (firewall.state === 'missing') {
-    checks.push(check('firewall', 'warning', 'Windows 防火墙', '未找到完整的局域网放行规则。', '以管理员身份重新运行 dsh-mobile setup。'))
-  } else if (firewall.state === 'unknown') {
-    checks.push(check('firewall', 'info', 'Windows 防火墙', '系统未允许插件读取防火墙状态。', '若手机找不到电脑，以管理员身份重新运行 setup。'))
-  }
-
   if (!snapshot.remote.running || snapshot.remote.state === 'off') {
-    checks.push(check('remote', 'info', '远程通道', '当前未启用。'))
+    checks.push(check('remote', 'info', '远程访问', '当前未启用。', '打开远程访问开关即可生成手机可用的地址。'))
   } else if (snapshot.remote.state === 'ready' && snapshot.remote.origin !== undefined) {
     if (remoteObservation.state === 'ready') {
-      checks.push(check('remote', 'ok', '远程通道', `${snapshot.remote.provider} 公共地址 ${remoteSuffix(snapshot.remote.origin)} 可达，往返约 ${String(remoteObservation.latencyMs ?? 0)} ms。`))
+      checks.push(check('remote', 'ok', '远程访问', `${snapshot.remote.provider} 公共地址 ${remoteSuffix(snapshot.remote.origin)} 可达，往返约 ${String(remoteObservation.latencyMs ?? 0)} ms。`))
     } else if (remoteObservation.state === 'rate-limited') {
-      checks.push(check('remote', 'warning', '远程通道', '公共地址可达，但本次检查观察到服务限流。', '稍后重试；旧会话会按需加载以减少流量。'))
+      checks.push(check('remote', 'warning', '远程访问', '公共地址可达，但本次检查观察到服务限流。', '稍后重试；旧会话会按需加载以减少流量。'))
     } else if (snapshot.remote.provider === 'tailscale' && remoteObservation.fakeIp === true) {
       checks.push(check(
         'remote',
         'error',
-        '远程通道',
+        '远程访问',
         'Tailscale 地址被当前 VPN 或 DNS 代理接管，但 TLS 链路未建立。',
         'Switch VPN node or proxy mode, then retry.',
       ))
     } else {
-      checks.push(check('remote', 'error', '远程通道', '提供方显示已就绪，但公共地址暂不可达。', '点击“重新连接”；仍失败时检查提供方状态。'))
+      checks.push(check('remote', 'error', '远程访问', '提供方显示已就绪，但公共地址暂不可达。', '点击“重新连接”；仍失败时检查 Tailscale 状态。'))
     }
   } else if (snapshot.remote.state === 'starting' || snapshot.remote.state === 'connecting' || snapshot.remote.state === 'needs-login') {
     checks.push(check(
       'remote',
       'warning',
-      '远程通道',
+      '远程访问',
       snapshot.remote.state === 'needs-login' ? '等待完成 Tailscale 登录。' : '仍在建立连接。',
-      snapshot.remote.state === 'needs-login' ? '返回远程页继续登录。' : '等待片刻后重新检查。',
+      snapshot.remote.state === 'needs-login' ? '在电脑上完成 Tailscale 登录后重新检查。' : '等待片刻后重新检查。',
     ))
   } else {
     checks.push(check(
       'remote',
       'error',
-      '远程通道',
+      '远程访问',
       `连接未建立（${snapshot.remote.errorCode ?? snapshot.remote.state}）。`,
-      REMOTE_ERROR_GUIDANCE[snapshot.remote.errorCode ?? ''] ?? '返回远程页点击“重新连接”。',
+      REMOTE_ERROR_GUIDANCE[snapshot.remote.errorCode ?? ''] ?? '返回远程访问页点击“重新连接”。',
     ))
   }
 
@@ -267,8 +175,8 @@ export async function collectConnectionDiagnostics(
     'phone-network',
     'info',
     '手机网络',
-    '电脑无法判断路由器是否隔离了手机。',
-    '局域网仍失败时，确认手机与电脑在同一网络，并关闭访客网络或 AP 隔离。',
+    '公共地址只有加入了同一 tailnet 的设备能打开。',
+    '在手机上安装并登录 Tailscale；未加入 tailnet 的设备无法访问。',
   ))
 
   const overall = checks.some(entry => entry.status === 'error')
@@ -278,8 +186,7 @@ export async function collectConnectionDiagnostics(
   const report = [
     'DSH Mobile 诊断报告',
     `生成时间: ${new Date().toISOString()}`,
-    `版本: plugin=${DSH_MOBILE_VERSION}; dsh=${snapshot.dshVersion}; min-app=${MINIMUM_ANDROID_APP_VERSION}`,
-    `LAN: ${snapshot.lan.running ? 'on' : 'off'}; endpoint=${maskLanOrigin(snapshot.lan.origin)}`,
+    `版本: plugin=${DSH_MOBILE_VERSION}; dsh=${snapshot.dshVersion}`,
     `Remote: provider=${snapshot.remote.provider}; state=${snapshot.remote.state}; endpoint=${remoteSuffix(snapshot.remote.origin)}`,
     ...checks.map(reportLine),
   ].join('\n')
@@ -287,7 +194,7 @@ export async function collectConnectionDiagnostics(
     version: 1,
     generatedAt: Date.now(),
     overall,
-    versions: Object.freeze({ plugin: DSH_MOBILE_VERSION, dsh: snapshot.dshVersion, minimumAndroidApp: MINIMUM_ANDROID_APP_VERSION }),
+    versions: Object.freeze({ plugin: DSH_MOBILE_VERSION, dsh: snapshot.dshVersion }),
     summary,
     checks: Object.freeze(checks),
     report,
