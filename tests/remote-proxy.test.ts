@@ -399,6 +399,23 @@ describe('RemotePassthroughProxy', () => {
     expect(unversioned.headers.get('cache-control')).toBeNull()
   })
 
+  it('answers the health probe upstream does not serve', async () => {
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(404, { 'content-type': 'application/json' })
+      response.end('{"error":"not_found"}')
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const health = await fetch(`${proxy.origin()}/mobile-access/health`)
+    expect(health.status).toBe(200)
+    expect(await health.json()).toEqual({ ok: true })
+    expect(health.headers.get('cache-control')).toBe('no-store')
+    const posted = await fetch(`${proxy.origin()}/mobile-access/health`, { method: 'POST', body: '{}' })
+    expect(posted.status).toBe(405)
+  })
+
   it('trims the history page a tailnet client asks for', async () => {
     const upstream = await startUpstream((_record, response) => {
       response.writeHead(200, { 'content-type': 'application/json' })

@@ -1059,7 +1059,7 @@ describe('HTTP gateway', () => {
     expect(landing.headers.location).toBe('/mobile-access/login?return=%2Fworkspace%2Fcurrent')
     const login = await request(instance.address().port, landing.headers.location!, { headers: base })
     expect(login.status).toBe(200)
-    expect(login.body).toContain('pair it again')
+    expect(login.body).toContain('生成配对链接')
     const loginScript = await request(instance.address().port, '/mobile-access/login.js', { headers: base })
     expect(loginScript.status).toBe(200)
     expect(() => new Function(loginScript.body)).not.toThrow()

@@ -8,7 +8,7 @@ Security fixes target the newest stable release. Prereleases receive fixes only 
 
 ## Reporting a vulnerability
 
-Do not open a public issue for a suspected vulnerability. Use GitHub's private vulnerability-reporting form for `saya-ch/dsh-mobile`. Include the affected version, deployment topology, reproduction steps, and whether a device credential, session Cookie, or local access is required.
+Do not open a public issue for a suspected vulnerability. Use GitHub's private vulnerability-reporting form for `qiushenjie/dsh-mobile-tailscale`. Include the affected version, deployment topology, reproduction steps, and whether a device credential, session Cookie, or local access is required.
 
 The maintainer will acknowledge a complete report within seven days. Publication timing is coordinated with the reporter after a fix and a revocation or upgrade path are available.
 
@@ -21,10 +21,9 @@ The maintainer will acknowledge a complete report within seven days. Publication
 - Browser clients require a certificate trusted by that browser platform. Android uses the pairing-key-bound app-private CA. Its WebView exception is restricted to `SSL_UNTRUSTED` for an exact-origin, currently valid leaf signed by that CA; hostname, validity, signature, and every other TLS error remain fail-closed.
 - Keep pairing closed except during a short local onboarding action.
 - Revoke a lost device immediately and rotate the device registry if credential theft is suspected.
-- Do not expose the LAN gateway through router port forwarding. Optional remote access uses a separate loopback gateway behind the selected Tailscale Funnel or cpolar service. The provider terminates public TLS, while DSH pairing, device authentication, CSRF checks, and session revocation remain enforced by the plugin gateway.
-- The Funnel node stores its Tailscale login state under `$DSH_HOME/mobile-access/remote/tailscale/`. The plugin does not request or store a Tailscale password, Auth Key, or OAuth secret.
-- cpolar is downloaded only after confirmation from a pinned official artifact whose size and SHA-256 are verified. Its Authtoken is stored in a private, self-update-disabled configuration under `$DSH_HOME/mobile-access/`, never returned by the admin API or written to logs. Cleanup removes the managed executable, configuration, logs, and independent remote device registry.
-- Disabling remote access stops the selected provider process without affecting LAN access. Resetting remote access also removes provider state and the independent remote device registry.
+- Do not expose the LAN gateway through router port forwarding. Optional remote access uses a separate loopback passthrough proxy registered with Tailscale Serve. The trust boundary is the tailnet: Serve is reachable only by devices on the same tailnet and is never public, so the remote channel is pairing-free, while the LAN gateway keeps enforcing pairing, device authentication, CSRF checks, and session revocation.
+- Tailscale Serve keeps no plugin-owned login state: the plugin never requests or stores a Tailscale password, Auth Key, or OAuth secret. The 443 registration is cleared only while it still points at this instance's own loopback proxy, so a Desktop restart does not drop another process's registration.
+- Disabling remote access clears the Tailscale Serve 443 registration and stops the loopback proxy without affecting LAN access. Resetting remote access leaves no plugin-owned remote state behind.
 - Treat every paired device as a fully trusted operator. Stock DSH methods reached through the authenticated loopback proxy may read configuration or run tools with the desktop user's authority.
 - Treat `mobile.js` as application code with the paired page's same-origin authority. Restrict write access to trusted host-side DSH sessions and review generated API calls or browser-permission use.
 - Treat every extension `host.mjs` as a local program with the desktop user's Node.js privileges. It is never sandboxed and is not editable through the mobile gateway; only place code there that you trust.

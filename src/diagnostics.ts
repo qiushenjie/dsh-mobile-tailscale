@@ -214,7 +214,7 @@ export async function collectConnectionDiagnostics(
   }
 
   if (snapshot.lan.running && snapshot.lan.origin !== undefined) {
-    checks.push(check('lan', 'ok', '局域网网关', `已监听 ${maskLanOrigin(snapshot.lan.origin)}，配对入口可用。`))
+    checks.push(check('lan', 'ok', '局域网网关', `已监听 ${maskLanOrigin(snapshot.lan.origin)}；未配对的设备需要先在「移动访问 → 局域网」生成配对链接。`))
   } else {
     checks.push(check('lan', 'info', '局域网网关', '当前未开启。', '需要手机直连时开启局域网访问。'))
   }

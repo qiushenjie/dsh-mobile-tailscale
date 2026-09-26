@@ -1,5 +1,8 @@
 # Third-party notices
 
-DSH Mobile includes a small Windows helper built from the source in `native/funnel-host`. The helper uses [Tailscale tsnet](https://pkg.go.dev/tailscale.com/tsnet) `v1.102.3`, distributed under the BSD 3-Clause license. Its exact transitive Go module versions are recorded in `native/funnel-host/go.mod` and `native/funnel-host/go.sum`; each dependency remains subject to its own license.
+DSH Mobile depends on the following runtime packages, each distributed under the MIT license. Their copyright notices and license texts ship with the published package and remain subject to their own terms.
 
-The optional cpolar component is not included in the npm package or Android App. When a user explicitly chooses cpolar installation, DSH Mobile downloads the pinned official archive shown in the UI, verifies its size and SHA-256 digest, and stores it only under the user's DSH Mobile data directory. cpolar remains subject to its [terms of service](https://www.cpolar.com/tos).
+- [`@deepseek-ai/schemastery`](https://www.npmjs.com/package/@deepseek-ai/schemastery) — configuration schema validation.
+- [`bonjour-service`](https://www.npmjs.com/package/bonjour-service) — DNS-SD/mDNS advertisement and discovery for the LAN channel.
+- [`qrcode`](https://www.npmjs.com/package/qrcode) — QR code rendering for pairing.
+- [`selfsigned`](https://www.npmjs.com/package/selfsigned) — managed self-signed CA and server certificate generation for the LAN HTTPS gateway.

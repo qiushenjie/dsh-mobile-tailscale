@@ -26,6 +26,7 @@ import {
 import { connect, type Socket } from 'node:net'
 import { readFile } from 'node:fs/promises'
 import {
+  AUTH_PREFIX,
   HttpError,
   LOCAL_ADMIN_PREFIX,
   parseRequestTarget,
@@ -240,6 +241,22 @@ export class RemotePassthroughProxy {
     const method = request.method ?? 'GET'
     if (!['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
       throw new HttpError(405, 'method_not_allowed')
+    }
+    // The plugin's own connection diagnostics probe this path, and upstream
+    // only knows the routes it serves itself, so the proxy answers it exactly
+    // the way the LAN gateway does. It stays unauthenticated for the same
+    // reason: the probe is what a phone asks before it has any credential.
+    if (target.search === '' && target.decodedPathname === `${AUTH_PREFIX}/health`) {
+      if (method !== 'GET' && method !== 'HEAD') throw new HttpError(405, 'method_not_allowed')
+      const health = Buffer.from(JSON.stringify({ ok: true }))
+      response.writeHead(200, {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Length': health.byteLength,
+        'Cache-Control': 'no-store',
+      })
+      if (method === 'HEAD') response.end()
+      else response.end(health)
+      return
     }
     // A rewritten document asks for the pruned boot graph here rather than from
     // upstream, which only answers the exact combinations it built itself.

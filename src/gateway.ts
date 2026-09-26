@@ -1019,7 +1019,7 @@ const LOGIN_PAGE = `<!doctype html>
   <h1>Reconnect this device</h1>
   <p id="login-progress">Restoring the secure Session…</p>
   <section id="login-failed" hidden>
-    <p>This device is no longer paired. Open pairing on the computer, then pair it again.</p>
+    <p>This device is not paired with the computer. On the computer, open the 移动访问 panel, switch to 局域网, press 生成配对链接, and open the copied link on this device.</p>
     <a href="/mobile-access/pair">Open pairing</a>
   </section>
 </main>

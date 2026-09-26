@@ -2,7 +2,7 @@
 
 ## Direction
 
-White background, restrained navy and cyan accents, compact developer-tool density, and a lively whale-girl character. The character may be expressive; the product UI remains calm and functional. Do not use gradients, glow, particles, glass effects, animated ambient backgrounds, or emoji icons.
+Restrained navy and cyan accents on the host theme's surfaces, compact developer-tool density, and a lively whale-girl character. The character may be expressive; the product UI remains calm and functional. Do not use gradients, glow, particles, glass effects, animated ambient backgrounds, or emoji icons.
 
 ## Color
 
@@ -17,7 +17,7 @@ White background, restrained navy and cyan accents, compact developer-tool densi
 | Border | `#BFDBFE` |
 | Danger | `#DC2626` |
 
-Maintain at least 4.5:1 text contrast. Dark mode follows DSH's own theme; plugin surfaces must not force a global theme.
+Maintain at least 4.5:1 text contrast. The implementation reads DSH's `--dsw-alias-*` theme variables, so plugin UI follows the host theme in light and dark mode and must not force a global theme; `#FFFFFF` is only the light-theme fallback, never a hard-coded background.
 
 ## Typography
 
@@ -25,8 +25,10 @@ In product UI, inherit DSH's system font stack. README artwork contains no gener
 
 ## Shape and depth
 
-- Card radius: 16px.
+- Panel and provider-card radius: 13px.
 - Button radius: 12px.
+- Input and secondary-control radius: 10px.
+- Compact badges may use 8–9px. The former 16px card radius is legacy and survives only in isolated spots.
 - Touch target: at least 44px; prefer 48px for primary mobile actions.
 - Use a one-pixel blue-gray border and one restrained shadow at most.
 - Never shift layout on hover or press.
@@ -50,7 +52,7 @@ Use only short 150-200ms state transitions. Respect `prefers-reduced-motion`; no
 
 ## Delivery checklist
 
-- [ ] White background and restrained accents.
+- [ ] Host-theme surfaces and restrained accents.
 - [ ] No emoji icons, gradients, glow, particles, or glass effects.
 - [ ] Visible keyboard focus.
 - [ ] 44px minimum touch targets.
