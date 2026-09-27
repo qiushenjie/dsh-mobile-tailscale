@@ -1,5 +1,6 @@
 import { createElement } from 'react'
 import { installNativeMobileSurface, NATIVE_MOBILE_STYLES } from './native-mobile.js'
+import { installPhoneWatchdog } from './phone-watchdog.js'
 
 interface ClientContext {
   effect(effect: () => void | (() => void), label?: string): void
@@ -852,7 +853,8 @@ export function apply(ctx: ClientContext): void {
     if (!desktopSurface) {
       const removeCustom = installCustomAssets()
       const removeSurface = installNativeMobileSurface()
-      return () => { removeCustom(); removeSurface(); style.remove() }
+      const removeWatchdog = installPhoneWatchdog()
+      return () => { removeCustom(); removeSurface(); removeWatchdog(); style.remove() }
     }
     const control = installControl()
     const disposeSlot = ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register<{ wide: boolean }>({ name: 'sidebar.footer.action', id: 'dsh-mobile' }, ({ wide }) => createElement('button', {

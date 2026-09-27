@@ -1,6 +1,12 @@
 # Changelog
 
-Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
+Notable changes to `dsh-mobile-tailscale` are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
+
+## 0.4.6
+
+- **The space-bar repair now decides from the wire instead of from the page, and reports back what it saw.** 0.4.5 re-dispatched a space when no `input` event and no mux frame followed it, but the terminal *is* xterm.js, which discards the `input` event after a `keydown` it already handled — so the guard could read "nothing happened" for a space that had in fact been sent, and a leftover space in the helper textarea's value suppressed the repair outright. The phone bootstrap now watches only outbound traffic (`WebSocket.send`, `fetch`, `XMLHttpRequest.send`) in a 60 ms window, triggers on a trusted space `keydown` inside `.xterm` *or* on a `beforeinput`/`input` carrying a space, de-duplicates for 300 ms, and posts a JSON report of what it saw to `POST /mobile-access/key-probe`, which the host logs as `[dsh-mobile-tailscale] phone key probe …`.
+- **A phone left on「载入历史」now recovers by itself and can show what it was waiting for.** The chat view only leaves that hint when the follow request is answered, so a connection that dies mid-handshake leaves it up forever — the request is neither answered nor rejected. The phone page (client bundle, so a refresh is enough) now records mux frames, socket state and in-flight requests while that hint is on screen: after 15 s it shows a compact sheet with those numbers, after 22 s it closes the mux socket so the gateway client's own reconnect path runs, and after 45 s it reloads the page once (guarded to one reload per three minutes). The sheet is what makes the next report actionable instead of a guess.
+- **The documentation now describes this plugin instead of its fork.** `README.md` and `README.en.md` were rewritten around what this plugin actually does (Tailscale Serve as the only channel), the panel and command surface were re-checked against the code, the `package.json` description and keywords lost the local-network/Android/cpolar era wording, `TROUBLESHOOTING.md` no longer opens with the local-network post-mortem, and the unused screenshot gallery was dropped.
 
 ## 0.4.5
 

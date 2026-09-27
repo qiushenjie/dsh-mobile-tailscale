@@ -268,7 +268,27 @@ const MOBILE_SESSION_WINDOW_BOOTSTRAP = `(()=>{const send=WebSocket.prototype.se
  * A space that already works sends its frame during the original keydown, so
  * the repair stays out of the way on desktop, Android, and every normal path.
  */
-const MOBILE_TERMINAL_SPACE_BOOTSTRAP = `(()=>{const SPACE=32;let traffic=0,inputs=0;const send=WebSocket.prototype.send;WebSocket.prototype.send=function(data){traffic+=1;return send.call(this,data)};const startFetch=window.fetch;if(typeof startFetch==="function")window.fetch=function(){traffic+=1;return startFetch.apply(this,arguments)};document.addEventListener("input",()=>{inputs+=1},true);document.addEventListener("keydown",(event)=>{if(event.isTrusted!==true)return;const target=event.target;if(!target||typeof target.closest!=="function")return;if(event.key!==" "&&event.keyCode!==SPACE)return;if(!target.closest(".xterm"))return;if(!document.documentElement.classList.contains("dsh-native-mobile-active"))return;const seenTraffic=traffic,seenInputs=inputs;window.setTimeout(()=>{if(inputs!==seenInputs||traffic!==seenTraffic)return;if(!target.isConnected)return;if(typeof target.value==="string"&&target.value.indexOf(" ")>=0)return;const init={key:" ",code:"Space",keyCode:SPACE,which:SPACE,charCode:0,bubbles:true,cancelable:true,composed:true};target.dispatchEvent(new KeyboardEvent("keydown",init));target.dispatchEvent(new KeyboardEvent("keypress",{key:" ",code:"Space",keyCode:SPACE,which:SPACE,charCode:SPACE,bubbles:true,cancelable:true,composed:true}))},50)},true)})();`
+const MOBILE_TERMINAL_SPACE_BOOTSTRAP = `(()=>{const SPACE=32,PROBE="/mobile-access/key-probe";let traffic=0;
+const send=WebSocket.prototype.send;WebSocket.prototype.send=function(data){traffic+=1;return send.call(this,data)};
+const startFetch=window.fetch;if(typeof startFetch==="function")window.fetch=function(){traffic+=1;return startFetch.apply(this,arguments)};
+try{const xhrSend=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(){traffic+=1;return xhrSend.apply(this,arguments)}}catch(error){}
+const report=(detail)=>{if(typeof startFetch!=="function")return;try{startFetch.call(window,PROBE,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify(detail)}).catch(()=>{})}catch(error){}};
+const textOf=(node)=>{try{return typeof node.value==="string"?node.value.slice(0,40):""}catch(error){return""}};
+let pendingUntil=0;
+const inspect=(target,detail)=>{const at=traffic;window.setTimeout(()=>{const afterOriginal=traffic;let dispatched=false;
+if(traffic===at){const init={key:" ",code:"Space",keyCode:SPACE,which:SPACE,charCode:0,bubbles:true,cancelable:true,composed:true};
+target.dispatchEvent(new KeyboardEvent("keydown",init));
+target.dispatchEvent(new KeyboardEvent("keypress",{key:" ",code:"Space",keyCode:SPACE,which:SPACE,charCode:SPACE,bubbles:true,cancelable:true,composed:true}));dispatched=true}
+window.setTimeout(()=>report(Object.assign({},detail,{trafficAt:at,afterOriginal:afterOriginal,afterRepair:traffic,dispatched:dispatched,value:textOf(target)})),150)},60)};
+const usable=(event)=>{if(event.isTrusted!==true)return undefined;const target=event.target;if(!target||typeof target.closest!=="function")return undefined;
+if(!target.closest(".xterm"))return undefined;if(!document.documentElement.classList.contains("dsh-native-mobile-active"))return undefined;return target};
+const schedule=(target,detail)=>{const now=Date.now();if(now<pendingUntil)return;pendingUntil=now+300;inspect(target,detail)};
+document.addEventListener("keydown",(event)=>{const target=usable(event);if(!target)return;
+if(event.key!==" "&&event.code!=="Space"&&event.keyCode!==SPACE)return;
+schedule(target,{from:"keydown",key:event.key,code:event.code,keyCode:event.keyCode,which:event.which})},true);
+const onText=(event)=>{const target=usable(event);if(!target)return;const data=typeof event.data==="string"?event.data:"";if(data.indexOf(" ")<0)return;
+schedule(target,{from:event.type,inputType:event.inputType,data:data,isComposing:event.isComposing===true})};
+document.addEventListener("beforeinput",onText,true);document.addEventListener("input",onText,true)})();`
 
 
 interface BootGraphEntry {

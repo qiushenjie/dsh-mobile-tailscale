@@ -4,7 +4,7 @@
 
 <h1 align="center">dsh-mobile-tailscale</h1>
 
-<p align="center">在手机上安全、实时地使用电脑中的 DeepSeek Harness。</p>
+<p align="center">用手机浏览器，安全地使用电脑里的 DeepSeek Harness。</p>
 
 <p align="center">
   <a href="https://github.com/qiushenjie/dsh-mobile-tailscale"><img src="https://img.shields.io/badge/github-qiushenjie%2Fdsh--mobile--tailscale-181717?logo=github" alt="GitHub"></a>
@@ -12,8 +12,9 @@
 </p>
 
 <p align="center">
-  <a href="#快速开始">快速开始</a> ·
+  <a href="#安装">安装</a> ·
   <a href="#使用">使用</a> ·
+  <a href="#手机端做了什么">手机端做了什么</a> ·
   <a href="#自定义">自定义</a> ·
   <a href="#配置">配置</a> ·
   <a href="#排障">排障</a> ·
@@ -21,53 +22,58 @@
   <a href="README.en.md">English</a>
 </p>
 
-> 本插件是 [dsh-mobile](https://github.com/saya-ch/dsh-mobile) 的 fork，把 DeepSeek Harness 的手机端接到 **Tailscale Serve** 上：手机浏览器打开电脑节点的 MagicDNS 地址就能用，不装客户端、不改 DSH 源码。
->
-> 访问控制就是 tailnet 成员身份——只有登录同一 tailnet 的设备能看到 `https://<node>.<tailnet>.ts.net`，证书由 Let's Encrypt 签发，因此没有配对、没有登录页、也没有证书警告。
->
-> **0.4.0 起局域网通道已整体移除**：`:3443` 监听、配对链接与二维码、自签名 CA、`dsh-mobile setup` 都不再存在。原因见 [0.4.0 更新记录](CHANGELOG.md#040)。
+## 这是什么
 
-## 快速开始
+一个 DSH 插件。它把电脑上运行的 DSH Web 端，通过 **Tailscale Serve** 用 HTTPS 交给同一 tailnet 里的手机：
 
-插件包名是 `dsh-mobile-tailscale`，可执行命令是 `dsh-mobile`。**没有初始化子命令**：装好后在面板里点开关即可。
-
-**从本地源码安装**（本包尚未发布到 npm）
-
-```bash
-git clone https://github.com/qiushenjie/dsh-mobile-tailscale.git && cd dsh-mobile-tailscale
-npm run build && npm pack                      # 需要 Node ^22.19.0 || >=24.0.0
-dsh plugin --profile web add "$PWD/$(ls -1 dsh-mobile-tailscale-*.tgz | sort -V | tail -1)"
-dsh --profile web
-```
-
-**发布到 npm 之后**可以换成：
-
-```bash
-dsh plugin --profile web add dsh-mobile-tailscale@latest
-```
-
-macOS 的 DSH Desktop 不会把 `dsh` 加进 PATH，改用内置 CLI：`node "/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js" plugin --profile web add …`（路径里的版本号随 Desktop 升级变化）。
-
-> - **覆盖安装同一版本不会生效**（pnpm 输出 `added 0`）：先 `rm -rf $DSH_HOME/profiles/<profile>/node_modules/dsh-mobile-tailscale` 再 `add`。
-> - **主机端代码不热替换**：改完插件要完全退出并重新打开 DSH Desktop；客户端资源刷新页面即可。
-> - 在 DSH 源码仓库里操作时，把 `dsh` 换成 `pnpm dsh`。
-
-## 使用
-
-1. 电脑和手机都安装 [Tailscale](https://tailscale.com/download)，登录**同一个 tailnet**，手机上保持运行。
-2. 在 DSH 左下角打开 **移动访问** 面板，点 **启用远程访问**。
-3. 面板显示 `https://<node>.<tailnet>.ts.net` 之后，在手机浏览器打开它——无需配对、无需登录。
-4. 不用时点 **关闭远程访问**。
-
-面板只有四样东西：远程地址（可复制）、开关、一行状态、**诊断**（跑一次脱敏自检）。远程开关/重连/重置只接受电脑本机调用，接口清单见 [排障手册 §15](TROUBLESHOOTING.md#15-桌面面板与管理接口)。
+- 手机浏览器打开 `https://<电脑节点>.<tailnet>.ts.net` 即可使用——不用装 App、不用扫码、不用登录页。
+- 访问控制就是 tailnet 成员身份，证书由 Let's Encrypt 签发，因此没有证书警告。
+- 不修改 DSH 源码：宿主侧只加一条回环直通代理，客户端侧只注入手机端的交互与布局修复。
 
 ```mermaid
 flowchart LR
   Phone["手机浏览器"] -->|"tailnet HTTPS"| Serve["Tailscale Serve"]
   Serve --> Proxy["回环直通代理"]
   Proxy --> DSH["原生 DSH Web 与 Host（本机回环）"]
-  DSH -->|"同一工作区、会话和事件流"| Phone
+  DSH -->|"同一工作区、会话与事件流"| Phone
 ```
+
+## 安装
+
+需要 Node `^22.19.0 || >=24.0.0`，手机与电脑安装 [Tailscale](https://tailscale.com/download) 并登录同一 tailnet。本包尚未发布到 npm，从源码安装：
+
+```bash
+git clone https://github.com/qiushenjie/dsh-mobile-tailscale.git && cd dsh-mobile-tailscale
+npm ci && npm run build && npm pack
+dsh plugin --profile web add "$PWD/$(ls -1 dsh-mobile-tailscale-*.tgz | sort -V | tail -1)"
+dsh --profile web
+```
+
+macOS 的 DSH Desktop 不把 `dsh` 加进 PATH，用内置 CLI 代替（路径随 Desktop 升级变化）：
+
+```bash
+node "/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js" \
+     plugin --profile desktop add "<tgz 的绝对路径>"
+```
+
+- **同一版本覆盖安装不会生效**（pnpm 只报 `added 0`）：先 `rm -rf $DSH_HOME/profiles/<profile>/node_modules/dsh-mobile-tailscale` 再 `add`。
+- **宿主代码不热替换**：升级插件后要完全退出并重新打开 DSH Desktop；客户端资源刷新手机页面即可。
+
+## 使用
+
+1. 在 DSH 左下角打开 **移动访问** 面板，点 **启用远程访问**。
+2. 面板显示 `https://<电脑节点>.<tailnet>.ts.net` 后，用手机浏览器打开它。
+3. 不用时点 **关闭远程访问**（手机页面会随即断开）。
+
+面板只有一个视图：远程地址（**复制地址**）、启用/关闭开关、一行状态、**重新连接**，以及 **诊断**（跑一次脱敏自检）。开关、重连、重置只接受电脑本机调用，接口清单见 [排障手册 §15](TROUBLESHOOTING.md#15-桌面面板与管理接口)。
+
+## 手机端做了什么
+
+手机打开的是电脑上同一个会话与事件流，插件只做三件事：
+
+- **按触屏重排**：会话抽屉、工具详情、设置页、提问卡片和输入栏在窄屏下重排；右侧栏在窄屏变成可滑动的抽屉，不再覆盖对话。
+- **去掉触屏噪音**：输入框字号 ≥16px（避免 iOS 自动放大）、按压反馈只作用于真正的按钮/链接行、终端的触碰手势改走 `pan-y`。
+- **远程通道提速**：版本化资源长期缓存（导航不再重下约 5.66 MB）、会话首屏只载入 10 条消息、剔除手机渲染不了的桌面模块。细节与实测数据见 [排障手册 §13/§14](TROUBLESHOOTING.md#13-手机端卡顿与长会话载入慢)。
 
 ## 自定义
 
@@ -79,13 +85,6 @@ flowchart LR
 ```
 
 手工建扩展脚手架：`dsh plugin --profile web exec dsh-mobile extension create <id> [--name <name>]`。
-
-<p align="center">
-  <img src="assets/screenshots/crt-terminal-2.png" width="22%" alt="/mobile 定制为老式终端界面">
-  <img src="assets/screenshots/crt-terminal-1.png" width="22%" alt="/mobile 定制为老式终端界面">
-  <img src="assets/screenshots/cyberpunk-monitor-2.png" width="22%" style="margin-left:10px" alt="/mobile 定制为赛博朋克监控面板">
-  <img src="assets/screenshots/cyberpunk-monitor-1.png" width="22%" style="margin-left:8px" alt="/mobile 定制为赛博朋克监控面板">
-</p>
 
 > `host.mjs` 与本机程序同权限：只创建和运行你理解并信任的扩展。
 
@@ -102,29 +101,25 @@ flowchart LR
 
 `customCssFile`、`customScriptFile`、`mobileLayoutFile`、`mobileLayoutNextFile` 由插件自行维护，通常不用手写。运行时文件都在 `$DSH_HOME/mobile-access/`：`remote/control.json`（远程开关）、`remote/provider.json`（提供方）、`mobile.css` / `mobile.js`（自定义）、`extensions/`（扩展）。
 
-## 手机端体验
-
-手机端按触屏重排了会话抽屉、工具详情、设置、提问卡片和输入栏，并在远程通道上做了三件事：版本化资源长期缓存（不再每次导航重下约 5.66 MB）、会话首屏收窄到 10 条消息、剔除手机渲染不了的桌面模块。细节与实测数据见 [排障手册 §13/§14](TROUBLESHOOTING.md#13-手机端卡顿与长会话载入慢)。
-
 ## 排障
 
 先看 [TROUBLESHOOTING.md](TROUBLESHOOTING.md)（含快速分诊）。最常见的三种：
 
 - **面板显示「已就绪」但地址打不开**：确认 `tailscale status` 两侧都在线，点 **重新连接**，或按 [§4](TROUBLESHOOTING.md#4-远程通道显示-ready-但不可达) 重新注册 443。
 - **手机打不开地址**：确认手机 Tailscale 正在运行、与电脑在同一 tailnet，且打开的是面板显示的那个地址。
-- **健康检查**：`https://<node>.<tailnet>.ts.net/mobile-access/health` 返回 `{"ok":true}` 说明通道正常。
+- **健康检查**：`https://<电脑节点>.<tailnet>.ts.net/mobile-access/health` 返回 `{"ok":true}` 说明通道正常。
 
 ## 安全
 
 - 访问控制完全由 **tailnet 成员身份**承担，请只把可信设备加入 tailnet。
 - 不要开启 Tailscale Funnel，也不要把节点暴露到公网；不用时关闭远程开关。
-- 插件不监听任何局域网端口，不保存配对密钥、设备凭据和自签名 CA；管理接口只接受电脑本机调用。
+- 插件不监听局域网端口，不保存配对密钥、设备凭据或自签名 CA；管理接口只接受电脑本机调用。
 
 完整威胁模型见 [SECURITY.md](SECURITY.md)。
 
 ## 兼容性
 
-`0.4.0` 已验证 `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1`、`0.1.2-rc.1`、`0.1.7-rc.2`。未经验证的 DSH 版本只记录一条告警并继续启动；但较新的 DSH 会按 `peerDependencies` 在加载前拒绝整个插件，这种情况请升级插件，或为该精确版本组合显式授权豁免。历史对照表见 [排障手册 §19](TROUBLESHOOTING.md#19-诊断页与-dsh-版本兼容性)。
+已验证 DSH `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1`、`0.1.2-rc.1`、`0.1.7-rc.2`。未列入的版本只记录一条告警并继续启动；较新的 DSH 可能按 `peerDependencies` 在加载前拒绝整个插件，这种情况请升级插件，或为该精确版本组合显式授权豁免。历史对照表见 [排障手册 §19](TROUBLESHOOTING.md#19-诊断页与-dsh-版本兼容性)。
 
 ## 卸载
 
@@ -139,4 +134,6 @@ dsh plugin --profile web exec dsh-mobile purge --yes   # 连同 $DSH_HOME/mobile
 npm ci && npm run verify   # 版本校验 + 类型检查 + 测试 + 构建 + 打包干跑
 ```
 
-Apache-2.0，详见 [LICENSE](LICENSE)。
+## 来源与许可
+
+Apache-2.0，详见 [LICENSE](LICENSE)。项目由 [dsh-mobile](https://github.com/saya-ch/dsh-mobile) fork 而来，0.4.0 起只保留 Tailscale Serve 一条通道，宿主与客户端实现已重写。

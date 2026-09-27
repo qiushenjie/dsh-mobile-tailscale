@@ -1,8 +1,8 @@
 {
   "name": "dsh-mobile-tailscale",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "private": false,
-  "description": "DeepSeek Harness 移动端适配与安全访问插件，支持局域网、远程连接、Android App 和手机浏览器。",
+  "description": "把电脑上运行的 DeepSeek Harness Web 端，通过 Tailscale Serve 安全地交给同一 tailnet 内的手机浏览器使用。",
   "type": "module",
   "bin": {
     "dsh-mobile": "lib/cli.js"
@@ -83,11 +83,8 @@
     "dsh",
     "dsh-plugin",
     "plugin",
-    "android",
-    "lan",
-    "remote-access",
     "tailscale",
-    "cpolar",
+    "remote-access",
     "mobile",
     "https"
   ],
@@ -130,7 +127,6 @@
     "@deepseek-ai/dsh-llm": "^0.1.1-rc.2",
     "@types/js-yaml": "^4.0.9",
     "@types/node": "^24.3.0",
-    "@types/qrcode": "^1.5.5",
     "@types/react": "~18.3.1",
     "js-yaml": "^4.3.1",
     "react": "^18.2.0",

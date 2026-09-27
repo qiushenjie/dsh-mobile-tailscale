@@ -258,6 +258,20 @@ export class RemotePassthroughProxy {
       else response.end(health)
       return
     }
+    // Temporary: the phone's keyboard repair reports what a real phone sent for
+    // a space bar the terminal dropped. The host log is the only place a phone
+    // can leave evidence this plugin can read, and the body is bounded so a
+    // runaway page cannot grow the log.
+    if (target.search === '' && target.decodedPathname === `${AUTH_PREFIX}/key-probe`) {
+      if (method !== 'POST') throw new HttpError(405, 'method_not_allowed')
+      const body = await this.readBoundedBody(request)
+      if (body.byteLength > 0 && body.byteLength <= 4096) {
+        console.warn(`[dsh-mobile-tailscale] phone key probe ${body.toString('utf8')}`)
+      }
+      response.writeHead(204, { 'Cache-Control': 'no-store' })
+      response.end()
+      return
+    }
     // A rewritten document asks for the pruned boot graph here rather than from
     // upstream, which only answers the exact combinations it built itself.
     const batchKey = mobileBootBatchKey(target.decodedPathname)

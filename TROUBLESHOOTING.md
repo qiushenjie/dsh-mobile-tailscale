@@ -1,12 +1,8 @@
 # 排障手册
 
-本文件记录 DSH Mobile 在真实环境中出现过的故障、根因和处置方式。每一条都来自实际发生的现场日志，不是推测。
+本文件记录 `dsh-mobile-tailscale` 在真实环境中出现过的故障、根因和处置方式。每一条都来自实际发生的现场日志，不是推测。
 
-适用对象：DSH Desktop（macOS / Windows）与通过 `dsh plugin` 安装的 web profile。0.4.0 起本插件只保留 Tailscale Serve 一条远程通道，因此这里不再有局域网、配对与证书相关条目。
-
-## 为什么不再有局域网直连
-
-0.3.21 及更早版本在局域网里另开了一个 HTTPS 网关，并配了一套自管理的「DeepSeek Harness Mobile CA」证书来给它签名。但那条链从来没被任何设备信任过：证书既没有装进 Mac 的钥匙串，也没有任何一条路径把它送到手机上，于是手机和 Mac 自己的浏览器都停在证书拦截页上，手机更是连 `:3443` 端口都没到达过。与此同时 `https://<node>.<tailnet>.ts.net` 有 Let's Encrypt 签发的真实证书，访问控制由 tailnet 成员身份承担，既不需要配对也不需要手动信任。两者功能重复而后者可用，因此 0.4.0 把整个局域网通道删掉，只留下 Tailscale Serve。
+适用对象：DSH Desktop（macOS / Windows）与通过 `dsh plugin` 安装的 web profile。本插件只有一条远程通道 —— `https://<电脑节点>.<tailnet>.ts.net`（Tailscale Serve，Let's Encrypt 证书，访问控制由 tailnet 成员身份承担）；插件不监听局域网端口，没有配对、密钥与自签名证书，因此这里也没有相关条目。
 
 ## 快速分诊
 

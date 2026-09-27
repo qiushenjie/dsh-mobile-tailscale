@@ -632,25 +632,29 @@ describe('phone terminal space repair', () => {
     readonly isTrusted: boolean
     readonly key: string
     readonly keyCode: number
+    readonly inputType?: string
+    readonly data?: string
     readonly target: FakeElement
   }
 
   interface FakeElement {
-    readonly closest: (selector: string) => FakeElement | null
+    readonly closest: (selector: string) => unknown
     readonly isConnected: boolean
     readonly value: string
     readonly dispatchEvent: (event: FakeEvent) => void
   }
 
   /**
-   * Run the injected repair against a fake terminal. `responds` stands for an
-   * xterm that handled the key itself, `inputArrives` for an IME that committed
-   * the character as text, and `keyCode` for what the keyboard reported.
+   * Run the injected repair against a fake terminal. `traffic` stands for a
+   * terminal that already put the space on the wire itself, `viaInput` for a
+   * phone whose keydown the terminal ignored and whose `input` event never
+   * reached it either.
    */
-  const runSpace = async (options: { keyCode: number; responds: boolean; inputArrives?: boolean; phone?: boolean }): Promise<{ dispatched: FakeEvent[]; frames: string[] }> => {
+  const runSpace = async (options: { traffic?: boolean; viaInput?: boolean; phone?: boolean }): Promise<{ dispatched: FakeEvent[]; frames: string[]; reported: unknown[] }> => {
     expect(shim).toBeDefined()
     const dispatched: FakeEvent[] = []
     const frames: string[] = []
+    const reported: unknown[] = []
     const captures = new Map<string, (event: FakeEvent) => void>()
     const element = {
       closest: (selector: string) => (selector === '.xterm' ? element : null),
@@ -661,7 +665,7 @@ describe('phone terminal space repair', () => {
         // xterm listens on the terminal element and forwards what it understands.
         if (event.type === 'keydown' && event.key === ' ') frames.push(JSON.stringify({ endpoint: 'terminal/input', data: event.key }))
       },
-    } as unknown as FakeElement & { closest: (selector: string) => unknown }
+    }
     const FakeWebSocket = function (this: unknown) {} as unknown as { prototype: { send: (data: string) => void } }
     FakeWebSocket.prototype.send = (data: string) => { frames.push(data) }
     const document = {
@@ -681,43 +685,51 @@ describe('phone terminal space repair', () => {
         this.target = element
       }
     }
+    const fakeFetch = (_url: string, init?: { body?: string }) => {
+      if (typeof init?.body === 'string') reported.push(JSON.parse(init.body) as unknown)
+      return Promise.resolve({})
+    }
     const install = new Function('WebSocket', 'document', 'window', 'KeyboardEvent', `${String(shim)}\n`) as (
       ws: unknown,
       doc: unknown,
       win: unknown,
       event: unknown,
     ) => void
-    install(FakeWebSocket, document, { setTimeout }, FakeKeyboardEvent)
+    install(FakeWebSocket, document, { setTimeout, fetch: fakeFetch }, FakeKeyboardEvent)
 
-    const event = { type: 'keydown', isTrusted: true, key: ' ', keyCode: options.keyCode, target: element } as FakeEvent
-    captures.get('keydown')?.(event)
-    if (options.responds) FakeWebSocket.prototype.send(JSON.stringify({ endpoint: 'terminal/input', data: ' ' }))
-    if (options.inputArrives === true) captures.get('input')?.(event)
-    await new Promise((resolve) => setTimeout(resolve, 90))
-    return { dispatched, frames }
+    const keydown = { type: 'keydown', isTrusted: true, key: ' ', keyCode: 229, target: element } as FakeEvent
+    if (options.viaInput === true) {
+      captures.get('input')?.({ type: 'input', isTrusted: true, key: '', keyCode: 0, inputType: 'insertText', data: ' ', target: element } as FakeEvent)
+    } else {
+      captures.get('keydown')?.(keydown)
+    }
+    if (options.traffic === true) FakeWebSocket.prototype.send(JSON.stringify({ endpoint: 'terminal/input', data: ' ' }))
+    await new Promise((resolve) => setTimeout(resolve, 320))
+    return { dispatched, frames, reported }
   }
 
-  it('re-dispatches the space when the keyboard reports the IME code', async () => {
-    const { dispatched, frames } = await runSpace({ keyCode: 229, responds: false })
+  it('re-dispatches the space the terminal dropped', async () => {
+    const { dispatched, frames, reported } = await runSpace({})
     // The keydown is what xterm acts on; the keypress is its legacy fallback and
     // is dropped by xterm itself once the keydown was handled.
     expect(dispatched.map(event => event.type)).toEqual(['keydown', 'keypress'])
     expect(dispatched.every(event => event.keyCode === 32)).toBe(true)
     expect(frames.some(frame => frame.includes('terminal/input'))).toBe(true)
+    expect(reported).toHaveLength(1)
   })
 
-  it('leaves a space alone once the terminal sent it itself', async () => {
-    const { dispatched } = await runSpace({ keyCode: 229, responds: true })
-    expect(dispatched).toHaveLength(0)
+  it('repairs a space that only arrived as text, which is the shape iOS sends', async () => {
+    const { dispatched } = await runSpace({ viaInput: true })
+    expect(dispatched.map(event => event.type)).toEqual(['keydown', 'keypress'])
   })
 
-  it('leaves a space alone when the IME committed it as text', async () => {
-    const { dispatched } = await runSpace({ keyCode: 229, responds: false, inputArrives: true })
+  it('leaves a space alone once the terminal put it on the wire itself', async () => {
+    const { dispatched } = await runSpace({ traffic: true })
     expect(dispatched).toHaveLength(0)
   })
 
   it('never fires outside the phone surface', async () => {
-    const { dispatched } = await runSpace({ keyCode: 229, responds: false, phone: false })
+    const { dispatched } = await runSpace({ phone: false })
     expect(dispatched).toHaveLength(0)
   })
 })
