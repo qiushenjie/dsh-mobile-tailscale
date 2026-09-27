@@ -62,6 +62,7 @@ export {
   CSRF_COOKIE,
   CSRF_HEADER,
   DEVICE_COOKIE,
+  isAllowedWebSocketPath,
   LOCAL_ADMIN_PREFIX,
   SESSION_COOKIE,
   WS_PATHS,

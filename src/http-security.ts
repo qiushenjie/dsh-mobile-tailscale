@@ -7,7 +7,35 @@ export const CSRF_COOKIE = 'dsh_ma_csrf'
 export const CSRF_HEADER = 'x-dsh-mobile-csrf'
 export const LOCAL_ADMIN_PREFIX = '/api/mobile-access'
 export const AUTH_PREFIX = '/mobile-access'
+/**
+ * Multiplexer channels known by name.
+ *
+ * Retained as exported API, but no longer the allowlist itself: DSH renamed
+ * these endpoints between generations. `0.1.7` owns only `/api/remote.mux`;
+ * `/api/events.mux` and `/api/events.host` no longer exist anywhere in the
+ * harness. Pinning the allowlist to concrete names is what let a rename quietly
+ * reject an upgrade the phone needs, so the gate is
+ * {@link isAllowedWebSocketPath}.
+ */
 export const WS_PATHS = new Set(['/api/events.mux', '/api/events.host', '/api/remote.mux'])
+
+/**
+ * Whether an upgrade target is a DSH multiplexer channel this listener proxies.
+ *
+ * Shape-based on purpose: every DSH realtime channel is an `/api/<name>.mux`
+ * endpoint, and those names have already changed once, so a rename (or a new
+ * channel) keeps working without a plugin release.
+ *
+ * A plugin-owned upgrade channel outside the `/api/*.mux` shape is deliberately
+ * NOT proxied here: the paired HTTP surface is already unrestricted, so such a
+ * plugin can be reached over HTTP/SSE, while the narrower upgrade allowlist
+ * keeps an unexpected tunnel from becoming reachable by path alone.
+ * @param pathname - Decoded request path of the upgrade.
+ */
+export function isAllowedWebSocketPath(pathname: string): boolean {
+  if (WS_PATHS.has(pathname)) return true
+  return /^\/api\/[A-Za-z0-9_.\-]+\.mux$/u.test(pathname)
+}
 
 /** Terse request failure safe to expose without internal diagnostics. */
 export class HttpError extends Error {

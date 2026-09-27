@@ -1,9 +1,80 @@
 import { describe, expect, it } from 'vitest'
-import { NATIVE_MOBILE_STYLES, isComposerEditorFocus, isMenuSearchFocus, preservesMenuFocus, selectsSidebarRow, shouldAutoLoadEarlier } from '../src/native-mobile.js'
+import { NATIVE_MOBILE_STYLES, findDetailsSheetHost, findRightPanelHost, isComposerEditorFocus, isMenuSearchFocus, preservesMenuFocus, rightColumnOpen, rightPanelOpen, selectsSidebarRow, shouldAutoLoadEarlier } from '../src/native-mobile.js'
 
 /** Minimal stand-in for an element whose `closest` resolves to a fixed match. */
 function fakeElement(closest: Element | null): Element {
   return { closest: () => closest } as unknown as Element
+}
+
+/**
+ * Stand-in for the stock layout frame.
+ *
+ * `rightbarMarker` stands for the `[data-rightbar-col]` child that identifies
+ * the 0.1.7 generation; `rightbarCollapsed` is the frame-level collapse flag;
+ * `columns` are the `[class]`-carrying right-column tracks below the frame.
+ */
+function fakeFrame(options: { grid: string; rightbarCollapsed?: boolean; rightbarMarker?: boolean; columns?: HTMLElement[] }): HTMLElement {
+  return {
+    hasAttribute: (name: string) => name === 'data-rightbar-collapsed' && options.rightbarCollapsed === true,
+    querySelector: (selector: string) => (selector === '[data-rightbar-col]' && options.rightbarMarker === true ? ({} as Element) : null),
+    querySelectorAll: (selector: string) => (selector === '[class]' ? options.columns ?? [] : []),
+    style: { gridTemplateColumns: options.grid },
+  } as unknown as HTMLElement
+}
+
+/** Stand-in for the right-column panel host. */
+function fakeElementHost(
+  kind: 'panel',
+  state: {
+    hidden?: boolean
+    unavailable?: boolean
+    /** The 0.1.7 sidebar-right root marker. */
+    panelMarker?: boolean
+    /** The 0.1.7 expansion marker (`data-sidebar-right-open`). */
+    open?: boolean
+    ariaHidden?: boolean
+    /** Whether an ancestor (a background session wrapper) hides this panel. */
+    hiddenAncestor?: boolean
+  } = {},
+): HTMLElement {
+  const attributes = new Set<string>()
+  if (state.hidden === true) attributes.add('hidden')
+  if (state.unavailable === true) attributes.add('data-sidebar-right-unavailable')
+  if (state.panelMarker === true) attributes.add('data-sidebar-right-panel')
+  if (state.open === true) attributes.add('data-sidebar-right-open')
+  if (state.ariaHidden === true) attributes.add('aria-hidden')
+  return {
+    kind,
+    hasAttribute: (name: string) => attributes.has(name),
+    closest: (selector: string) => (state.hiddenAncestor === true && selector === '[hidden]' ? ({} as unknown as Element) : null),
+    classList: { contains: () => false },
+    dataset: {},
+  } as unknown as HTMLElement
+}
+
+/** Stand-in for an element whose only interesting feature is its class list. */
+function fakeClassElement(classes: string[]): HTMLElement {
+  return {
+    classList: Object.assign(classes.slice(), { contains: (value: string) => classes.includes(value) }),
+    hasAttribute: () => false,
+    dataset: {},
+  } as unknown as HTMLElement
+}
+
+/** Stand-in for a search root that answers `querySelector`/`querySelectorAll`. */
+function fakeRoot(
+  matches: Record<string, HTMLElement>,
+  legacy: HTMLElement[] = [],
+  panels: HTMLElement[] = [],
+): ParentNode {
+  return {
+    querySelector: (selector: string) => matches[selector] ?? null,
+    querySelectorAll: (selector: string) => {
+      if (selector === '[class]') return legacy
+      if (selector === '[data-sidebar-right-panel]') return panels
+      return []
+    },
+  } as unknown as ParentNode
 }
 
 /** Stand-in for a sidebar row; `aria-expanded` is the only state the guard reads. */
@@ -168,5 +239,93 @@ describe('native mobile presentation', () => {
     expect(NATIVE_MOBILE_STYLES).toContain('@keyframes dsh-mobile-view-in')
     expect(NATIVE_MOBILE_STYLES).toContain('@media (prefers-reduced-motion:reduce)')
     expect(NATIVE_MOBILE_STYLES).not.toContain('dsh-native-mobile-sheet')
+  })
+
+  it('reads the right column state from the frame attribute on this generation', () => {
+    // DSH 0.1.7 marks a closed right column on the frame and writes the trailing
+    // track as `minmax(0px, 0px)`. The old exact-match grid probe compared the
+    // track against `0px`, so it reported a closed column as open forever.
+    expect(rightColumnOpen(fakeFrame({ rightbarMarker: true, rightbarCollapsed: true, grid: '250px minmax(400px, 1fr) minmax(0px, 0px)' }))).toBe(false)
+    expect(rightColumnOpen(fakeFrame({ rightbarMarker: true, rightbarCollapsed: false, grid: '250px minmax(400px, 1fr) minmax(0px, 460px)' }))).toBe(true)
+    expect(rightColumnOpen(undefined)).toBe(false)
+  })
+
+  it('never re-containers the rightbar track that now carries the panel', () => {
+    // 0.1.7 moved the sidebar-right panel inside `_rightbarCol`, so making that
+    // track a fixed off-screen sheet dragged the panel — and the chrome buttons
+    // inside it — along with it; only the legacy details track may become the
+    // sheet.
+    expect(findDetailsSheetHost(fakeFrame({ grid: '', columns: [fakeClassElement(['Hash_rightbarCol'])] }))).toBeUndefined()
+    const legacy = fakeClassElement(['Hash_detailsCol'])
+    expect(findDetailsSheetHost(fakeFrame({ grid: '', columns: [legacy] }))).toBe(legacy)
+    expect(findDetailsSheetHost(fakeFrame({ grid: '', columns: [fakeClassElement(['Hash_rightbarCol', 'Hash_detailsCol'])] }))).toBeUndefined()
+    expect(findDetailsSheetHost(undefined)).toBeUndefined()
+  })
+
+  it('still falls back to the trailing grid track on the older layout', () => {
+    expect(rightColumnOpen(fakeFrame({ grid: '250px minmax(400px, 1fr) 0px' }))).toBe(false)
+    expect(rightColumnOpen(fakeFrame({ grid: '250px minmax(400px, 1fr) 380px' }))).toBe(true)
+  })
+
+  it('prefers the sidebar-right dockkit panel over the removed workbench token', () => {
+    const dockkit = fakeElementHost('panel', { panelMarker: true })
+    expect(findRightPanelHost(fakeRoot({}, [], [dockkit]))).toBe(dockkit)
+    // A dock host still resolves to its enclosing tagged panel.
+    const nested = fakeElementHost('panel')
+    const dockHost = { closest: () => nested } as unknown as HTMLElement
+    expect(findRightPanelHost(fakeRoot({ '[data-dockkit-host]': dockHost }))).toBe(nested)
+  })
+
+  it('tags the expanded visible panel when several sessions keep one mounted', () => {
+    const background = fakeElementHost('panel', { panelMarker: true, open: true, hiddenAncestor: true })
+    const collapsed = fakeElementHost('panel', { panelMarker: true })
+    const visible = fakeElementHost('panel', { panelMarker: true, open: true })
+    expect(findRightPanelHost(fakeRoot({}, [], [background, collapsed, visible]))).toBe(visible)
+    // A background session keeps a stale expanded flag; it must not beat the
+    // visible panel, expanded or not.
+    expect(findRightPanelHost(fakeRoot({}, [], [background, collapsed]))).toBe(collapsed)
+    expect(findRightPanelHost(fakeRoot({}, [], [collapsed, visible]))).toBe(visible)
+    // With nothing expanded the first mounted panel is the one to report closed.
+    const second = fakeElementHost('panel', { panelMarker: true })
+    expect(findRightPanelHost(fakeRoot({}, [], [collapsed, second]))).toBe(collapsed)
+  })
+
+  it('walks up from the legacy workbench token to its outer panel', () => {
+    const outer = fakeClassElement(['Hash_panel'])
+    const inner = fakeClassElement(['Hash_panelBody'])
+    const workbench = fakeClassElement(['Hash_workbench'])
+    ;(workbench as unknown as { parentElement: HTMLElement }).parentElement = inner
+    ;(inner as unknown as { parentElement: HTMLElement }).parentElement = outer
+    expect(findRightPanelHost(fakeRoot({}, [workbench]))).toBe(outer)
+    // Without any anchor at all there is nothing to tag.
+    expect(findRightPanelHost(fakeRoot({}))).toBeUndefined()
+  })
+
+  it('reads 0.1.7 panel expansion from the attribute the panel itself publishes', () => {
+    // The sidebar-right root is mounted permanently, so the markers that
+    // generation uses to hide content live on other nodes: `hidden` on the
+    // session wrapper and `data-sidebar-right-unavailable` on a tab fallback.
+    // Probing those reported a closed panel as open forever, which pinned the
+    // mobile drawer on screen and swallowed the panel's real state.
+    const shell = { panelMarker: true }
+    expect(rightPanelOpen(fakeElementHost('panel', { ...shell }))).toBe(false)
+    expect(rightPanelOpen(fakeElementHost('panel', { ...shell, open: false }))).toBe(false)
+    expect(rightPanelOpen(fakeElementHost('panel', { ...shell, open: true }))).toBe(true)
+    expect(rightPanelOpen(fakeElementHost('panel', { ...shell, open: true, ariaHidden: true }))).toBe(false)
+    // Content-hiding markers must not be consulted once the root identifies
+    // itself as this generation.
+    expect(rightPanelOpen(fakeElementHost('panel', { ...shell, open: true, hidden: true, unavailable: true }))).toBe(true)
+  })
+
+  it('still treats a hidden or class-marker workbench as closed on the older layout', () => {
+    expect(rightPanelOpen(fakeElementHost('panel', { hidden: true }))).toBe(false)
+    expect(rightPanelOpen(fakeElementHost('panel', { unavailable: true }))).toBe(false)
+    expect(rightPanelOpen(fakeClassElement(['Hash_panel', 'Hash_panelHidden']))).toBe(false)
+    expect(rightPanelOpen(fakeClassElement(['Hash_panel']))).toBe(true)
+  })
+
+  it('publishes the panel open state through the attribute the CSS selects on', () => {
+    expect(NATIVE_MOBILE_STYLES).toContain('[data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"]')
+    expect(NATIVE_MOBILE_STYLES).not.toContain('_panelHidden"]) { transform:translateX(0)')
   })
 })

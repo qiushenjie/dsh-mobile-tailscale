@@ -87,14 +87,47 @@ if (!Array.isArray(layoutInject)
 }
 
 const layoutSource = await text('packages/client/ui-layout/src/client/index.ts')
-for (const declaration of [
-  "'sidebar': { kind: 'single', scope: 'root' }",
-  "'conversation': { kind: 'single', scope: 'session-maybe' }",
-  "'details': { kind: 'single', scope: 'session' }",
-  "'shell.overlay': { kind: 'list', scope: 'root' }",
-  "ctx.reflect.provide('layout'",
-]) {
+// This build runs the *stock* layout and adapts its DOM, so what it needs from
+// the layout module is the column structure it probes rather than one specific
+// slot set. DSH 0.1.7 reshaped those slots — `conversation` / `details` became a
+// keyed `main` plus `rightbar` and `shell.leading` — and `requireLayoutModule`
+// detects the generation and keeps the stock layout when it does not recognize
+// the dependency profile. Asserting the old names unconditionally is what left
+// this gate red on the current harness while the plugin quietly lost its
+// dedicated layout, so both generations are accepted and a genuinely unknown one
+// still fails.
+for (const declaration of ["'sidebar': { kind: 'single', scope: 'root' }", "'shell.overlay':"]) {
   if (!layoutSource.includes(declaration)) throw new Error(`DSH layout contract changed: missing ${declaration}`)
+}
+const keyedColumns = layoutSource.includes("'main':") && layoutSource.includes("'rightbar':")
+const legacyColumns = layoutSource.includes("'conversation':") && layoutSource.includes("'details':")
+if (!keyedColumns && !legacyColumns) {
+  throw new Error('DSH layout exposes neither the keyed main/rightbar columns nor the legacy conversation/details columns')
+}
+
+// The DOM adaptation probes these class tokens and attributes. Whichever layout
+// source files exist are concatenated, so a rename is caught without hard-failing
+// on a file move.
+let layoutDomSource = ''
+for (const candidate of [
+  'packages/client/ui-layout/src/client/AppFrame.tsx',
+  'packages/client/ui-layout/src/client/index.tsx',
+  'packages/client/ui-layout/src/client/index.ts',
+]) {
+  layoutDomSource += (await optionalText(candidate)) ?? ''
+}
+if (layoutDomSource !== '') {
+  for (const marker of ['css.centerCol', 'css.sidebarCol', 'css.frame']) {
+    if (!layoutDomSource.includes(marker)) {
+      throw new Error(`DSH layout column structure changed: missing ${marker}`)
+    }
+  }
+  if (!layoutDomSource.includes('css.rightbarCol') && !layoutDomSource.includes('css.detailsCol')) {
+    throw new Error('DSH layout right column changed: neither css.rightbarCol nor css.detailsCol is present')
+  }
+  if (!layoutDomSource.includes('data-rightbar-col') && !layoutDomSource.includes('data-details-col')) {
+    throw new Error('DSH layout right column is no longer marked for the mobile adaptation')
+  }
 }
 
 const conversation = await text('packages/client/ui-conversation/src/client/skeleton/ConversationRoot.tsx')
@@ -122,6 +155,12 @@ if (!settingsSource.includes("connection.isLoopback ? 'host' : 'memory'")) {
 const sidebarSource = await text('packages/client/ui-sidebar/src/client/SidebarRoot.tsx')
 if (!sidebarSource.includes('css.fallbackBrandName')) {
   throw new Error('DSH sidebar fallback brand changed: missing css.fallbackBrandName')
+}
+// The desktop entry point for the whole plugin is this slot: the sidebar renders
+// it and the client module registers the 移动访问 control into it. If the sidebar
+// stops rendering it the control silently disappears from the desktop page.
+if (!sidebarSource.includes('sidebar.footer.action')) {
+  throw new Error('DSH sidebar no longer renders the sidebar.footer.action slot, which hosts the mobile access entry')
 }
 const localeEnglish = await optionalText('packages/client/locale/src/locales/en.ts')
 if (!sidebarSource.includes('DSH Local Build') && !localeEnglish?.includes("'brand.localBuild': 'DSH Local Build'")) {

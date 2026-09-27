@@ -87,6 +87,40 @@ function isLoopbackHost(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '[::1]'
 }
 
+/** Privileged scheme the official DSH desktop application serves its window from. */
+const DSH_DESKTOP_PROTOCOL = 'dsh-app:'
+
+/**
+ * Decide which surface the current document installs: the phone adaptation or
+ * the host's own local control entry.
+ *
+ * The host's own page is not always a loopback HTTP origin. The official DSH
+ * desktop application loads this very frontend from its privileged
+ * `dsh-app://app/` scheme, where `location.hostname` is `app`, so classifying by
+ * hostname alone took the desktop window for a phone: the phone DOM layer fought
+ * the desktop layout (flicker and offset on click, a sidebar that would not
+ * close) while the local control entry was never registered.
+ *
+ * The gateway and the remote proxy stamp an explicit marker on every document
+ * they serve, so trust those first, then the desktop shell's own scheme, and
+ * keep the hostname heuristic only for a page that reaches DSH through some
+ * other non-loopback origin.
+ */
+export function resolveClientSurface(input: {
+  protocol: string
+  hostname: string
+  search: string
+  trustedGateway: boolean
+  dedicatedFrontend: string | undefined
+}): 'desktop' | 'mobile' {
+  if (input.trustedGateway || input.dedicatedFrontend === 'dedicated') return 'mobile'
+  // Local preview escape hatch: `?dsh-mobile-preview` renders the phone
+  // adaptation inside the host's own page, whatever its origin.
+  if (new URLSearchParams(input.search).has('dsh-mobile-preview')) return 'mobile'
+  if (input.protocol === DSH_DESKTOP_PROTOCOL) return 'desktop'
+  return isLoopbackHost(input.hostname) ? 'desktop' : 'mobile'
+}
+
 /**
  * Match DSH's client-side privilege hint to the authenticated mobile gateway.
  * The gateway authenticates the paired device and forwards allowed requests to
@@ -448,7 +482,7 @@ function installControl(): { remove: () => void; toggle: () => void } {
     }
     const errorLabels: Record<string, string> = {
       tailscale_not_logged_in: 'Tailscale 未登录或未加入 tailnet，请登录后重试。',
-      tailscale_missing: '未找到 tailscale 命令，请安装 Tailscale。',
+      tailscale_missing: '未找到 tailscale 命令：请安装 Tailscale，或把 DSH_MOBILE_TAILSCALE_BIN 设为 tailscale 可执行文件的绝对路径。',
       funnel_unavailable: 'Tailscale 未启用 Funnel（Serve 需要），请在 Tailscale 管理后台确认。',
       permission_denied: '权限不足，请以管理员身份运行后重试。',
       serve_failed: 'Tailscale Serve 启动失败，请检查网络后重新连接。',
@@ -956,12 +990,20 @@ export function apply(ctx: ClientContext): void {
   }, 'dsh-mobile: authenticated gateway client trust')
 
   ctx.effect(() => {
-    const loopback = isLoopbackHost(location.hostname) && !new URLSearchParams(location.search).has('dsh-mobile-preview')
-    const style = element('style'); style.dataset.plugin = 'dsh-mobile'; style.textContent = loopback
+    // The desktop window (dsh-app://app/) reaches this module too, so an
+    // origin-based guess must never be allowed to install the phone layer there.
+    const desktop = resolveClientSurface({
+      protocol: location.protocol,
+      hostname: location.hostname,
+      search: location.search,
+      trustedGateway: window.__DSH_MOBILE_TRUSTED_GATEWAY__ === true,
+      dedicatedFrontend: window.__DSH_MOBILE_FRONTEND__,
+    }) === 'desktop'
+    const style = element('style'); style.dataset.plugin = 'dsh-mobile'; style.textContent = desktop
       ? CONTROL_STYLES
       : NATIVE_MOBILE_STYLES
     document.head.append(style)
-    if (!loopback) {
+    if (!desktop) {
       const removeCustom = installCustomAssets()
       const removeSurface = installNativeMobileSurface()
       return () => { removeCustom(); removeSurface(); style.remove() }

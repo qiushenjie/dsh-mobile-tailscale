@@ -198,7 +198,19 @@ html.dsh-native-mobile-active [data-dsh-mobile-header] [class*="_sessionLogButto
     box-shadow:-18px 0 46px rgb(15 23 42 / 18%) !important;
     overflow:auto !important;
   }
-  html.dsh-native-mobile-active [data-dsh-mobile-workbench]:not([class*="_panelHidden"]) { transform:translateX(0) !important; }
+  /* The open state is published as an attribute by the DOM pass rather than
+     inferred from a class token: the older workbench hid itself with
+     *_panelHidden, while 0.1.7's sidebar-right root carries
+     data-sidebar-right-open (and aria-hidden while collapsed), plus
+     data-sidebar-right-unavailable on the tab fallback. All of them are folded
+     into data-dsh-mobile-workbench-open, so one selector covers either build.
+     pointer-events is re-armed here because 0.1.7 makes the panel root
+     click-through (.GrpIoq_panel{pointer-events:none}) and relies on each docked
+     pane to re-enable it for itself. */
+  html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] {
+    transform:translateX(0) !important;
+    pointer-events:auto !important;
+  }
   /* The workbench toggle cluster shares its stacking context with the panel
      (both live inside [data-dsh-panel-host], z-index:25), so it only needs a
      z-index ABOVE the drawer's 250 to stay clickable on top of it. It is
@@ -247,6 +259,117 @@ function firstByClassSuffix(root: ParentNode, suffix: string): HTMLElement | und
 }
 
 const AUTO_HISTORY_THRESHOLD_PX = 64
+
+/**
+ * The right-column track that becomes the mobile details sheet, if any.
+ *
+ * Only the legacy `details` generation is re-containered. 0.1.7 renamed that
+ * track to `rightbar` (`*_rightbarCol`) and moved the sidebar-right panel
+ * INSIDE it, so forcing `position:fixed` and `translateX(100%)` onto the track
+ * made the track the panel's containing block and slid the track — panel and the
+ * chrome buttons inside it included — permanently off screen. The rightbar
+ * generation is therefore deliberately not eligible for the sheet; its panel is
+ * tagged as the drawer through {@link findRightPanelHost} instead.
+ * @param frame - The stock layout frame, when one was identified.
+ * @returns The sheet host, or `undefined` when the frame has no sheet column.
+ */
+export function findDetailsSheetHost(frame: HTMLElement | undefined): HTMLElement | undefined {
+  if (frame === undefined) return undefined
+  const column = firstByClassSuffix(frame, '_detailsCol')
+  // Some builds could ship both names on one node; the rightbar one still wins
+  // the exclusion, because it is the node that carries the panel.
+  return column !== undefined && !classToken(column, '_rightbarCol') ? column : undefined
+}
+
+/**
+ * Whether the frame's right column currently occupies grid space.
+ *
+ * DSH renamed this column between generations: it was the `details` column
+ * (`*_detailsCol`), and 0.1.7 turned it into the `rightbar` (`*_rightbarCol`).
+ * The collapse signal changed with it — 0.1.7 drives a three-track frame
+ * (`sidebar / centre / rightbar`) and marks a right column that takes no space
+ * with `data-rightbar-collapsed`, while its trailing grid track is written as
+ * `minmax(0px, 0px)`. The older exact-match grid probe compared the track
+ * against `0px`, so on 0.1.7 it would read such a column as open.
+ *
+ * This answers "does the column take space", NOT "is the panel showing". A phone
+ * viewport always answers "no space" — `computeColumns` wants 400px of chrome
+ * plus 300px of track before it allocates any — even while the sidebar-right
+ * panel is expanded and overlaying the app, so this can never be the mobile
+ * drawer's open signal. Panels publish their own state (see
+ * {@link rightPanelOpen}); this probe only drives the legacy details sheet.
+ * @param frame - The stock layout frame, when one was identified.
+ * @returns Whether the right column occupies grid space.
+ */
+export function rightColumnOpen(frame: HTMLElement | undefined): boolean {
+  if (frame === undefined) return false
+  const isRightbarFrame = frame.hasAttribute('data-rightbar-collapsed')
+    || frame.querySelector('[data-rightbar-col]') !== null
+  if (isRightbarFrame) return !frame.hasAttribute('data-rightbar-collapsed')
+  const lastColumn = frame.style.gridTemplateColumns.trim().split(/\s+/).at(-1)
+  return lastColumn !== undefined && lastColumn !== '0px' && lastColumn !== '0'
+}
+
+/**
+ * The right-column panel host that becomes a portrait drawer.
+ *
+ * The panel that used to be tagged was the `workbench` (Files explorer /
+ * terminal), whose outer class token ended exactly in `_panel`. DSH 0.1.7 has no
+ * `_workbench` token at all: those panes now render through the sidebar-right
+ * dockkit, whose root carries `data-sidebar-right-panel`. That root is the
+ * element the drawer CSS has to position, so it is preferred, and the legacy
+ * `_workbench` walk is kept only as the fallback for older generations. Several
+ * sessions keep a panel mounted at once, so the expanded visible one wins over
+ * its collapsed or background siblings.
+ * @param root - Subtree to search.
+ * @returns The panel host, when the surface is present.
+ */
+export function findRightPanelHost(root: ParentNode): HTMLElement | undefined {
+  const panels = Array.from(root.querySelectorAll<HTMLElement>('[data-sidebar-right-panel]'))
+  if (panels.length > 0) {
+    // Several sessions keep a panel mounted at once; only the expanded one is
+    // showing, and a background session's wrapper carries `hidden`, so an
+    // expanded-but-hidden panel must not win over the visible one — a background
+    // session keeps its stale expanded flag around.
+    const isShowing = (panel: HTMLElement): boolean => panel.closest('[hidden]') === null
+    const isExpanded = (panel: HTMLElement): boolean => panel.hasAttribute('data-sidebar-right-open')
+    return panels.find(panel => isExpanded(panel) && isShowing(panel))
+      ?? panels.find(isShowing)
+      ?? panels[0]
+  }
+  const dockHost = root.querySelector<HTMLElement>('[data-dockkit-host]')
+  if (dockHost !== null) return dockHost.closest<HTMLElement>('[data-sidebar-right-panel]') ?? dockHost
+  const isPanelToken = (element: Element): boolean =>
+    Array.from(element.classList).some(token => /_panel$/u.test(token))
+  let candidate: HTMLElement | null | undefined = firstByClassSuffix(root, '_workbench')?.parentElement
+  while (candidate !== null && candidate !== undefined && !isPanelToken(candidate)) {
+    candidate = candidate.parentElement
+  }
+  return candidate ?? undefined
+}
+
+/**
+ * Whether the right-column panel host is currently showing.
+ *
+ * 0.1.7 mounts the sidebar-right panel permanently and publishes its own
+ * expansion: the root carries `data-sidebar-right-open` only while expanded
+ * (React writes `expanded || undefined`) and an `aria-hidden` that mirrors it.
+ * The markers that generation uses to hide *content* live on other nodes —
+ * `hidden` sits on the session wrapper and `data-sidebar-right-unavailable` on a
+ * tab fallback — so probing them read the always-mounted root as open, which
+ * pinned the mobile drawer on screen no matter what the panel was doing. The
+ * older workbench generation really did hide its host with `*_panelHidden`, so
+ * those probes survive as the fallback.
+ * @param panel - The panel host returned by {@link findRightPanelHost}.
+ */
+export function rightPanelOpen(panel: HTMLElement): boolean {
+  if (panel.hasAttribute('data-sidebar-right-panel') || panel.hasAttribute('data-sidebar-right-open')) {
+    return panel.hasAttribute('data-sidebar-right-open') && !panel.hasAttribute('aria-hidden')
+  }
+  if (panel.hasAttribute('hidden')) return false
+  if (panel.hasAttribute('data-sidebar-right-unavailable')) return false
+  return !classToken(panel, '_panelHidden')
+}
 
 /** Whether a user-driven scroll moved upward into the automatic history-loading zone. */
 export function shouldAutoLoadEarlier(previousTop: number, currentTop: number): boolean {
@@ -561,28 +684,22 @@ export function installNativeMobileSurface(): () => void {
       ? document.querySelector<HTMLElement>('.dshm-drawer') ?? undefined
       : firstByClassSuffix(frame, '_sidebarCol')
     const center = frame === undefined ? dedicatedCenter : firstByClassSuffix(frame, '_centerCol')
-    const details = frame === undefined ? undefined : firstByClassSuffix(frame, '_detailsCol')
+    // The right column is re-containered as a mobile sheet only for the legacy
+    // `_detailsCol` generation; see findDetailsSheetHost for why 0.1.7's
+    // `_rightbarCol` must never be treated as a sheet.
+    const details = findDetailsSheetHost(frame)
     const handle = frame === undefined ? undefined : firstByClassSuffix(frame, '_handle')
-    // Tag the workbench panel (Files explorer / terminal) precisely so the
-    // mobile CSS can turn it into a right-side drawer in portrait. The outer
-    // panel's class token ends with exactly `_panel`; the inner panelBody
-    // ends with `_panelBody`, so match the token boundary.
-    const workbench = firstByClassSuffix(document, '_workbench')
-    const isPanelToken = (element: Element): boolean =>
-      Array.from(element.classList).some(token => /_panel$/u.test(token))
-    let workbenchPanel: HTMLElement | null | undefined = workbench?.parentElement
-    while (workbenchPanel !== null && workbenchPanel !== undefined && !isPanelToken(workbenchPanel)) {
-      workbenchPanel = workbenchPanel.parentElement
-    }
-    if (workbenchPanel !== null && workbenchPanel !== undefined) {
+    // Tag the right-column panel host (Files explorer / terminal / preview) so
+    // the mobile CSS can turn it into a right-side drawer in portrait. 0.1.7
+    // anchors this on the sidebar-right dockkit root rather than a `*_workbench`
+    // token, and that root publishes the open state the drawer has to follow.
+    const workbenchPanel = findRightPanelHost(document)
+    if (workbenchPanel !== undefined) {
       workbenchPanel.dataset.dshMobileWorkbench = 'true'
-      // The workbench toggle cluster and the panel are BOTH children of the
-      // same [data-dsh-panel-host] (a fixed, viewport-sized, z-index:25
-      // containing block appended to document.body). They share one stacking
-      // context, so a higher z-index on the cluster is enough to float it
-      // above the full-height drawer — no DOM move needed. Moving the cluster
-      // out of its React portal would detach it from the app's synthetic
-      // click handler, which is exactly what broke the toggle earlier.
+      workbenchPanel.dataset.dshMobileWorkbenchOpen = String(rightPanelOpen(workbenchPanel))
+      // The toggle cluster and the panel share one stacking context in the
+      // panel host, so floating the cluster by z-index is enough — no DOM move,
+      // which would detach it from the app's synthetic click handler.
     }
     if (center === undefined) {
       bindHistoryScroller(undefined)
@@ -642,8 +759,7 @@ export function installNativeMobileSurface(): () => void {
     if (handle !== undefined) handle.dataset.dshMobileHandle = 'true'
     if (details !== undefined) {
       details.dataset.dshMobileDetails = 'true'
-      const lastColumn = frame?.style.gridTemplateColumns.trim().split(/\s+/).at(-1)
-      details.dataset.open = String(lastColumn !== undefined && lastColumn !== '0px' && lastColumn !== '0')
+      details.dataset.open = String(rightColumnOpen(frame))
     }
     const settings = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"]')).find(dialog => {
       const directNav = Array.from(dialog.children).find(child => child instanceof HTMLElement && classToken(child, '_nav'))
@@ -681,7 +797,24 @@ export function installNativeMobileSurface(): () => void {
   }
   const schedule = (): void => { if (scheduled === 0) scheduled = requestAnimationFrame(sync) }
   const observer = new MutationObserver(schedule)
-  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class', 'style', 'disabled'] })
+  // The right column and its panel express open/closed as attributes rather
+  // than classes on this generation, so those attributes have to be observed or
+  // the drawer would only pick up its state on the next unrelated mutation.
+  observer.observe(document.body, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: [
+      'class',
+      'style',
+      'disabled',
+      'hidden',
+      'data-rightbar-collapsed',
+      'data-sidebar-right-open',
+      'data-sidebar-right-unavailable',
+      'aria-hidden',
+    ],
+  })
   backdrop.addEventListener('click', () => { if (sidebar?.dataset.open === 'true') toggle?.click() })
   sync()
   return () => {

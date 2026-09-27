@@ -17,6 +17,9 @@
  */
 
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { posix, win32 } from 'node:path'
 import { promisify } from 'node:util'
 import type { MobileAccessControlStore } from './control.js'
 import type { RemotePassthroughProxy } from './remote-proxy.js'
@@ -44,6 +47,9 @@ export interface TailscaleServeControllerOptions {
 
 const execFileAsync = promisify(execFile)
 
+/** Environment escape hatch for a Tailscale install in an unusual location. */
+const TAILSCALE_BIN_ENV = 'DSH_MOBILE_TAILSCALE_BIN'
+
 function publicStatus(status: TailscaleServeStatus): TailscaleServeStatus {
   return Object.freeze({
     enabled: status.enabled,
@@ -51,6 +57,60 @@ function publicStatus(status: TailscaleServeStatus): TailscaleServeStatus {
     ...(status.origin === undefined ? {} : { origin: status.origin }),
     ...(status.errorCode === undefined ? {} : { errorCode: status.errorCode }),
   })
+}
+
+/**
+ * Absolute locations the Tailscale CLI is installed to, by platform.
+ *
+ * This matters most on macOS. Installing the Tailscale app does put a CLI shim
+ * in `/usr/local/bin` (or the binary inside the bundle), but a GUI application
+ * is launched by launchd and therefore inherits the minimal
+ * `/usr/bin:/bin:/usr/sbin:/sbin` PATH. A bare `tailscale` lookup spawns
+ * nothing, fails with ENOENT, and the desktop card reports "Tailscale is not
+ * installed" on a machine where it plainly is.
+ */
+export function tailscaleBinaryCandidates(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, home: string): string[] {
+  // Joined with the target platform's own rules, not the host's: this function
+  // is parameterised by platform so a single test run can cover every install
+  // layout, and a Windows path assembled with posix join is not a Windows path.
+  const join = platform === 'win32' ? win32.join : posix.join
+  if (platform === 'win32') {
+    const candidates = [join(env.ProgramFiles ?? 'C:\\Program Files', 'Tailscale', 'tailscale.exe')]
+    if (env['ProgramFiles(x86)'] !== undefined) candidates.push(join(env['ProgramFiles(x86)'], 'Tailscale', 'tailscale.exe'))
+    if (env.LOCALAPPDATA !== undefined) candidates.push(join(env.LOCALAPPDATA, 'Tailscale', 'tailscale.exe'))
+    return candidates
+  }
+  if (platform === 'darwin') {
+    return [
+      '/usr/local/bin/tailscale',
+      '/opt/homebrew/bin/tailscale',
+      '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+      join(home, 'Applications', 'Tailscale.app', 'Contents', 'MacOS', 'Tailscale'),
+    ]
+  }
+  return ['/usr/bin/tailscale', '/usr/sbin/tailscale', '/usr/local/bin/tailscale', '/snap/bin/tailscale']
+}
+
+/**
+ * Resolve the Tailscale CLI to something a GUI-launched host can actually run.
+ *
+ * An explicit override wins, then the well-known install locations, and PATH
+ * resolution is left as the last resort so a terminal-launched host keeps its
+ * existing behaviour. Falling through to the bare name preserves the
+ * `tailscale_missing` diagnostic when nothing is installed.
+ */
+export function resolveTailscaleBinary(options: {
+  platform: NodeJS.Platform
+  env: NodeJS.ProcessEnv
+  home: string
+  exists: (path: string) => boolean
+}): string {
+  const override = options.env[TAILSCALE_BIN_ENV]?.trim()
+  if (override !== undefined && override !== '') return override
+  for (const candidate of tailscaleBinaryCandidates(options.platform, options.env, options.home)) {
+    if (options.exists(candidate)) return candidate
+  }
+  return 'tailscale'
 }
 
 /**
@@ -101,7 +161,6 @@ export class TailscaleServeController {
   private disposed = false
   private latest: TailscaleServeStatus = Object.freeze({ enabled: false, state: 'off' })
   private queue: Promise<void> = Promise.resolve()
-
   constructor(private readonly options: TailscaleServeControllerOptions) {}
 
   /** Restore the remote switch without coupling it to LAN availability. */
@@ -196,7 +255,13 @@ export class TailscaleServeController {
   }
 
   private bin(): string {
-    return this.options.bin ?? 'tailscale'
+    // Resolved per invocation, not once at construction: a host that resolves it
+    // on first use keeps working when the user installs Tailscale after starting
+    // DSH, instead of reporting tailscale_missing until the next restart.
+    return (
+      this.options.bin ??
+      resolveTailscaleBinary({ platform: process.platform, env: process.env, home: homedir(), exists: existsSync })
+    )
   }
 
   private async start(): Promise<void> {

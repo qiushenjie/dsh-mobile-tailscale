@@ -37,6 +37,7 @@ import {
   stripIpv6Brackets,
   websocketAccept,
 } from './gateway.js'
+import { relayUpgradedWebSocket } from './websocket-frames.js'
 
 const MAX_HEADER_BYTES = 16 * 1024
 /**
@@ -373,14 +374,11 @@ export class RemotePassthroughProxy {
       if (extensions !== undefined) requestLines.push(`Sec-WebSocket-Extensions: ${extensions}`)
       requestLines.push('', '')
       upstreamSocket.write(requestLines.join('\r\n'))
-      if (head.length > 0) upstreamSocket.write(head)
       const handshake = await this.readUpgradeResponse(upstreamSocket, websocketAccept(key))
       upstreamSocket.setTimeout(0)
       client.write(handshake.header)
       if (handshake.remainder.length > 0) client.write(handshake.remainder)
-      upstreamSocket.pipe(client)
-      client.pipe(upstreamSocket)
-      client.resume()
+      relayUpgradedWebSocket(client, upstreamSocket, head)
     } catch (error) {
       // Destroy only the upstream here: the upgrade wiring above still needs
       // the client socket to write the error response. Destroying the client
