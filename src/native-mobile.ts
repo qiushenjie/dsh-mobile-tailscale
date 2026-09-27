@@ -1,5 +1,6 @@
 import { installDrawerPan } from './drawer-pan.js'
 import { installGestureTelemetry } from './gesture-telemetry.js'
+import { installStripSwipe } from './strip-swipe.js'
 import { installTerminalKeyRepair } from './terminal-keys.js'
 
 /** Mobile feature and compatibility rules applied to DSH React surfaces. */
@@ -187,25 +188,28 @@ html.dsh-native-mobile-active { -webkit-text-size-adjust:100%; text-size-adjust:
 /* Touch feedback: taps must give an immediate, perceivable response. The
    stock app relies on :hover, which touch has no persistent form of, so we
    add :active feedback here. Sidebar rows keep their deliberate neutral
-   background handling above; opacity/transform still give them feedback.
+   background handling above; opacity still gives them feedback.
    role=treeitem rows (the session list) are plain divs, so they are matched
-   explicitly. No brightness filter: on a dark theme dimming a full-width row
-   reads as the whole screen changing, which is the "screen got darker when I
-   tapped" complaint; opacity alone is the feedback. */
-html.dsh-native-mobile-active :is(a,button,[role="button"],[role="tab"],[role="treeitem"],label,[tabindex],[contenteditable]):active {
+   explicitly. Two things are deliberately missing:
+   - No brightness filter: on a dark theme dimming a full-width row reads as
+     the whole screen changing, which is the "screen got darker when I tapped"
+     complaint.
+   - No transform, and never on the app's structural boxes. A browser marks
+     the whole ancestor chain :active, so a transform:scale(.97) on a
+     section[data-dockkit-host] re-layers the pane and its scroller for the
+     length of the press: the content jumps and blinks, which is exactly the
+     "scroll up, it sticks and shivers, then the history appears" report. The
+     phone telemetry caught the pane host at opacity 0.72 - our own feedback
+     value - while every neighbour stayed at 1. */
+html.dsh-native-mobile-active :is(a,button,[role="button"],[role="tab"],[role="treeitem"],label,[tabindex],[contenteditable]):active:not(section):not([data-dockkit-host]):not([data-dockkit-pane]):not([data-dsh-mobile-workbench]):not([data-conversation-scroll]) {
   opacity:.72 !important;
-  transform:scale(.97) !important;
 }
-/* Inside the right drawer the scale/filter feedback re-layers a
-   fixed-and-transformed subtree on every tap: tapping a file in the tree made
-   the row jump and blink before settling (measured: transform none ->
-   matrix(.97,...) plus filter none -> brightness(.95) for the length of the
-   press). The host paints its own pressed background there, so keep the
-   opacity feedback only. A touch tap also leaves a pointer :hover behind it,
-   which is why the hover token is neutralized here the same way the left
+/* Inside the right drawer the host paints its own pressed background, so keep
+   the opacity feedback only. A touch tap also leaves a pointer :hover behind
+   it, which is why the hover token is neutralized here the same way the left
    sidebar does it. */
 html.dsh-native-mobile-active [data-dsh-mobile-workbench] { --dsw-alias-interactive-bg-hover:transparent !important; }
-html.dsh-native-mobile-active [data-dsh-mobile-workbench] :is(a,button,[role="button"],[role="tab"],[role="treeitem"],label,[tabindex],[contenteditable]):active {
+html.dsh-native-mobile-active [data-dsh-mobile-workbench] :is(a,button,[role="button"],[role="tab"],[role="treeitem"],label,[tabindex],[contenteditable]):active:not(section):not([data-dockkit-host]):not([data-dockkit-pane]):not([data-dsh-mobile-workbench]):not([data-conversation-scroll]) {
   opacity:.72 !important;
   transform:none !important;
   filter:none !important;
@@ -1125,6 +1129,9 @@ export function installNativeMobileSurface(): () => void {
   // iOS sometimes never lets the drag reach the drawer's scroller; see
   // {@link installDrawerPan}.
   const removeDrawerPan = installDrawerPan()
+  // The strip is the host's pane-drag handle and the open files most often fit,
+  // so a sideways swipe there has nothing to pan; see {@link installStripSwipe}.
+  const removeStripSwipe = installStripSwipe()
   // Debug channel: the tab swipe cannot be reproduced off-device, so real drags
   // in the drawer are recorded and posted to the remote proxy. See
   // {@link installGestureTelemetry}; remove once the gesture is understood.
@@ -1134,6 +1141,7 @@ export function installNativeMobileSurface(): () => void {
     observer.disconnect()
     removeTerminalKeyRepair()
     removeDrawerPan()
+    removeStripSwipe()
     removeGestureTelemetry()
     document.removeEventListener('click', onBranchClick, true)
     document.removeEventListener('click', onSidebarSessionSelect, true)

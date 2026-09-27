@@ -378,13 +378,21 @@ describe('native mobile presentation', () => {
     expect(NATIVE_MOBILE_STYLES).toContain('touch-action:pan-x pinch-zoom !important;')
   })
 
-  it('keeps the host tap feedback free of a brightness filter', () => {
+  it('keeps the host tap feedback free of a brightness filter or a re-layout', () => {
     // filter:brightness(.95) over a full-width row on a dark theme reads as the
     // whole screen dimming on every tap; opacity is the feedback that stays.
-    const global: string = NATIVE_MOBILE_STYLES.slice(0, NATIVE_MOBILE_STYLES.indexOf('[data-dsh-mobile-workbench]'))
+    // transform:scale(.97) is gone for the same class of reason: the browser
+    // marks the whole ancestor chain :active, so scaling a structural box
+    // (section[data-dockkit-host]) re-layers the pane and its scroller under the
+    // finger, which is the "scroll up, it sticks and shivers" report, so those
+    // boxes are excluded from the rule outright.
+    const global: string = NATIVE_MOBILE_STYLES.slice(0, NATIVE_MOBILE_STYLES.indexOf('/* Inside the right drawer'))
     expect(global).not.toContain('filter:brightness')
     expect(global).toContain('opacity:.72 !important;')
-    expect(global).toContain('transform:scale(.97) !important;')
+    expect(global).toContain(':active:not(section):not([data-dockkit-host]):not([data-dockkit-pane]):not([data-dsh-mobile-workbench]):not([data-conversation-scroll])')
+    // The feedback rule itself must not scale or re-layer its target.
+    const feedback: string = global.slice(global.indexOf(':active:not(section)'))
+    expect(feedback.slice(0, feedback.indexOf('}'))).not.toContain('scale')
   })
 
   it('keeps the tap feedback inside the right drawer free of a re-layered subtree', () => {
