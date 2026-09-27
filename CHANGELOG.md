@@ -2,6 +2,10 @@
 
 Notable changes to `dsh-mobile-tailscale` are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.4.7
+
+- **The「载入历史」rescue no longer fires on a page that is merely talking about it.** 0.4.6 decided history was stuck by scanning the whole chat flow for the loading text, so as soon as a conversation quoted「载入历史」— as this very conversation does — a healthy phone was declared stuck: the sheet appeared every so often, the mux socket was closed to "recover" a connection that was already delivering frames, and the page reloaded itself once. The watchdog now reads only the chat view's own status nodes (direct children of `[data-chat-flow]`, matched by CSS-module class suffix so a build's hash change cannot hide them) and requires the multiplexer to have been silent for 8 s at the same time; the sheet appears after 12 s of a genuine stall, hides itself as soon as frames resume, and the reconnect and reload steps moved to 20 s and 40 s. The sheet also reports how long the wire has been quiet, which is the number that separates a stalled socket from a slow render.
+
 ## 0.4.6
 
 - **The space-bar repair now decides from the wire instead of from the page, and reports back what it saw.** 0.4.5 re-dispatched a space when no `input` event and no mux frame followed it, but the terminal *is* xterm.js, which discards the `input` event after a `keydown` it already handled — so the guard could read "nothing happened" for a space that had in fact been sent, and a leftover space in the helper textarea's value suppressed the repair outright. The phone bootstrap now watches only outbound traffic (`WebSocket.send`, `fetch`, `XMLHttpRequest.send`) in a 60 ms window, triggers on a trusted space `keydown` inside `.xterm` *or* on a `beforeinput`/`input` carrying a space, de-duplicates for 300 ms, and posts a JSON report of what it saw to `POST /mobile-access/key-probe`, which the host logs as `[dsh-mobile-tailscale] phone key probe …`.
