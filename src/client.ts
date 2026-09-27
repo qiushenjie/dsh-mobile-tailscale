@@ -1,6 +1,6 @@
 import { createElement } from 'react'
 import { installNativeMobileSurface, NATIVE_MOBILE_STYLES } from './native-mobile.js'
-import { installPhoneWatchdog } from './phone-watchdog.js'
+import { installPhoneWatchdog, type HealConnection } from './phone-watchdog.js'
 
 interface ClientContext {
   effect(effect: () => void | (() => void), label?: string): void
@@ -13,6 +13,8 @@ interface ClientContext {
 
 interface MobileConnectionHandle {
   isLoopback: boolean
+  /** DSH's documented recovery entry point: abort the generation and retry at once. */
+  reconnect?(): void
 }
 
 interface MobileExtensionContext {
@@ -119,6 +121,28 @@ export function trustAuthenticatedGatewayConnection(connection: MobileConnection
   const previous = connection.isLoopback
   connection.isLoopback = true
   return () => { connection.isLoopback = previous }
+}
+
+/**
+ * Rebuild DSH's gateway connection from the page.
+ *
+ * `ctx.connection.reconnect()` is the recovery the client gateway documents for
+ * consumers that own recovery: it aborts the active generation and starts retry
+ * 1 immediately, which is what asks the Gateway for a fresh multiplexer socket.
+ * Closing the socket ourselves is not equivalent -- `RemoteStreamMuxClient` only
+ * connects from `start()`/`reconnect()`, so a closed socket is never replaced and
+ * every later session open waits for a carrier that never comes.
+ */
+export function healGatewayConnection(connection: MobileConnectionHandle): HealConnection {
+  return () => {
+    if (typeof connection.reconnect !== 'function') return false
+    try {
+      connection.reconnect()
+      return true
+    } catch {
+      return false
+    }
+  }
 }
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className?: string): HTMLElementTagNameMap[K] {
@@ -853,8 +877,19 @@ export function apply(ctx: ClientContext): void {
     if (!desktopSurface) {
       const removeCustom = installCustomAssets()
       const removeSurface = installNativeMobileSurface()
-      const removeWatchdog = installPhoneWatchdog()
-      return () => { removeCustom(); removeSurface(); removeWatchdog(); style.remove() }
+      const heal = healGatewayConnection(ctx.get('connection'))
+      const removeWatchdog = installPhoneWatchdog({ heal })
+      const globals = window as unknown as Record<string, unknown>
+      const previousHeal = globals.__DSH_MOBILE_HEAL__
+      globals.__DSH_MOBILE_HEAL__ = heal
+      return () => {
+        removeCustom()
+        removeSurface()
+        removeWatchdog()
+        if (previousHeal === undefined) delete globals.__DSH_MOBILE_HEAL__
+        else globals.__DSH_MOBILE_HEAL__ = previousHeal
+        style.remove()
+      }
     }
     const control = installControl()
     const disposeSlot = ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register<{ wide: boolean }>({ name: 'sidebar.footer.action', id: 'dsh-mobile' }, ({ wide }) => createElement('button', {

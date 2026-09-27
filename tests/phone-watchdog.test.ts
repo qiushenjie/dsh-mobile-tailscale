@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { chatStatusText, isHistoryStalled } from '../src/phone-watchdog.js'
+import { chatStatusText, describeDownlinkFrame, describeOpenFrame, formatBytes, isHistoryStalled } from '../src/phone-watchdog.js'
 
 /**
  * Stand-in for a chat flow node. Only the two things `chatStatusText` reads are
@@ -55,5 +55,83 @@ describe('isHistoryStalled', () => {
   it('stays quiet when nothing is loading or the page is in the background', () => {
     expect(isHistoryStalled({ visible: true, hint: '', idleMs: 60_000 })).toBe(false)
     expect(isHistoryStalled({ visible: false, hint: '载入历史…', idleMs: 60_000 })).toBe(false)
+  })
+})
+
+describe('describeOpenFrame', () => {
+  const follow = JSON.stringify({
+    type: 'open',
+    streamId: 'stream-1',
+    endpoint: 'session/follow',
+    payload: {
+      args: {
+        request: {
+          address: { kind: 'session', sessionId: 'session-06ec1d65-bd9d-4f64-b243-01e716e63f35' },
+          assistantStream: true,
+          maxMessages: 10,
+          turnWindow: { minMessages: 50, minTurns: 2 },
+        },
+      },
+    },
+  })
+
+  it('reads the endpoint, stream and window of an open frame', () => {
+    expect(describeOpenFrame(follow)).toStrictEqual({
+      streamId: 'stream-1',
+      endpoint: 'session/follow',
+      detail: '[session-06ec1d65 max=10 turn=50/2 as=y]',
+    })
+  })
+
+  it('names both sessions of a subagent address and tolerates an absent request', () => {
+    const subagent = describeOpenFrame(JSON.stringify({
+      type: 'open',
+      streamId: 'stream-2',
+      endpoint: 'session/follow',
+      payload: { args: { request: { address: { kind: 'subagent', parentSessionId: 'session-aa11', childSessionId: 'session-bb22' } } } },
+    }))
+    expect(subagent?.detail).toBe('[session-aa11/session-bb22 max=- turn=- as=-]')
+    const bare = describeOpenFrame(JSON.stringify({ type: 'open', streamId: 's', endpoint: 'job/list' }))
+    expect(bare).toStrictEqual({ streamId: 's', endpoint: 'job/list', detail: '' })
+  })
+
+  it('ignores uplink items, downlink frames and unparseable text', () => {
+    expect(describeOpenFrame(JSON.stringify({ type: 'item', streamId: 's', value: {} }))).toBeNull()
+    expect(describeOpenFrame(JSON.stringify({ type: 'open', endpoint: 'job/list' }))).toBeNull()
+    expect(describeOpenFrame('{"type":"open"')).toBeNull()
+    expect(describeOpenFrame(42)).toBeNull()
+  })
+})
+
+describe('describeDownlinkFrame', () => {
+  it('reports a snapshot with its record count and byte size', () => {
+    const data = JSON.stringify({ type: 'item', streamId: 's1', value: { type: 'snapshot', records: [{}, {}, {}] } })
+    expect(describeDownlinkFrame(data)).toStrictEqual({
+      streamId: 's1',
+      kind: 'snapshot',
+      detail: ' rec=3',
+      bytes: data.length,
+    })
+  })
+
+  it('reports error codes and stream ends', () => {
+    expect(describeDownlinkFrame(JSON.stringify({ type: 'error', streamId: 's1', error: { code: 'gateway/uplink-overflow', message: 'too slow' } }))?.kind).toBe('error')
+    expect(describeDownlinkFrame(JSON.stringify({ type: 'error', streamId: 's1', error: { code: 'gateway/uplink-overflow', message: 'too slow' } }))?.detail).toBe(' gateway/uplink-overflow too slow')
+    expect(describeDownlinkFrame(JSON.stringify({ type: 'end', streamId: 's1' }))).toStrictEqual({ streamId: 's1', kind: 'end', detail: '', bytes: 30 })
+  })
+
+  it('ignores uplink frames and text that is not a frame', () => {
+    expect(describeDownlinkFrame(JSON.stringify({ type: 'open', streamId: 's1', endpoint: 'job/list' }))).toBeNull()
+    expect(describeDownlinkFrame(JSON.stringify({ type: 'item', value: {} }))).toBeNull()
+    expect(describeDownlinkFrame('not json')).toBeNull()
+  })
+})
+
+describe('formatBytes', () => {
+  it('keeps the sheet readable across four orders of magnitude', () => {
+    expect(formatBytes(0)).toBe('0B')
+    expect(formatBytes(999)).toBe('999B')
+    expect(formatBytes(279_501)).toBe('273.0K')
+    expect(formatBytes(11_116_757)).toBe('10.6M')
   })
 })
