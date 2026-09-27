@@ -349,22 +349,42 @@ describe('native mobile presentation', () => {
     expect(NATIVE_MOBILE_STYLES).not.toContain('_panelHidden"]) { transform:translateX(0)')
   })
 
-  it('gives the vertical pan back to every node inside the open right drawer', () => {
+  it('gives both pan axes back to every node inside the open right drawer', () => {
     // The app's own rows claim the touch gesture (file drag), so the pane's
     // scroller never received a finger drag and the drawer could not be scrolled.
     expect(NATIVE_MOBILE_STYLES).toContain('[data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] * {')
-    expect(NATIVE_MOBILE_STYLES).toContain('touch-action:pan-y pinch-zoom !important;')
+    expect(NATIVE_MOBILE_STYLES).toContain('touch-action:pan-x pan-y pinch-zoom !important;')
+    // Handing back the vertical axis alone left WebKit with nothing to claim for
+    // a horizontal swipe over the open-files strip, and the host then dragged the
+    // pane out of the window instead of scrolling the tabs.
+    expect(NATIVE_MOBILE_STYLES).not.toContain('touch-action:pan-y pinch-zoom !important;')
     // Nesting every drawer descendant as its own momentum scroller is what made
     // iOS drop the drag, so the pair must not come back. (The left sidebar list
     // and the horizontal table scroller keep theirs: both are single scrollers.)
-    expect(NATIVE_MOBILE_STYLES).not.toContain('touch-action:pan-y pinch-zoom !important;\n    -webkit-overflow-scrolling:touch;')
+    expect(NATIVE_MOBILE_STYLES).not.toContain('touch-action:pan-x pan-y pinch-zoom !important;\n    -webkit-overflow-scrolling:touch;')
     expect(NATIVE_MOBILE_STYLES).toContain('overscroll-behavior:contain;')
     // Wide content still pans sideways.
     expect(NATIVE_MOBILE_STYLES).toContain(':is(pre,[data-dsh-mobile-table-scroll]) {')
-    expect(NATIVE_MOBILE_STYLES).toContain('touch-action:pan-x pan-y pinch-zoom !important;')
     // The dockkit chain must not collapse, or the panel body has nothing to scroll.
     expect(NATIVE_MOBILE_STYLES).toContain(':is([data-dockkit-host],[data-dockkit-pane],[data-dockkit-content]) {')
     expect(NATIVE_MOBILE_STYLES).toContain('box-sizing:border-box !important;\n    min-height:0 !important;')
+  })
+
+  it('hands the open-files strip its own horizontal pan back', () => {
+    // `._stripTabs_1s7ij_257{overflow-x:auto}` is the app's horizontal scroller,
+    // but the app also puts touch-action:none on the bar and the strip, so the
+    // sole axis a swipe over the tabs may claim has to be written back.
+    expect(NATIVE_MOBILE_STYLES).toContain(':is([class*="_tabStrip"],[class*="_stripTabs"],[class*="_detailTabs"])')
+    expect(NATIVE_MOBILE_STYLES).toContain('touch-action:pan-x pinch-zoom !important;')
+  })
+
+  it('keeps the host tap feedback free of a brightness filter', () => {
+    // filter:brightness(.95) over a full-width row on a dark theme reads as the
+    // whole screen dimming on every tap; opacity is the feedback that stays.
+    const global: string = NATIVE_MOBILE_STYLES.slice(0, NATIVE_MOBILE_STYLES.indexOf('[data-dsh-mobile-workbench]'))
+    expect(global).not.toContain('filter:brightness')
+    expect(global).toContain('opacity:.72 !important;')
+    expect(global).toContain('transform:scale(.97) !important;')
   })
 
   it('keeps the tap feedback inside the right drawer free of a re-layered subtree', () => {

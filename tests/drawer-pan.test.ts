@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { browserMovedScrolled, canScrollBy, DRAWER_PAN_MIN_DELTA, drawerPanDecision, panDelta, scrollableAncestor } from '../src/drawer-pan.js'
+import { browserMovedScrolled, canScrollBy, DRAWER_PAN_AXIS_RATIO, DRAWER_PAN_MIN_DELTA, drawerPanDecision, horizontallyScrollableAncestor, isVerticalGesture, panDelta, scrollableAncestor } from '../src/drawer-pan.js'
 
 /** A stand-in node: the helper only ever reads these four properties. */
 const node = (overflowY: string, scrollHeight: number, clientHeight: number, parentElement: Element | null = null): Element =>
@@ -7,6 +7,13 @@ const node = (overflowY: string, scrollHeight: number, clientHeight: number, par
 
 const readAs = (styles: ReadonlyMap<Element, string>) => (element: Element): CSSStyleDeclaration =>
   ({ overflowY: styles.get(element) ?? 'visible' } as CSSStyleDeclaration)
+
+/** The horizontal twin of the stub above. */
+const box = (overflowX: string, scrollWidth: number, clientWidth: number, parentElement: Element | null = null): Element =>
+  ({ overflowX, scrollWidth, clientWidth, parentElement } as unknown as Element)
+
+const readX = (styles: ReadonlyMap<Element, string>) => (element: Element): CSSStyleDeclaration =>
+  ({ overflowX: styles.get(element) ?? 'visible' } as CSSStyleDeclaration)
 
 describe('mobile drawer pan fallback', () => {
   it('measures a drag the way a scroll delta is applied', () => {
@@ -62,5 +69,30 @@ describe('mobile drawer pan fallback', () => {
     // Nothing can scroll: the caller falls back to the drawer root itself.
     expect(scrollableAncestor(node('hidden', 900, 300), readAs(new Map()))).toBeUndefined()
     expect(scrollableAncestor(null, readAs(new Map()))).toBeUndefined()
+  })
+
+  it('tells a sideways swipe apart from a downward drag', () => {
+    // The fallback cancels the move it takes over, so claiming a sideways swipe
+    // would cancel the strip's own horizontal scroll with it.
+    expect(isVerticalGesture(0, 20)).toBe(true)
+    expect(isVerticalGesture(2, 20)).toBe(true)
+    expect(isVerticalGesture(-4, -40)).toBe(true)
+    // A diagonal drift down the tab strip stays with the browser.
+    expect(isVerticalGesture(20, 2)).toBe(false)
+    expect(isVerticalGesture(20, 20)).toBe(false)
+    expect(isVerticalGesture(0, 0)).toBe(false)
+    expect(DRAWER_PAN_AXIS_RATIO).toBeGreaterThan(1)
+  })
+
+  it('leaves a gesture that starts in a sideways scroller to that scroller', () => {
+    // The open-files strip measured 600px of tabs in a 215px bar.
+    const strip = box('auto', 600, 215)
+    const tab = box('visible', 40, 40, strip)
+    expect(horizontallyScrollableAncestor(tab, readX(new Map([[strip, 'auto']])))).toBe(strip)
+    // A box with no room to move cannot take the swipe.
+    expect(horizontallyScrollableAncestor(box('auto', 215, 215), readX(new Map()))).toBeUndefined()
+    // Only a real overflow box counts, not a hidden or visible one.
+    expect(horizontallyScrollableAncestor(box('hidden', 600, 215), readX(new Map()))).toBeUndefined()
+    expect(horizontallyScrollableAncestor(null, readX(new Map()))).toBeUndefined()
   })
 })

@@ -16,10 +16,22 @@
  * A browser that moved it is already doing the job and this module does nothing;
  * a browser that left it untouched gets the delta applied by hand, with the move
  * cancelled so the page behind the drawer stays put.
+ *
+ * Two things stay out of its way on purpose. A gesture that starts inside a box
+ * that scrolls sideways (the dockkit tab strip of open files) belongs to that
+ * box, and a gesture whose own axis is sideways belongs to the browser: the
+ * fallback cancels the touch to apply its delta by hand, which would also kill
+ * the strip's horizontal scroll, so it must never claim either of them.
  */
 
 /** A drag shorter than this is a tap, not a pan. */
 export const DRAWER_PAN_MIN_DELTA = 3
+
+/**
+ * How much more vertical than horizontal a drag has to be before the fallback
+ * may take it over.
+ */
+export const DRAWER_PAN_AXIS_RATIO = 1.2
 
 /** Slack for comparing scroll positions across frames. */
 const SCROLL_EPSILON = 1
@@ -63,6 +75,42 @@ export function canScrollBy(scrollTop: number, scrollHeight: number, clientHeigh
   if (delta > 0) return scrollTop + clientHeight < scrollHeight - SCROLL_EPSILON
   if (delta < 0) return scrollTop > SCROLL_EPSILON
   return false
+}
+
+/**
+ * Whether a drag is vertical enough for the fallback to own it.
+ *
+ * A sideways swipe (the tab strip, a wide table) has to be left to the browser
+ * even when the finger drifts a few pixels down: `preventDefault()` on the move
+ * would take the horizontal scroll away with it.
+ * @param dx - Horizontal travel since the gesture started.
+ * @param dy - Vertical travel since the gesture started.
+ * @param ratio - How dominant the vertical axis must be.
+ * @returns Whether the fallback may treat this as a vertical pan.
+ */
+export function isVerticalGesture(dx: number, dy: number, ratio = DRAWER_PAN_AXIS_RATIO): boolean {
+  const across = Math.abs(dx)
+  const along = Math.abs(dy)
+  if (across === 0 && along === 0) return false
+  return along >= across * ratio
+}
+
+/**
+ * The nearest box that can scroll sideways right now.
+ *
+ * The dockkit tab strip is one (measured: 600px of tabs in a 215px bar), and a
+ * gesture that starts inside it belongs to it.
+ * @param start - The node the finger landed on.
+ * @param read - Computed-style reader, injectable for tests.
+ * @returns The sideways scroller, or `undefined` when there is none.
+ */
+export function horizontallyScrollableAncestor(start: Element | null, read: (element: Element) => CSSStyleDeclaration = (element) => getComputedStyle(element)): Element | undefined {
+  for (let node: Element | null = start; node !== null; node = node.parentElement) {
+    const overflowX = read(node).overflowX
+    if (overflowX !== 'auto' && overflowX !== 'scroll') continue
+    if (node.scrollWidth - node.clientWidth > SCROLL_EPSILON) return node
+  }
+  return undefined
 }
 
 /**
@@ -119,6 +167,7 @@ type PanLogHost = { __DSH_MOBILE_DRAWER_PAN__?: DrawerPanNote[] }
 /** Drag bookkeeping for the gesture the module is following. */
 interface DrawerDrag {
   readonly scroller: Element
+  baseX: number
   baseY: number
   baseScrollTop: number
   gaveBrowserChance: boolean
@@ -159,6 +208,13 @@ export function installDrawerPan(selector = '[data-dsh-mobile-workbench][data-ds
     const touch = event.touches[0]
     if (touch === undefined) return
     const delta = panDelta(state.baseY, touch.clientY)
+    const across = touch.clientX - state.baseX
+    if (Math.abs(across) >= DRAWER_PAN_MIN_DELTA && !isVerticalGesture(across, delta)) {
+      // A sideways swipe belongs to the browser (the open-files strip, a wide
+      // table). Taking it over would cancel that scroll, so let go for good.
+      stop()
+      return
+    }
     if (Math.abs(delta) < DRAWER_PAN_MIN_DELTA) return
     const decision = drawerPanDecision(
       state.gaveBrowserChance,
@@ -192,8 +248,11 @@ export function installDrawerPan(selector = '[data-dsh-mobile-workbench][data-ds
     if (!(scope instanceof HTMLElement)) return
     const touch = event.touches[0]
     if (touch === undefined) return
+    // A finger that lands in a sideways scroller (the strip of open files) is
+    // swiping that scroller: the fallback must not claim its moves.
+    if (horizontallyScrollableAncestor(target) !== undefined) return
     const scroller = scrollableAncestor(target) ?? scope
-    drag = { scroller, baseY: touch.clientY, baseScrollTop: scroller.scrollTop, gaveBrowserChance: false }
+    drag = { scroller, baseX: touch.clientX, baseY: touch.clientY, baseScrollTop: scroller.scrollTop, gaveBrowserChance: false }
     drawer = scope
     scope.addEventListener('touchmove', onTouchMove, { passive: false, capture: true })
     document.addEventListener('touchend', stop, true)

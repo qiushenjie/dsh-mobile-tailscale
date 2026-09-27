@@ -188,11 +188,12 @@ html.dsh-native-mobile-active { -webkit-text-size-adjust:100%; text-size-adjust:
    add :active feedback here. Sidebar rows keep their deliberate neutral
    background handling above; opacity/transform still give them feedback.
    role=treeitem rows (the session list) are plain divs, so they are matched
-   explicitly. */
+   explicitly. No brightness filter: on a dark theme dimming a full-width row
+   reads as the whole screen changing, which is the "screen got darker when I
+   tapped" complaint; opacity alone is the feedback. */
 html.dsh-native-mobile-active :is(a,button,[role="button"],[role="tab"],[role="treeitem"],label,[tabindex],[contenteditable]):active {
   opacity:.72 !important;
   transform:scale(.97) !important;
-  filter:brightness(.95) !important;
 }
 /* Inside the right drawer the scale/filter feedback re-layers a
    fixed-and-transformed subtree on every tap: tapping a file in the tree made
@@ -264,16 +265,23 @@ html.dsh-native-mobile-active [data-dsh-mobile-header] [class*="_sessionLogButto
   /* A finger drag only pans the page when the node it landed on allows that
      axis. The app's own rows (file tree, tabs) claim the gesture for pointer
      dragging, so a swipe inside the drawer never reached the pane's scroller.
-     Hand the vertical pan back to every node in the open drawer, and let the
+     Hand the pan back to every node in the open drawer, and let the
      drawer itself be a real scrolling box (overscroll contained, so the page
      behind it never moves instead).
      NB: -webkit-overflow-scrolling is deliberately NOT set here. On iOS it turns
      every descendant into its own momentum scroller, a nest in which the pane's
      own scroller can lose the drag outright; modern iOS scrolls without it.
+     Both axes are handed back, never the vertical one alone: WebKit resolves a
+     gesture against the ancestor chain as well as the touched node, so a blanket
+     pan-y above a horizontal scroller (the open-files strip) can leave the
+     browser with no axis it may claim; the host's own pointer drag then pulls the
+     pane out of the window instead of scrolling the tabs. pan-x pan-y still
+     outranks the none the app puts on its rows, which is why the vertical pan
+     works at all.
      installDrawerPan() covers a device that still drops the gesture. */
   html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"],
   html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] * {
-    touch-action:pan-y pinch-zoom !important;
+    touch-action:pan-x pan-y pinch-zoom !important;
   }
   html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] {
     overscroll-behavior:contain;
@@ -284,7 +292,7 @@ html.dsh-native-mobile-active [data-dsh-mobile-header] [class*="_sessionLogButto
   }
   /* The dockkit tab strip is the app's own horizontal scroller
      (._stripTabs_1s7ij_257{overflow-x:auto}) and it declares touch-action:none
-     on both the bar and the strip; the blanket pan-y above outranks that, so
+     on both the bar and the strip; the blanket above outranks that, so
      the tabs past the drawer's right edge became unreachable. Hand the
      horizontal pan back to the strip chain (bar, strip and their children),
      which is what makes "swipe the open files" work again. The right details
