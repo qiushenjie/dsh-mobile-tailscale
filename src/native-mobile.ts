@@ -248,6 +248,16 @@ html.dsh-native-mobile-active [data-dsh-mobile-header] [class*="_sessionLogButto
     overflow-y:auto !important;
     overscroll-behavior:contain;
   }
+  /* Browsers only scroll an element when the touch gesture is allowed to pan
+     vertically on the node the finger landed on. The app's own tree rows claim
+     the gesture (they also support mouse dragging), so a finger drag inside the
+     drawer never reached the scrolling body: give every node in the open panel
+     back the vertical pan. */
+  html.dsh-native-mobile-active [data-sidebar-right-panel][data-sidebar-right-open],
+  html.dsh-native-mobile-active [data-sidebar-right-panel][data-sidebar-right-open] * {
+    touch-action:pan-y pinch-zoom !important;
+    -webkit-overflow-scrolling:touch;
+  }
 }
 /* Landscape phones are short: the sidebar's fixed header + footer squeeze the
    session list to a couple of rows, and forcing overflow:visible on the list
@@ -737,7 +747,30 @@ export function installNativeMobileSurface(): () => void {
     if (toggle !== undefined) toggle.dataset.dshMobileToggle = 'true'
     const collapsed = classToken(sidebarRoot, '_collapsed')
     sidebar.dataset.open = String(!collapsed)
-    backdrop.hidden = collapsed
+    setBackdropOpen(!collapsed)
+  }
+  // The backdrop is a viewport-covering dim shown behind the left drawer. React
+  // re-renders the shell on every tap, and for a frame the sidebar can report a
+  // class list without _collapsed — enough to flash the whole screen dark when a
+  // file is tapped in the right panel. Only flip the backdrop once the reported
+  // state has survived a settle window.
+  const BACKDROP_SETTLE_MS = 180
+  let backdropOpen = false
+  let backdropTimer = 0
+  const setBackdropOpen = (open: boolean): void => {
+    if (open === backdropOpen) {
+      if (backdropTimer !== 0) {
+        window.clearTimeout(backdropTimer)
+        backdropTimer = 0
+      }
+      return
+    }
+    if (backdropTimer !== 0) window.clearTimeout(backdropTimer)
+    backdropTimer = window.setTimeout(() => {
+      backdropTimer = 0
+      backdropOpen = open
+      backdrop.hidden = !open
+    }, BACKDROP_SETTLE_MS)
   }
   const runSync = (): void => {
     scheduled = 0
@@ -768,6 +801,7 @@ export function installNativeMobileSurface(): () => void {
     if (branchToastTimer !== 0) window.clearTimeout(branchToastTimer)
     branchToast.remove()
     if (scheduled !== 0) window.clearTimeout(scheduled)
+    if (backdropTimer !== 0) window.clearTimeout(backdropTimer)
     if (transitionFrame !== 0) cancelAnimationFrame(transitionFrame)
     if (transitionRestartFrame !== 0) cancelAnimationFrame(transitionRestartFrame)
     if (transitionTimer !== 0) clearTimeout(transitionTimer)

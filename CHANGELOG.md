@@ -2,6 +2,11 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.4.2
+
+- **The file tree inside the phone's right drawer scrolls with a finger again.** 0.4.1 gave the open panel the height chain and `overflow-y:auto`, which a synthesised scroll gesture could already drive — but a real finger still did nothing, because a browser only scrolls when the node the finger lands on is allowed to pan vertically, and the app's own tree rows claim that gesture (they also implement mouse dragging). Every node inside the open panel now declares `touch-action: pan-y pinch-zoom`, so the drag reaches the scrolling body.
+- **Tapping a file or folder no longer flashes the whole screen.** The full-viewport dim behind the left drawer was driven straight off the sidebar's `_collapsed` class, and React re-renders that class list on every tap: for a frame the sidebar reported itself expanded, the dim was switched on, and the next sync switched it off — a full-screen flash with no relation to the tapped row. The backdrop now only flips once the reported state has survived a 180 ms settle window, so a transient class change is ignored while a genuine drawer open still dims immediately afterwards.
+
 ## 0.4.1
 
 - **The right sidebar no longer covers the session on a phone, and its file tree scrolls again.** In this DSH generation the right sidebar is a dockkit overlay whose host column is 0-wide on a phone: the panel painted full-bleed over the conversation and its body collapsed to zero height, so the tree spilled across the session and could not be scrolled. The open panel is now pinned to the viewport as a `min(94vw,420px)` full-height drawer with an opaque background, and the dockkit host/pane/content get the height chain and `overflow-y:auto` back, so the panel owns its own scrolling. The rules are scoped to `[data-sidebar-right-open]`: the closed panel keeps the app's own hidden shell and never paints or takes taps.
