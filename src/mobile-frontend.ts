@@ -252,6 +252,24 @@ const MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP = `(()=>{if(window.__DSH_TRANSPOR
  */
 const MOBILE_SESSION_WINDOW_BOOTSTRAP = `(()=>{const send=WebSocket.prototype.send;WebSocket.prototype.send=function(data){if(typeof data==="string"&&data.includes('"endpoint":"session/follow"')){try{const frame=JSON.parse(data);const request=frame&&frame.payload&&frame.payload.args&&frame.payload.args.request;if(request&&typeof request==="object"){if(typeof request.maxMessages!=="number"||request.maxMessages>${MOBILE_SESSION_WINDOW_MESSAGES})request.maxMessages=${MOBILE_SESSION_WINDOW_MESSAGES};delete request.turnWindow;data=JSON.stringify(frame)}}catch(error){}}return send.call(this,data)}})();`
 
+/**
+ * Gives the terminal back its space bar on a phone keyboard.
+ *
+ * The terminal DSH ships is xterm.js, which reads keystrokes from `keydown` and
+ * steps aside whenever the event carries the legacy IME code 229 - the code an
+ * iOS Chinese keyboard reports for every key. Letters survive that because the
+ * IME commits them through composition events, but a space bar pressed with an
+ * empty composition produces no composition at all, so the keystroke is dropped
+ * and the cursor never moves. The terminal is DSH's own module, so the repair
+ * has to be done from the phone bootstrap: when a trusted space keydown inside
+ * `.xterm` is followed by no traffic (mux frame or request) and no `input`
+ * event, the key is re-dispatched with the legacy fields xterm expects.
+ *
+ * A space that already works sends its frame during the original keydown, so
+ * the repair stays out of the way on desktop, Android, and every normal path.
+ */
+const MOBILE_TERMINAL_SPACE_BOOTSTRAP = `(()=>{const SPACE=32;let traffic=0,inputs=0;const send=WebSocket.prototype.send;WebSocket.prototype.send=function(data){traffic+=1;return send.call(this,data)};const startFetch=window.fetch;if(typeof startFetch==="function")window.fetch=function(){traffic+=1;return startFetch.apply(this,arguments)};document.addEventListener("input",()=>{inputs+=1},true);document.addEventListener("keydown",(event)=>{if(event.isTrusted!==true)return;const target=event.target;if(!target||typeof target.closest!=="function")return;if(event.key!==" "&&event.keyCode!==SPACE)return;if(!target.closest(".xterm"))return;if(!document.documentElement.classList.contains("dsh-native-mobile-active"))return;const seenTraffic=traffic,seenInputs=inputs;window.setTimeout(()=>{if(inputs!==seenInputs||traffic!==seenTraffic)return;if(!target.isConnected)return;if(typeof target.value==="string"&&target.value.indexOf(" ")>=0)return;const init={key:" ",code:"Space",keyCode:SPACE,which:SPACE,charCode:0,bubbles:true,cancelable:true,composed:true};target.dispatchEvent(new KeyboardEvent("keydown",init));target.dispatchEvent(new KeyboardEvent("keypress",{key:" ",code:"Space",keyCode:SPACE,which:SPACE,charCode:SPACE,bubbles:true,cancelable:true,composed:true}))},50)},true)})();`
+
 
 interface BootGraphEntry {
   id: string
@@ -829,7 +847,7 @@ export function rewriteRemoteMobileIndexWithBatches(html: string, layoutMode: Mo
   if (mobileBatches.length > 0) {
     site.parsed.rev = createHash('sha256').update(JSON.stringify({ entries, batches })).digest('hex').slice(0, 16)
   }
-  const replacement = `${MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP}${MOBILE_SESSION_WINDOW_BOOTSTRAP}${MOBILE_TRUST_FLAG}${site.assignment}${JSON.stringify(site.parsed)};`
+  const replacement = `${MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP}${MOBILE_SESSION_WINDOW_BOOTSTRAP}${MOBILE_TERMINAL_SPACE_BOOTSTRAP}${MOBILE_TRUST_FLAG}${site.assignment}${JSON.stringify(site.parsed)};`
   return Object.freeze({
     html: ensureMobileViewport(`${dropStockBootPreloads(html.slice(0, site.start))}${replacement}${dropStockBootPreloads(html.slice(site.scriptEnd))}`),
     ...(mobileBatches.length === 0 ? {} : { batches: mobileBatches }),

@@ -609,3 +609,115 @@ describe('current-generation dedicated layout', () => {
     expect(layoutEntry(output).url).not.toBe('/mobile-access/mobile-layout-next.js')
   })
 })
+
+describe('phone terminal space repair', () => {
+  const source = currentIndex([
+    { id: '@deepseek-ai/dsh-client-runtime', url: '/runtime.js', rev: 'runtime' },
+    {
+      id: '@deepseek-ai/dsh-client-ui-layout',
+      url: '/layout.js',
+      rev: 'layout',
+      inject: [
+        '@deepseek-ai/dsh-client-runtime',
+        '@deepseek-ai/dsh-client-ui-theme',
+        '@deepseek-ai/dsh-client-shortcuts',
+      ],
+    },
+    { id: packageName, url: '/mobile.js', rev: 'mobile' },
+  ])
+  const shim = rewriteRemoteMobileIndex(source).match(/\(\(\)=>\{const SPACE=32[\s\S]*?\}\)\(\);/u)?.[0]
+
+  interface FakeEvent {
+    readonly type: string
+    readonly isTrusted: boolean
+    readonly key: string
+    readonly keyCode: number
+    readonly target: FakeElement
+  }
+
+  interface FakeElement {
+    readonly closest: (selector: string) => FakeElement | null
+    readonly isConnected: boolean
+    readonly value: string
+    readonly dispatchEvent: (event: FakeEvent) => void
+  }
+
+  /**
+   * Run the injected repair against a fake terminal. `responds` stands for an
+   * xterm that handled the key itself, `inputArrives` for an IME that committed
+   * the character as text, and `keyCode` for what the keyboard reported.
+   */
+  const runSpace = async (options: { keyCode: number; responds: boolean; inputArrives?: boolean; phone?: boolean }): Promise<{ dispatched: FakeEvent[]; frames: string[] }> => {
+    expect(shim).toBeDefined()
+    const dispatched: FakeEvent[] = []
+    const frames: string[] = []
+    const captures = new Map<string, (event: FakeEvent) => void>()
+    const element = {
+      closest: (selector: string) => (selector === '.xterm' ? element : null),
+      isConnected: true,
+      value: '',
+      dispatchEvent: (event: FakeEvent) => {
+        dispatched.push(event)
+        // xterm listens on the terminal element and forwards what it understands.
+        if (event.type === 'keydown' && event.key === ' ') frames.push(JSON.stringify({ endpoint: 'terminal/input', data: event.key }))
+      },
+    } as unknown as FakeElement & { closest: (selector: string) => unknown }
+    const FakeWebSocket = function (this: unknown) {} as unknown as { prototype: { send: (data: string) => void } }
+    FakeWebSocket.prototype.send = (data: string) => { frames.push(data) }
+    const document = {
+      documentElement: { classList: { contains: (token: string) => (options.phone ?? true) && token === 'dsh-native-mobile-active' } },
+      addEventListener: (type: string, handler: (event: FakeEvent) => void) => { captures.set(type, handler) },
+    }
+    class FakeKeyboardEvent {
+      readonly type: string
+      readonly isTrusted = false
+      readonly key: string
+      readonly keyCode: number
+      readonly target: FakeElement
+      constructor(type: string, init: Record<string, unknown>) {
+        this.type = type
+        this.key = String(init.key ?? '')
+        this.keyCode = Number(init.keyCode ?? 0)
+        this.target = element
+      }
+    }
+    const install = new Function('WebSocket', 'document', 'window', 'KeyboardEvent', `${String(shim)}\n`) as (
+      ws: unknown,
+      doc: unknown,
+      win: unknown,
+      event: unknown,
+    ) => void
+    install(FakeWebSocket, document, { setTimeout }, FakeKeyboardEvent)
+
+    const event = { type: 'keydown', isTrusted: true, key: ' ', keyCode: options.keyCode, target: element } as FakeEvent
+    captures.get('keydown')?.(event)
+    if (options.responds) FakeWebSocket.prototype.send(JSON.stringify({ endpoint: 'terminal/input', data: ' ' }))
+    if (options.inputArrives === true) captures.get('input')?.(event)
+    await new Promise((resolve) => setTimeout(resolve, 90))
+    return { dispatched, frames }
+  }
+
+  it('re-dispatches the space when the keyboard reports the IME code', async () => {
+    const { dispatched, frames } = await runSpace({ keyCode: 229, responds: false })
+    // The keydown is what xterm acts on; the keypress is its legacy fallback and
+    // is dropped by xterm itself once the keydown was handled.
+    expect(dispatched.map(event => event.type)).toEqual(['keydown', 'keypress'])
+    expect(dispatched.every(event => event.keyCode === 32)).toBe(true)
+    expect(frames.some(frame => frame.includes('terminal/input'))).toBe(true)
+  })
+
+  it('leaves a space alone once the terminal sent it itself', async () => {
+    const { dispatched } = await runSpace({ keyCode: 229, responds: true })
+    expect(dispatched).toHaveLength(0)
+  })
+
+  it('leaves a space alone when the IME committed it as text', async () => {
+    const { dispatched } = await runSpace({ keyCode: 229, responds: false, inputArrives: true })
+    expect(dispatched).toHaveLength(0)
+  })
+
+  it('never fires outside the phone surface', async () => {
+    const { dispatched } = await runSpace({ keyCode: 229, responds: false, phone: false })
+    expect(dispatched).toHaveLength(0)
+  })
+})

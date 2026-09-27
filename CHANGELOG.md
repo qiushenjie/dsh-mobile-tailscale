@@ -2,6 +2,10 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.4.5
+
+- **The space bar works in the phone's terminal again.** The terminal DSH ships is xterm.js, which reads keys from `keydown` and steps aside for the legacy IME code 229 — the code an iOS Chinese keyboard reports for *every* key. Letters still arrived because the IME commits them through composition events, but a space pressed with nothing being composed produces no composition, so the keystroke was dropped and the cursor never moved. The terminal belongs to DSH, so the repair ships in this plugin's phone bootstrap: a trusted space keydown inside `.xterm` that is followed by no mux frame and no `input` event is re-dispatched with the fields xterm expects. A space that already works sends its frame during the original keydown, so every normal path is untouched.
+
 ## 0.4.4
 
 - **A long press on the settings page no longer fades the whole page.** The phone stylesheet dims whatever you press (`opacity:.72` plus a slight scale) so a tap feels acknowledged, and its selector listed `[tabindex]` and `[contenteditable]` next to real controls. Settings dialogs, scroll regions and the terminal's helper textarea carry one of those attributes, so pressing anywhere inside them dimmed the entire surface instead of the row under the finger. The feedback now applies only to real controls (`a`, `button`, `[role="button"|"tab"|"treeitem"|"menuitem"|"option"]`, `label`), which also keeps a transform off a focused field — a known way to disturb the phone keyboard.
