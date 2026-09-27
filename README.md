@@ -53,14 +53,14 @@ dsh plugin --profile web add "$PWD/$(ls -1 dsh-mobile-tailscale-*.tgz | sort -V 
 dsh --profile web
 ```
 
-macOS 的 DSH Desktop 不把 `dsh` 加进 PATH，改用内置 CLI（应用名与路径随版本变化，先 `--version` 确认）：
+macOS 的 DSH Desktop 不把 `dsh` 加进 PATH。最省事的是装一个与 Desktop 同版本的全局 CLI：`npm install -g @deepseek-ai/dsh@0.1.7-rc.2`，之后上面的命令直接用 `dsh`。
+
+旧版应用把实现解包在 app bundle 里，也可以走内置 CLI（当前版本叫 `DeepSeek Harness.app`，实现收进 `Contents/Resources/app.asar`，所以下面这条路径只在旧版存在）：
 
 ```bash
-DSH_APP="/Applications/DeepSeek Harness.app"   # 旧版本可能叫 /Applications/DSH Desktop.app
+DSH_APP="/Applications/DSH Desktop.app"   # 旧版应用名；当前版本是 /Applications/DeepSeek Harness.app
 node "$DSH_APP/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js" --version
 ```
-
-若该路径不存在（新版把实现收进了 `app.asar`），改装与 Desktop 同版本的全局 CLI：`npm install -g @deepseek-ai/dsh@0.1.7-rc.2`，之后直接用 `dsh`。
 
 - **远程通道不需要运行 `dsh-mobile setup`**：随包的 `cordis.patch.yml` 已经写好状态文件与回环监听，远程开关在面板里打开即可。（`dsh-mobile` 是本插件提供的命令行工具，另有 `purge`、`extension create` 子命令。）
 - **同一版本覆盖安装不会生效**（pnpm 只报 `added 0`）：先 `rm -rf $DSH_HOME/profiles/<profile>/node_modules/dsh-mobile-tailscale` 再 `add`。

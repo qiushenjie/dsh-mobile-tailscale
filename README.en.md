@@ -53,14 +53,14 @@ dsh plugin --profile web add "$PWD/$(ls -1 dsh-mobile-tailscale-*.tgz | sort -V 
 dsh --profile web
 ```
 
-macOS's DSH Desktop does not add `dsh` to PATH, so use the bundled CLI instead (the app name and path change as Desktop is upgraded; confirm with `--version` first):
+macOS's DSH Desktop does not add `dsh` to PATH. The simplest fix is a global CLI matching your Desktop version — `npm install -g @deepseek-ai/dsh@0.1.7-rc.2` — after which the commands above just use `dsh`.
+
+Older builds unpacked the implementation inside the app bundle, so the bundled CLI also works there (the current app is `DeepSeek Harness.app`, whose implementation is packed into `Contents/Resources/app.asar`, so this path only exists on older versions):
 
 ```bash
-DSH_APP="/Applications/DeepSeek Harness.app"   # older builds may be /Applications/DSH Desktop.app
+DSH_APP="/Applications/DSH Desktop.app"   # older app name; the current one is /Applications/DeepSeek Harness.app
 node "$DSH_APP/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js" --version
 ```
-
-If that path does not exist (newer builds pack the implementation into `app.asar`), install a global CLI matching your Desktop version instead — `npm install -g @deepseek-ai/dsh@0.1.7-rc.2` — and then call `dsh` directly.
 
 - **The remote path does not need `dsh-mobile setup`**: the bundled `cordis.patch.yml` already points at the state file and the loopback listener, so you only flip the switch in the panel. (`dsh-mobile` is the CLI this plugin provides; it also has `purge` and `extension create` subcommands.)
 - **Reinstalling the same version over the top has no effect** (pnpm only reports `added 0`): first `rm -rf $DSH_HOME/profiles/<profile>/node_modules/dsh-mobile-tailscale`, then `add`.

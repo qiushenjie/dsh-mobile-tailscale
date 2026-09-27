@@ -2,7 +2,9 @@
 
 本文件记录 DSH Mobile 在真实环境中出现过的故障、根因和处置方式。每一条都来自实际发生的现场日志，不是推测。
 
-适用对象：DSH Desktop（macOS / Windows）与通过 `dsh plugin` 安装的 web profile。
+适用对象：DeepSeek Harness 桌面端（macOS / Windows；旧应用名是 DSH Desktop）与通过 `dsh plugin` 安装的 web profile。
+
+> **应用名与绝对路径**：旧版桌面端是 `/Applications/DSH Desktop.app`，实现解包在 `Contents/Resources/app/node_modules/...`；当前版本是 `/Applications/DeepSeek Harness.app`，实现收进 `Contents/Resources/app.asar`（`Contents/Resources/app/` 目录不存在）。下面少数命令保留了旧版的 app bundle 绝对路径，它们**只在旧版本上可用**；当前版本请用 profile 闭包里的符号链接、`$DSH_HOME` 下的路径，或 README 安装一节里 `npm install -g @deepseek-ai/dsh@0.1.7-rc.2` 装出的 `dsh` CLI。
 
 ## 快速分诊
 
@@ -90,23 +92,29 @@ grep -E "storeDir" "$DSH_HOME/profiles/web/node_modules/.modules.yaml"
 # 例如： "storeDir": "/Users/<you>/Library/pnpm/store/v10"
 ```
 
-DSH Desktop 内置的 pnpm 与终端 PATH 上的 pnpm 可能是不同大版本（例如 Desktop 用 10.x，Homebrew 装的是 11.x）。pnpm 11 会去 `store/v11`，与 `node_modules` 实际链接的 `v10` 不符，于是直接拒绝操作。
+DSH Desktop 内置的 pnpm 与终端 PATH 上的 pnpm 可能是不同版本（本机实测：应用内置的 `runtime/pnpm/bin/pnpm.cjs` 是 **11.7.0**，Homebrew 的 `pnpm` 是 **11.24.0**）。store 大版本不一致时（例如一边写 `store/v11`，而 `node_modules` 链的是 `store/v10`）pnpm 会直接拒绝操作。
 
 **判定命令**：
 
 ```bash
 which -a pnpm
 pnpm --version    # 终端用的版本
-PATH="$DSH_HOME/.desktop-bin:$PATH" pnpm --version   # Desktop 用的版本
+# 应用内置的版本（当前版本没有 .desktop-bin shim，直接调 app bundle 里的运行时）：
+APP="/Applications/DeepSeek Harness.app/Contents/Resources/runtime"
+"$APP/primary-runtime/dependencies/node/bin/node" "$APP/pnpm/bin/pnpm.cjs" --version
 ```
 
-**处置**：**始终用 DSH Desktop 自带的 pnpm shim**，把它的目录放在 PATH 最前面：
+**处置**：**始终用 DSH Desktop 自带的 pnpm**，别用终端 PATH 上那个：
 
 ```bash
-export PATH="$DSH_HOME/.desktop-bin:$PATH"
+# 当前版本：
+APP="/Applications/DeepSeek Harness.app/Contents/Resources/runtime"
+pnpm() { "$APP/primary-runtime/dependencies/node/bin/node" "$APP/pnpm/bin/pnpm.cjs" "$@"; }
 pnpm --version    # 确认与 profile 的 store 大版本一致
 dsh plugin --profile web add /absolute/path/to/dsh-mobile-tailscale-x.y.z.tgz
 ```
+
+> 旧版应用把 shim 放在 `$DSH_HOME/.desktop-bin`（本机没有这个目录，`runtime/bin/node` 那种包装脚本还依赖应用自己注入的 `$DSH_DESKTOP_NODE_EXECUTABLE`，所以在应用外直接跑不了）。profile 的增删仍然用 `dsh plugin`，不要手改 `node_modules`。
 
 > ⚠️ **不要忽略伴随的另一条 WARN**：
 >
@@ -156,6 +164,9 @@ print(list(d['dsh']['desktop']['generationProjection']['plugins'].keys()))
 ```bash
 ls -l "$DSH_HOME/profiles/node_modules/@deepseek-ai/dsh-host-webserver"
 # -> /Applications/DSH Desktop.app/Contents/Resources/app/node_modules/@deepseek-ai/dsh-host-webserver
+# 本机实际输出就是这个（旧版应用的路径）：应用改名成 DeepSeek Harness.app 之后，这条链接是悬空的 ——
+# 解析不到就按下文返回 'unknown' 并放行。当前版本实现收在 Contents/Resources/app.asar 内，
+# 没有 Contents/Resources/app/ 这个目录。
 ```
 
 **符号链接指向 app 内部，所以 DSH Desktop 一升级，解析出的版本就跟着变。** 解析不到时返回 `'unknown'` 并被放行 —— 这就是"以前能用、升级后突然不能用"的原因。
@@ -236,6 +247,9 @@ Timeout duration was set to 1.
 ```bash
 python3 - <<'PY'
 import re
+# 旧版应用写 ~/Library/Logs/DSH Desktop/harness.log（本机最后一次写入是 2026-09-13）；
+# 当前版本写 $DSH_HOME/logs/desktop-next.log 与 ~/Library/Logs/DeepSeek Harness/crash-*.log，
+# 但下面这两个标记（[desktop] starting / TimeoutOverflowWarning）只在旧日志里出现过。
 s = open("/Users/<you>/Library/Logs/DSH Desktop/harness.log", encoding="utf8", errors="replace").read()
 tail = s[s.rfind("[desktop] starting"):]
 print("本次启动 TimeoutOverflowWarning:", len(re.findall(r"TimeoutOverflowWarning", tail)))
@@ -261,6 +275,8 @@ PY
 
 **重要**：这一类报错**很可能来自旧版安装器**。新版安装器的 `fallbackRoot` + `isInsideDirectory` 已能正确接受经由 profile 闭包符号链接解析进 app bundle 的宿主单例。
 
+**路径**：上面报错里的 `/Applications/DSH Desktop.app/...` 是旧版应用；当前版本是 `/Applications/DeepSeek Harness.app`，实现收在 `Contents/Resources/app.asar` 内。
+
 **判定命令**：直接调用 DSH 自己的校验器，不要凭日志下结论：
 
 ```bash
@@ -269,7 +285,7 @@ P="$H/profiles/web/node_modules/dsh-mobile-tailscale"
 rm -rf "$PROBE"; mkdir -p "$PROBE/node_modules"
 cp -R "$P" "$PROBE/node_modules/dsh-mobile-tailscale"
 node --input-type=module -e "
-const { verifyGenerationPeers } = await import('/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/dsh-desktop-market-installer/generations/installer.mjs');
+const { verifyGenerationPeers } = await import('/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/dsh-desktop-market-installer/generations/installer.mjs'); // 旧版路径：当前版本同一模块收在 app.asar 里，普通 node 无法 import —— 这条探针只能在旧版应用上原样跑
 const r = await verifyGenerationPeers('$H', { directory: '$PROBE', pluginName: 'dsh-mobile-tailscale', version: 'x.y.z' });
 console.log('ok =', r.ok); console.log(r.problems.join('\n'));
 "
@@ -287,11 +303,14 @@ rm -rf "$PROBE"
 **用官方命令**，它会同时跑 `pnpm remove` 并让 `dsh.profile.bundles` 与安装状态重新对齐：
 
 ```bash
-export PATH="$DSH_HOME/.desktop-bin:$PATH"     # 见 [2]，必须
+export PATH="$DSH_HOME/.desktop-bin:$PATH"     # 旧版应用生成的 shim 目录；本机不存在，缺了就直接用下面的 CLI
 dsh plugin --profile web remove <package-name>
-# dsh 不在 PATH 时用 Desktop 内置 CLI：
+# dsh 不在 PATH 时用 Desktop 内置 CLI（旧版应用，实现解包在 app bundle 内）：
 # node "/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js" \
 #      plugin --profile web remove <package-name>
+# 当前版本（/Applications/DeepSeek Harness.app）把实现收进 Contents/Resources/app.asar，上面这条绝对路径
+# 不存在；改用 README 安装一节的 CLI：
+#   npm install -g @deepseek-ai/dsh@0.1.7-rc.2 && dsh plugin --profile web remove <package-name>
 ```
 
 **先备份**：
