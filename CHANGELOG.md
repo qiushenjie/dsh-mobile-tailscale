@@ -2,6 +2,10 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.4.1
+
+- **The right sidebar no longer covers the session on a phone, and its file tree scrolls again.** In this DSH generation the right sidebar is a dockkit overlay whose host column is 0-wide on a phone: the panel painted full-bleed over the conversation and its body collapsed to zero height, so the tree spilled across the session and could not be scrolled. The open panel is now pinned to the viewport as a `min(94vw,420px)` full-height drawer with an opaque background, and the dockkit host/pane/content get the height chain and `overflow-y:auto` back, so the panel owns its own scrolling. The rules are scoped to `[data-sidebar-right-open]`: the closed panel keeps the app's own hidden shell and never paints or takes taps.
+
 ## 0.4.0
 
 - **The local-network channel is removed entirely; Tailscale Serve is the only connection left.** The self-signed "DeepSeek Harness Mobile CA" chain was trusted by nobody: it was never added to the Mac keychain, and no route ever sent it to the phone, so both the phone and the Mac's own browser stopped on the certificate interstitial while the phone never reached the `3443` port at all. The `https://<node>.<tailnet>.ts.net` address, by contrast, carries a real Let's Encrypt certificate and takes its access control from tailnet membership, so 0.4.0 deletes the redundant and unusable half and keeps the one that works. Removed in this release:

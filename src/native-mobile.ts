@@ -215,6 +215,40 @@ html.dsh-native-mobile-active [data-dsh-mobile-header] [class*="_sessionLogButto
     gap:4px !important;
   }
 }
+/* The right sidebar (Files / terminal / trace) is a dockkit overlay: on the
+   phone its host column is 0-wide, so the panel paints full-bleed over the
+   session and its body keeps no height — the file tree spills over the
+   conversation and cannot scroll. Pin the OPEN panel to the viewport as a
+   full-height drawer with an opaque background and hand the height chain back
+   to the dockkit host so the panel owns its own scrolling. The rules stay
+   scoped to the open state: the closed panel keeps the app's own absolute,
+   visibility-hidden shell and can never paint or take taps. */
+@media (max-width:720px) {
+  html.dsh-native-mobile-active [data-sidebar-right-panel] { pointer-events:none !important; }
+  html.dsh-native-mobile-active [data-sidebar-right-panel][data-sidebar-right-open] {
+    position:fixed !important;
+    inset:0 0 0 auto !important;
+    z-index:250 !important;
+    width:min(94vw,420px) !important;
+    max-width:none !important;
+    height:100dvh !important;
+    max-height:100dvh !important;
+    background:var(--dsw-bg,#fff) !important;
+    box-shadow:-18px 0 46px rgb(15 23 42 / 18%) !important;
+    pointer-events:auto !important;
+    overflow:hidden !important;
+  }
+  html.dsh-native-mobile-active [data-sidebar-right-panel][data-sidebar-right-open] :is([data-dockkit-host],[data-dockkit-pane],[data-dockkit-content]) {
+    box-sizing:border-box !important;
+    height:100% !important;
+    max-height:100% !important;
+    min-height:0 !important;
+    transform:none !important;
+    visibility:visible !important;
+    overflow-y:auto !important;
+    overscroll-behavior:contain;
+  }
+}
 /* Landscape phones are short: the sidebar's fixed header + footer squeeze the
    session list to a couple of rows, and forcing overflow:visible on the list
    disables its native scroll. Reclaim the height by dropping the secondary
