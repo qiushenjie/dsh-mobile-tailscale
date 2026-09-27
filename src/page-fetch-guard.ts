@@ -17,6 +17,13 @@
  * only. The host reads the global at call time — a real browser confirms a
  * wrapper installed long after boot still observes the app's page calls — and
  * every other request is handed through untouched.
+ *
+ * Every attempt races the transport against the deadline and rejects when the
+ * deadline wins; aborting alone is not enough. A stalled request the platform
+ * has stopped servicing can leave `fetch` pending after `abort()`, in which
+ * case waiting on it would hang the guard exactly like the bug it exists to
+ * fix — no replay, no telemetry, and the view still loading. A first version
+ * did wait on it; the deadline now always settles the attempt.
  */
 import { PAGE_TIMING_PATH, TELEMETRY_ENDPOINT } from './page-timing.js'
 
@@ -89,6 +96,35 @@ export interface PageFetchGuardOptions {
   /** Whether the document is hidden (injectable for tests). */
   readonly hidden?: () => boolean
   readonly online?: () => boolean
+}
+
+/** What the guard has done so far, for a phone that has to explain a stuck view. */
+export interface PageFetchStats {
+  readonly installed: boolean
+  /** Page calls the guard took over. */
+  readonly calls: number
+  /** Page calls still waiting for an attempt to settle. */
+  readonly inFlight: number
+  readonly lastOutcome: PageFetchOutcome | null
+  readonly lastAttempts: number
+  readonly lastMs: number | null
+}
+
+const stats = {
+  installed: false,
+  calls: 0,
+  inFlight: 0,
+  lastOutcome: null as PageFetchOutcome | null,
+  lastAttempts: 0,
+  lastMs: null as number | null,
+}
+
+/**
+ * Snapshot of the guard's counters.
+ * @returns A copy, safe for a telemetry record.
+ */
+export function pageFetchStats(): PageFetchStats {
+  return { ...stats }
 }
 
 /**
@@ -197,68 +233,71 @@ export function installPageFetchGuard(options: PageFetchGuardOptions = {}): () =
     const startedAt = now()
     const caller = init?.signal ?? undefined
     const path = requestPathOf(input) ?? endpoint
+    const cancellation = caller === undefined ? undefined : cancelledPromise(caller)
+    const raced = <T>(work: Promise<T>): Promise<T> =>
+      cancellation === undefined ? work : Promise.race([work, cancellation.promise])
     let attempt = 0
     let outcome: PageFetchOutcome = 'error'
     let status: number | null = null
     let responseBytes = 0
     let error: string | null = null
     let lastError: unknown
-    while (attempt < attempts) {
-      attempt += 1
-      if (isAborted(caller)) {
-        report({ kind: 'page-fetch', at: new Date().toISOString(), path, attempts: attempt - 1, outcome: 'aborted', ms: now() - startedAt, status, requestBytes: body.length, responseBytes, hidden: hidden(), online: online(), error: 'aborted before attempt' })
-        throw abortReason(caller)
-      }
-      const controller = new AbortController()
-      const forward = (): void => controller.abort()
-      caller?.addEventListener('abort', forward)
-      let stalled = false
-      try {
-        const headersTimer = setTimeout(() => {
+    stats.calls += 1
+    stats.inFlight += 1
+    try {
+      while (attempt < attempts) {
+        attempt += 1
+        if (isAborted(caller)) {
+          report({ kind: 'page-fetch', at: new Date().toISOString(), path, attempts: attempt - 1, outcome: 'aborted', ms: now() - startedAt, status, requestBytes: body.length, responseBytes, hidden: hidden(), online: online(), error: 'aborted before attempt' })
+          throw abortReason(caller)
+        }
+        const controller = new AbortController()
+        const forward = (): void => controller.abort()
+        caller?.addEventListener('abort', forward)
+        let stalled = false
+        const deadline = (): void => {
           stalled = true
           controller.abort()
-        }, headersTimeoutMs)
-        let response: Response
+        }
         try {
-          response = await real.call(host, input, { ...init, signal: controller.signal })
+          const response = await withDeadline(
+            raced(real.call(host, input, { ...init, signal: controller.signal })),
+            headersTimeoutMs,
+            deadline,
+          )
+          status = response.status
+          const buffer = await withDeadline(raced(response.arrayBuffer()), bodyTimeoutMs, deadline)
+          responseBytes = buffer.byteLength
+          outcome = 'ok'
+          error = null
+          if (attempt > 1) {
+            report({ kind: 'page-fetch', at: new Date().toISOString(), path, attempts: attempt, outcome, ms: now() - startedAt, status, requestBytes: body.length, responseBytes, hidden: hidden(), online: online(), error: null })
+          }
+          return synthesize(response, buffer)
+        } catch (failure) {
+          lastError = failure
+          if (isAborted(caller)) outcome = 'aborted'
+          else if (stalled) outcome = 'timeout'
+          else outcome = 'error'
+          error = describe(failure)
         } finally {
-          clearTimeout(headersTimer)
+          caller?.removeEventListener('abort', forward)
         }
-        status = response.status
-        const bodyTimer = setTimeout(() => {
-          stalled = true
-          controller.abort()
-        }, bodyTimeoutMs)
-        let buffer: ArrayBuffer
-        try {
-          buffer = await response.arrayBuffer()
-        } finally {
-          clearTimeout(bodyTimer)
+        if (outcome === 'aborted') {
+          report({ kind: 'page-fetch', at: new Date().toISOString(), path, attempts: attempt, outcome, ms: now() - startedAt, status, requestBytes: body.length, responseBytes, hidden: hidden(), online: online(), error })
+          throw lastError
         }
-        responseBytes = buffer.byteLength
-        outcome = 'ok'
-        error = null
-        if (attempt > 1) {
-          report({ kind: 'page-fetch', at: new Date().toISOString(), path, attempts: attempt, outcome, ms: now() - startedAt, status, requestBytes: body.length, responseBytes, hidden: hidden(), online: online(), error: null })
-        }
-        return synthesize(response, buffer)
-      } catch (failure) {
-        lastError = failure
-        if (isAborted(caller)) outcome = 'aborted'
-        else if (stalled) outcome = 'timeout'
-        else outcome = 'error'
-        error = describe(failure)
-      } finally {
-        caller?.removeEventListener('abort', forward)
+        if (attempt < attempts) await sleep(retryDelayMs * attempt)
       }
-      if (outcome === 'aborted') {
-        report({ kind: 'page-fetch', at: new Date().toISOString(), path, attempts: attempt, outcome, ms: now() - startedAt, status, requestBytes: body.length, responseBytes, hidden: hidden(), online: online(), error })
-        throw lastError
-      }
-      if (attempt < attempts) await sleep(retryDelayMs * attempt)
+      report({ kind: 'page-fetch', at: new Date().toISOString(), path, attempts, outcome, ms: now() - startedAt, status, requestBytes: body.length, responseBytes, hidden: hidden(), online: online(), error })
+      throw lastError
+    } finally {
+      cancellation?.dispose()
+      stats.inFlight -= 1
+      stats.lastOutcome = outcome
+      stats.lastAttempts = attempt
+      stats.lastMs = now() - startedAt
     }
-    report({ kind: 'page-fetch', at: new Date().toISOString(), path, attempts, outcome, ms: now() - startedAt, status, requestBytes: body.length, responseBytes, hidden: hidden(), online: online(), error })
-    throw lastError
   }
 
   const guarded = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -271,8 +310,12 @@ export function installPageFetchGuard(options: PageFetchGuardOptions = {}): () =
     return replay(input, init, body)
   }
   host.fetch = guarded
+  stats.installed = true
   return () => {
-    if (host.fetch === guarded) host.fetch = real
+    if (host.fetch === guarded) {
+      host.fetch = real
+      stats.installed = false
+    }
   }
 }
 
@@ -335,4 +378,70 @@ function wait(ms: number): Promise<void> {
   return new Promise<void>((resolve) => {
     setTimeout(resolve, ms)
   })
+}
+
+/** Raised when one attempt outlived its deadline. */
+class PageFetchTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`no response within ${ms} ms`)
+    this.name = 'TimeoutError'
+  }
+}
+
+/**
+ * Settle with `work`, or reject once `ms` elapsed.
+ *
+ * The deadline rejects the attempt itself rather than trusting `abort()` to
+ * make the transport reject: a socket the platform has stopped servicing can
+ * stay pending after an abort, and waiting on that would hang the guard for
+ * exactly as long as the bug it exists to fix.
+ * @param work - The pending transport step.
+ * @param ms - The deadline in milliseconds.
+ * @param onDeadline - Called when the deadline wins, to release the request.
+ * @returns The step's own result.
+ */
+function withDeadline<T>(work: Promise<T>, ms: number, onDeadline: () => void): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      onDeadline()
+      reject(new PageFetchTimeoutError(ms))
+    }, ms)
+    work.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (failure: unknown) => {
+        clearTimeout(timer)
+        reject(failure)
+      },
+    )
+  })
+}
+
+/**
+ * A promise that rejects the moment the app cancels the call.
+ *
+ * The transport may ignore the abort, so the caller's own cancellation has to
+ * be part of the race instead of being observed after the fact.
+ * @param signal - The caller's signal.
+ * @returns The pending rejection plus a way to stop listening.
+ */
+function cancelledPromise(signal: AbortSignal): { readonly promise: Promise<never>; readonly dispose: () => void } {
+  let listener: (() => void) | undefined
+  const promise = new Promise<never>((_resolve, reject) => {
+    listener = (): void => {
+      reject(abortReason(signal))
+    }
+    signal.addEventListener('abort', listener, { once: true })
+  })
+  // An abort before the first race would otherwise surface as an unhandled
+  // rejection; the race itself handles it whenever one is attached.
+  promise.catch(() => undefined)
+  return {
+    promise,
+    dispose: (): void => {
+      if (listener !== undefined) signal.removeEventListener('abort', listener)
+    },
+  }
 }

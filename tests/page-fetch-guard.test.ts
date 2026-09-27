@@ -3,6 +3,7 @@ import {
   PAGE_FETCH_ATTEMPTS,
   installPageFetchGuard,
   isHistoryPageRequest,
+  pageFetchStats,
   requestPathOf,
   type FetchHost,
   type PageFetchRecord,
@@ -281,5 +282,114 @@ describe('installPageFetchGuard', () => {
     const remove = installPageFetchGuard({ host: {} })
     expect(remove).toBeTypeOf('function')
     expect(() => remove()).not.toThrow()
+  })
+})
+
+/**
+ * A transport that ignores the abort and never settles — the stall this guard
+ * exists for. Aborting such a request releases nothing, so the deadline has to
+ * settle the attempt by itself.
+ * @returns A promise that never settles.
+ */
+function deafHang(): Promise<Response> {
+  return new Promise<Response>(() => undefined)
+}
+
+/** A response whose headers arrive and whose body never settles, abort or not. */
+function deafStalledBody(): Promise<Response> {
+  return Promise.resolve({
+    status: 200,
+    statusText: 'OK',
+    ok: true,
+    headers: new Headers({ 'content-type': 'application/json' }),
+    arrayBuffer: (): Promise<ArrayBuffer> => new Promise<ArrayBuffer>(() => undefined),
+  } as unknown as Response)
+}
+
+describe('a transport that ignores the abort', () => {
+  it('replays the page call once its deadline wins', async () => {
+    const host = scripted([deafHang, () => answer('{"rpcId":1}')])
+    const records = sink()
+    const remove = installPageFetchGuard({ host, headersTimeoutMs: 20, retryDelayMs: 0, send: records })
+    try {
+      const response = await host.fetch?.(PAGE, page())
+      expect(response?.status).toBe(200)
+      expect(await response?.json()).toEqual({ rpcId: 1 })
+      expect(host.calls.length).toBe(2)
+      expect(records.records).toHaveLength(1)
+      expect(records.records[0]?.outcome).toBe('ok')
+      expect(records.records[0]?.attempts).toBe(2)
+      expect(records.records[0]?.ms).toBeGreaterThanOrEqual(20)
+    } finally {
+      remove()
+    }
+  })
+
+  it('replays when the body never arrives after the headers', async () => {
+    const host = scripted([deafStalledBody, () => answer('{"rpcId":2}')])
+    const records = sink()
+    const remove = installPageFetchGuard({ host, bodyTimeoutMs: 20, retryDelayMs: 0, send: records })
+    try {
+      const response = await host.fetch?.(PAGE, page())
+      expect(await response?.json()).toEqual({ rpcId: 2 })
+      expect(host.calls.length).toBe(2)
+      expect(records.records[0]?.outcome).toBe('ok')
+    } finally {
+      remove()
+    }
+  })
+
+  it('gives up with a timeout record when no attempt ever answers', async () => {
+    const host = scripted([deafHang])
+    const records = sink()
+    const remove = installPageFetchGuard({ host, headersTimeoutMs: 10, attempts: 2, retryDelayMs: 0, send: records })
+    try {
+      await expect(host.fetch?.(PAGE, page())).rejects.toThrow('no response within 10 ms')
+      expect(host.calls.length).toBe(2)
+      expect(records.records).toHaveLength(1)
+      expect(records.records[0]?.outcome).toBe('timeout')
+      expect(records.records[0]?.attempts).toBe(2)
+      expect(records.records[0]?.error).toContain('TimeoutError')
+    } finally {
+      remove()
+    }
+  })
+
+  it('still stops at once when the app itself cancels', async () => {
+    const host = scripted([deafHang])
+    const records = sink()
+    const controller = new AbortController()
+    const remove = installPageFetchGuard({ host, headersTimeoutMs: 5_000, send: records })
+    try {
+      const started = Date.now()
+      const pending = host.fetch?.(PAGE, { ...page(), signal: controller.signal })
+      setTimeout(() => controller.abort(), 20)
+      await expect(pending).rejects.toThrow()
+      expect(Date.now() - started).toBeLessThan(1_000)
+      expect(host.calls.length).toBe(1)
+      expect(records.records[0]?.outcome).toBe('aborted')
+    } finally {
+      remove()
+    }
+  })
+
+  it('counts calls and exposes what the last one did', async () => {
+    const before = pageFetchStats()
+    expect(before.installed).toBe(false)
+    const host = scripted([deafHang, () => answer('{"rpcId":3}')])
+    const remove = installPageFetchGuard({ host, headersTimeoutMs: 10, retryDelayMs: 0, send: () => undefined })
+    try {
+      expect(pageFetchStats().installed).toBe(true)
+      await host.fetch?.(PAGE, page())
+      const after = pageFetchStats()
+      expect(after.calls).toBe(before.calls + 1)
+      expect(after.inFlight).toBe(0)
+      expect(after.lastOutcome).toBe('ok')
+      expect(after.lastAttempts).toBe(2)
+      expect(after.lastMs).toBeGreaterThanOrEqual(10)
+    } finally {
+      remove()
+    }
+    expect(pageFetchStats().installed).toBe(false)
   })
 })

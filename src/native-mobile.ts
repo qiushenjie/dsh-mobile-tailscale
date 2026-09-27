@@ -1,9 +1,17 @@
 import { installDrawerPan } from './drawer-pan.js'
 import { installGestureTelemetry } from './gesture-telemetry.js'
-import { installPageFetchGuard } from './page-fetch-guard.js'
+import { installPageFetchGuard, pageFetchStats } from './page-fetch-guard.js'
 import { installPageTiming } from './page-timing.js'
+import { installSocketWatch, reconnectSockets, socketWatchStats } from './socket-watch.js'
 import { installStripSwipe } from './strip-swipe.js'
+import { installStuckViewWatch } from './stuck-view.js'
 import { installTerminalKeyRepair } from './terminal-keys.js'
+
+// Installed while this module is evaluated, not at mount: the app opens its mux
+// WebSocket as soon as the connection plugin activates, and a watch installed
+// later would never see the socket this exists to close. See
+// {@link installSocketWatch}.
+if (typeof window !== 'undefined') installSocketWatch()
 
 /** Mobile feature and compatibility rules applied to DSH React surfaces. */
 export const NATIVE_MOBILE_STYLES = `
@@ -1142,11 +1150,21 @@ export function installNativeMobileSurface(): () => void {
   // page; the phone times the transfer and the paint from its own resource
   // timeline. See {@link installPageTiming}.
   const removePageTiming = installPageTiming()
-  // The page POST has no timeout anywhere in the stack, so a request that dies
-  // on a half-open socket leaves the session view on "载入历史…" forever; the
-  // call is an idempotent read, so a stalled attempt is replayed. See
-  // {@link installPageFetchGuard}.
+  // The page POST has no timeout anywhere in the stack, so a page read that dies
+  // on a half-open socket never resolves; the call is an idempotent read, so a
+  // stalled attempt is replayed. This does not cover the stuck view: measured on
+  // the live app, 「载入历史…」 is the `session/follow` opening frame never
+  // arriving, which no page request can fix. See {@link installPageFetchGuard}.
   const removePageFetchGuard = installPageFetchGuard()
+  // The host keeps that placeholder up forever when the opening frame is lost,
+  // so the phone watches for it, rebuilds the carrier, and reports what it saw.
+  // See {@link installStuckViewWatch}.
+  const removeStuckViewWatch = installStuckViewWatch({
+    sockets: socketWatchStats,
+    pageStats: pageFetchStats,
+    reconnect: reconnectSockets,
+    turns: () => document.querySelectorAll('[data-chat-turn]').length,
+  })
   sync()
   return () => {
     observer.disconnect()
@@ -1156,6 +1174,7 @@ export function installNativeMobileSurface(): () => void {
     removeGestureTelemetry()
     removePageTiming()
     removePageFetchGuard()
+    removeStuckViewWatch()
     document.removeEventListener('click', onBranchClick, true)
     document.removeEventListener('click', onSidebarSessionSelect, true)
     document.removeEventListener('pointerdown', onPointerDownForFocus, true)
