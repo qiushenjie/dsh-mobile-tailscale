@@ -1,3 +1,6 @@
+import { installDrawerPan } from './drawer-pan.js'
+import { installTerminalKeyRepair } from './terminal-keys.js'
+
 /** Mobile feature and compatibility rules applied to DSH React surfaces. */
 export const NATIVE_MOBILE_STYLES = `
 /* iOS inflates text in wide (landscape) viewports unless text-size-adjust is
@@ -51,7 +54,7 @@ html.dsh-native-mobile-active { -webkit-text-size-adjust:100%; text-size-adjust:
   .dsh-native-mobile-backdrop { position:fixed; z-index:235; inset:env(safe-area-inset-top) 0 0; border:0; background:rgb(15 23 42 / 32%); }
   .dsh-native-mobile-backdrop:not([hidden]) { animation:dsh-mobile-fade-in var(--dsh-mobile-motion-duration) ease-out; }
   .dsh-native-mobile-backdrop[hidden] { display:none; }
-  [data-dsh-mobile-details] { position:fixed !important; z-index:250 !important; inset:0 0 0 auto !important; width:min(94vw,460px) !important; max-width:none !important; transform:translateX(100%); transition:transform var(--dsh-mobile-motion-duration) var(--dsh-mobile-motion-ease); background:var(--dsw-bg, #fff); box-shadow:-18px 0 46px rgb(15 23 42 / 18%); }
+  [data-dsh-mobile-details] { position:fixed !important; z-index:250 !important; inset:0 0 0 auto !important; width:min(94vw,460px) !important; max-width:none !important; transform:translateX(100%); transition:transform var(--dsh-mobile-motion-duration) var(--dsh-mobile-motion-ease); background:var(--dsh-mobile-drawer-bg,var(--dsw-alias-bg-base,var(--dsw-bg,#fff))); box-shadow:-18px 0 46px rgb(15 23 42 / 18%); }
   [data-dsh-mobile-details][data-open="true"] { transform:translateX(0); }
   [data-dsh-mobile-handle] { display:none !important; }
   [data-dsh-mobile-settings] { flex-direction:column !important; width:100vw !important; height:100dvh !important; max-width:none !important; border-radius:0 !important; animation:dsh-mobile-panel-in var(--dsh-mobile-motion-duration) var(--dsh-mobile-motion-ease); }
@@ -169,6 +172,20 @@ html.dsh-native-mobile-active :is(a,button,[role="button"],[role="tab"],[role="t
   transform:scale(.97) !important;
   filter:brightness(.95) !important;
 }
+/* Inside the right drawer the scale/filter feedback re-layers a
+   fixed-and-transformed subtree on every tap: tapping a file in the tree made
+   the row jump and blink before settling (measured: transform none ->
+   matrix(.97,...) plus filter none -> brightness(.95) for the length of the
+   press). The host paints its own pressed background there, so keep the
+   opacity feedback only. A touch tap also leaves a pointer :hover behind it,
+   which is why the hover token is neutralized here the same way the left
+   sidebar does it. */
+html.dsh-native-mobile-active [data-dsh-mobile-workbench] { --dsw-alias-interactive-bg-hover:transparent !important; }
+html.dsh-native-mobile-active [data-dsh-mobile-workbench] :is(a,button,[role="button"],[role="tab"],[role="treeitem"],label,[tabindex],[contenteditable]):active {
+  opacity:.72 !important;
+  transform:none !important;
+  filter:none !important;
+}
 /* Prevent iOS auto-zoom when a field with a small font receives focus: any
    field under 16px triggers it, which reads as "the page suddenly gets big".
    The composer is a contenteditable div, so it must be covered too. */
@@ -194,7 +211,12 @@ html.dsh-native-mobile-active [data-dsh-mobile-header] [class*="_sessionLogButto
     max-width:none !important;
     transform:translateX(100%) !important;
     transition:transform var(--dsh-mobile-motion-duration,200ms) var(--dsh-mobile-motion-ease,cubic-bezier(.22,1,.36,1)) !important;
-    background:var(--dsw-bg,#fff) !important;
+    /* The drawer's own paint is what shows on the transition frames, while the
+       app's pane inside it is still mounting or already torn down. --dsw-bg is
+       undefined in this build, so the old #fff fallback painted a white flash on
+       the dark theme; --dsh-mobile-drawer-bg is mirrored from the pane itself by
+       sync() and the alias token is the theme's real surface. */
+    background:var(--dsh-mobile-drawer-bg,var(--dsw-alias-bg-base,var(--dsw-bg,#fff))) !important;
     box-shadow:-18px 0 46px rgb(15 23 42 / 18%) !important;
     overflow:auto !important;
   }
@@ -210,6 +232,33 @@ html.dsh-native-mobile-active [data-dsh-mobile-header] [class*="_sessionLogButto
   html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] {
     transform:translateX(0) !important;
     pointer-events:auto !important;
+  }
+  /* A finger drag only pans the page when the node it landed on allows that
+     axis. The app's own rows (file tree, tabs) claim the gesture for pointer
+     dragging, so a swipe inside the drawer never reached the pane's scroller.
+     Hand the vertical pan back to every node in the open drawer, and let the
+     drawer itself be a real scrolling box (overscroll contained, so the page
+     behind it never moves instead).
+     NB: -webkit-overflow-scrolling is deliberately NOT set here. On iOS it turns
+     every descendant into its own momentum scroller, a nest in which the pane's
+     own scroller can lose the drag outright; modern iOS scrolls without it.
+     installDrawerPan() covers a device that still drops the gesture. */
+  html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"],
+  html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] * {
+    touch-action:pan-y pinch-zoom !important;
+  }
+  html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] {
+    overscroll-behavior:contain;
+  }
+  /* Wide content still has to pan sideways inside the drawer. */
+  html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] :is(pre,[data-dsh-mobile-table-scroll]) {
+    touch-action:pan-x pan-y pinch-zoom !important;
+  }
+  /* Keep the dockkit chain between the drawer and the app's own scroller from
+     collapsing to zero height: the panel body then has nothing left to scroll. */
+  html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] :is([data-dockkit-host],[data-dockkit-pane],[data-dockkit-content]) {
+    box-sizing:border-box !important;
+    min-height:0 !important;
   }
   /* The workbench toggle cluster shares its stacking context with the panel
      (both live inside [data-dsh-panel-host], z-index:25), so it only needs a
@@ -374,6 +423,72 @@ export function rightPanelOpen(panel: HTMLElement): boolean {
 /** Whether a user-driven scroll moved upward into the automatic history-loading zone. */
 export function shouldAutoLoadEarlier(previousTop: number, currentTop: number): boolean {
   return currentTop <= AUTO_HISTORY_THRESHOLD_PX && currentTop < previousTop - 0.5
+}
+
+/**
+ * How long the DOM pass waits before re-scanning after an attribute change.
+ *
+ * The stock app rewrites `class`/`style` continuously while a turn streams, and
+ * the pass walks the whole document. Running it once per animation frame (the
+ * previous behaviour) kept the phone's main thread busy for the entire stream
+ * and made every touch gesture feel stuck. State changes that the drawer
+ * itself has to follow bypass this window (see the observer in
+ * {@link installNativeMobileSurface}).
+ */
+export const SYNC_MIN_INTERVAL_MS = 150
+
+/**
+ * Delay before the next DOM pass.
+ * @param now - Current timestamp.
+ * @param lastSyncAt - When the previous pass ran, or 0 if it never has.
+ * @param minIntervalMs - Shortest allowed gap between two passes.
+ * @returns Milliseconds to wait; 0 when the interval has already elapsed.
+ */
+export function nextSyncDelay(now: number, lastSyncAt: number, minIntervalMs: number = SYNC_MIN_INTERVAL_MS): number {
+  if (lastSyncAt === 0) return 0
+  const elapsed = now - lastSyncAt
+  return elapsed >= minIntervalMs ? 0 : minIntervalMs - elapsed
+}
+
+/**
+ * How long the dim backdrop waits before following the sidebar state.
+ *
+ * React re-renders the shell on every tap, and for one frame the sidebar can
+ * report a class list without `_collapsed`. The backdrop is a full-viewport
+ * dim, so that single frame flashed the whole screen dark whenever a file was
+ * tapped in the right panel. Flipping it only after the state has survived a
+ * settle window drops the flash.
+ */
+export const BACKDROP_SETTLE_MS = 180
+
+/**
+ * The colour the right drawer should paint behind its panes.
+ *
+ * The drawer is a fixed, transformed box that animates in and out, and the app
+ * mounts (and tears down) the panel inside it as it opens and closes. Whatever
+ * the drawer paints is therefore visible on the transition frames, before the
+ * pane has painted over it — and the stock theme token the app uses for that
+ * surface is not the one this layer originally guessed (`--dsw-bg` is undefined
+ * in 0.1.7, so a `#fff` fallback painted a white flash on a dark theme, twice
+ * per open/close). Rather than trust a token, mirror the pane that will cover
+ * it: only an opaque colour is accepted, so a transparent pane leaves the CSS
+ * fallback in charge.
+ * @param surface - A docked pane inside the drawer.
+ * @param read - Computed-style reader, injectable for tests.
+ * @returns The opaque background colour, or undefined when there is none.
+ */
+export function drawerBackgroundColor(
+  surface: Element | undefined,
+  read: (element: Element) => CSSStyleDeclaration = (element) => getComputedStyle(element),
+): string | undefined {
+  if (surface === undefined) return undefined
+  const color = read(surface).backgroundColor
+  const parts = /^rgba?\(([^)]+)\)$/.exec(color.trim())
+  if (parts === null) return undefined
+  const channels = (parts[1] ?? '').split(',').map((channel) => Number.parseFloat(channel))
+  const alpha = channels.length === 4 ? channels[3] ?? 0 : 1
+  if (!(alpha >= 1)) return undefined
+  return color.trim()
 }
 
 /** Interactive roles that act inside a sidebar row instead of selecting it. */
@@ -555,6 +670,26 @@ export function installNativeMobileSurface(): () => void {
   backdrop.hidden = true
   backdrop.setAttribute('aria-label', '关闭工作区导航')
   document.body.append(backdrop)
+  // The backdrop is a viewport-covering dim behind the left drawer. React
+  // re-renders the shell on every tap, and for a frame the sidebar can report a
+  // class list without _collapsed — enough to flash the whole screen dark when a
+  // file is tapped in the right panel. Only flip the backdrop once the reported
+  // state has survived a settle window.
+  const setBackdropOpen = (open: boolean): void => {
+    if (open === backdropOpen) {
+      if (backdropTimer !== 0) {
+        window.clearTimeout(backdropTimer)
+        backdropTimer = 0
+      }
+      return
+    }
+    if (backdropTimer !== 0) window.clearTimeout(backdropTimer)
+    backdropTimer = window.setTimeout(() => {
+      backdropTimer = 0
+      backdropOpen = open
+      backdrop.hidden = !open
+    }, BACKDROP_SETTLE_MS)
+  }
   const branchToast = document.createElement('div')
   branchToast.className = 'dsh-mobile-branch-toast'
   branchToast.setAttribute('role', 'status')
@@ -602,7 +737,11 @@ export function installNativeMobileSurface(): () => void {
   let sidebarRoot: HTMLElement | undefined
   let toggle: HTMLButtonElement | undefined
   let viewArea: HTMLElement | undefined
+  let workbenchPanel: HTMLElement | undefined
   let scheduled = 0
+  let lastSyncAt = 0
+  let backdropTimer = 0
+  let backdropOpen = false
   let transitionFrame = 0
   let transitionRestartFrame = 0
   let transitionTimer = 0
@@ -668,6 +807,7 @@ export function installNativeMobileSurface(): () => void {
 
   const sync = (): void => {
     scheduled = 0
+    lastSyncAt = Date.now()
     const dedicatedCenter = document.querySelector<HTMLElement>('.dshm-main') ?? undefined
     // Only the stock layout module ships `_frame` *and* `_centerCol`. Other DSH
     // modules (chat TurnNavigator, attachment, plan-review, subagent) also ship
@@ -693,10 +833,25 @@ export function installNativeMobileSurface(): () => void {
     // the mobile CSS can turn it into a right-side drawer in portrait. 0.1.7
     // anchors this on the sidebar-right dockkit root rather than a `*_workbench`
     // token, and that root publishes the open state the drawer has to follow.
-    const workbenchPanel = findRightPanelHost(document)
+    workbenchPanel = findRightPanelHost(document)
     if (workbenchPanel !== undefined) {
       workbenchPanel.dataset.dshMobileWorkbench = 'true'
       workbenchPanel.dataset.dshMobileWorkbenchOpen = String(rightPanelOpen(workbenchPanel))
+      // The drawer's own paint is visible for the length of the open/close
+      // transition, before the pane inside it has painted (or after it is torn
+      // down). Mirror the pane's real surface so the frames match; the CSS
+      // token chain covers the first pass, before a pane exists. Written only on
+      // change: this element is observed, so an unconditional write would keep
+      // scheduling this pass.
+      let drawerBackground: string | undefined
+      const panes = workbenchPanel.querySelectorAll('[data-dockkit-pane],[data-dockkit-content]')
+      for (const pane of Array.from(panes).slice(0, 4)) {
+        drawerBackground = drawerBackgroundColor(pane)
+        if (drawerBackground !== undefined) break
+      }
+      if (drawerBackground !== undefined && workbenchPanel.style.getPropertyValue('--dsh-mobile-drawer-bg') !== drawerBackground) {
+        workbenchPanel.style.setProperty('--dsh-mobile-drawer-bg', drawerBackground)
+      }
       // The toggle cluster and the panel share one stacking context in the
       // panel host, so floating the cluster by z-index is enough — no DOM move,
       // which would detach it from the app's synthetic click handler.
@@ -719,8 +874,14 @@ export function installNativeMobileSurface(): () => void {
         const button = historyLoader.querySelector<HTMLButtonElement>('button')
         if (button !== null) {
           button.tabIndex = -1
-          if (button.disabled) button.removeAttribute('aria-hidden')
-          else button.setAttribute('aria-hidden', 'true')
+          // Only written when it changes: `aria-hidden` is one of the observed
+          // attributes, so re-writing the same value would schedule this pass
+          // again for ever.
+          const wanted = button.disabled ? null : 'true'
+          if (button.getAttribute('aria-hidden') !== wanted) {
+            if (wanted === null) button.removeAttribute('aria-hidden')
+            else button.setAttribute('aria-hidden', wanted)
+          }
         }
       }
       const messageColumn = conversation === null ? undefined : firstByClassSuffix(conversation, '_column')
@@ -793,10 +954,33 @@ export function installNativeMobileSurface(): () => void {
     if (toggle !== undefined) toggle.dataset.dshMobileToggle = 'true'
     const collapsed = classToken(sidebarRoot, '_collapsed')
     sidebar.dataset.open = String(!collapsed)
-    backdrop.hidden = collapsed
+    setBackdropOpen(!collapsed)
   }
-  const schedule = (): void => { if (scheduled === 0) scheduled = requestAnimationFrame(sync) }
-  const observer = new MutationObserver(schedule)
+  // A pass walks the whole document, so mutations are coalesced: the app
+  // rewrites class/style continuously while a turn streams, and running the pass
+  // once per animation frame kept the phone's main thread busy for the whole
+  // stream. A mutation on one of the nodes whose state this layer republishes is
+  // urgent — the drawer has to follow it immediately — while everything else
+  // waits out the minimum interval.
+  const isStateRecord = (record: MutationRecord): boolean =>
+    record.attributeName !== null
+    && (record.target === workbenchPanel
+      || record.target === sidebar
+      || record.target === sidebarRoot
+      || record.target === backdrop)
+  const schedule = (urgent: boolean): void => {
+    if (scheduled !== 0) {
+      if (!urgent) return
+      window.clearTimeout(scheduled)
+      scheduled = 0
+    }
+    const delay = urgent ? 0 : nextSyncDelay(Date.now(), lastSyncAt)
+    scheduled = window.setTimeout(() => {
+      scheduled = 0
+      sync()
+    }, delay)
+  }
+  const observer = new MutationObserver(records => { schedule(records.some(isStateRecord)) })
   // The right column and its panel express open/closed as attributes rather
   // than classes on this generation, so those attributes have to be observed or
   // the drawer would only pick up its state on the next unrelated mutation.
@@ -816,9 +1000,18 @@ export function installNativeMobileSurface(): () => void {
     ],
   })
   backdrop.addEventListener('click', () => { if (sidebar?.dataset.open === 'true') toggle?.click() })
+  // The terminal drops the space and punctuation keys a soft keyboard reports as
+  // a bare legacy IME keydown; the repair writes them into xterm's textarea. See
+  // {@link installTerminalKeyRepair}.
+  const removeTerminalKeyRepair = installTerminalKeyRepair()
+  // iOS sometimes never lets the drag reach the drawer's scroller; see
+  // {@link installDrawerPan}.
+  const removeDrawerPan = installDrawerPan()
   sync()
   return () => {
     observer.disconnect()
+    removeTerminalKeyRepair()
+    removeDrawerPan()
     document.removeEventListener('click', onBranchClick, true)
     document.removeEventListener('click', onSidebarSessionSelect, true)
     document.removeEventListener('pointerdown', onPointerDownForFocus, true)
@@ -828,7 +1021,8 @@ export function installNativeMobileSurface(): () => void {
     document.removeEventListener('focusin', onMenuSearchFocusIn, true)
     if (branchToastTimer !== 0) window.clearTimeout(branchToastTimer)
     branchToast.remove()
-    if (scheduled !== 0) cancelAnimationFrame(scheduled)
+    if (scheduled !== 0) clearTimeout(scheduled)
+    if (backdropTimer !== 0) clearTimeout(backdropTimer)
     if (transitionFrame !== 0) cancelAnimationFrame(transitionFrame)
     if (transitionRestartFrame !== 0) cancelAnimationFrame(transitionRestartFrame)
     if (transitionTimer !== 0) clearTimeout(transitionTimer)

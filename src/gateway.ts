@@ -744,7 +744,16 @@ function shouldCompressResponse(request: IncomingMessage, response: IncomingMess
     && isCompressibleContentType(response.headers['content-type'])
 }
 
-function revisionedStaticCacheControl(request: IncomingMessage): string | undefined {
+/**
+ * Cache policy for content-addressed static assets.
+ *
+ * `sanitizeResponseHeaders` drops `cache-control` because an upstream header
+ * cannot be trusted across the trust boundary, so every channel has to put back
+ * the one policy it knows is safe: a `rev`-stamped `/plugins/` bundle or a
+ * hashed `/assets/` file never changes under its own URL, while anything
+ * without a revision gets no long lifetime.
+ */
+export function revisionedStaticCacheControl(request: IncomingMessage): string | undefined {
   if (request.method !== 'GET' && request.method !== 'HEAD') return undefined
   let target: URL
   try { target = new URL(request.url ?? '/', 'https://dsh-mobile.invalid') } catch { return undefined }

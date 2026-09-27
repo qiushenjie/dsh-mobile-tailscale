@@ -202,6 +202,48 @@ describe('RemotePassthroughProxy', () => {
     expect(await (await fetch(proxy.origin() + '/')).text()).toBe('plain')
   })
 
+  it('gives every response a cache policy: forever when content-addressed, revalidate otherwise', async () => {
+    // The upstream declares no-store; sanitizeResponseHeaders drops it either
+    // way, and without the plugin putting a policy back the phone re-downloaded
+    // every bundle on every load — and was free to cache the document
+    // heuristically, keeping it pointed at an old bundle revision.
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'text/javascript', 'cache-control': 'no-store' })
+      response.end('export {}\n')
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const revisioned = await fetch(`${proxy.origin()}/plugins/??connection.js,mobile.js&rev=e3183d63db4b`)
+    expect(revisioned.headers.get('cache-control')).toBe('private, max-age=31536000, immutable')
+    expect(await revisioned.text()).toBe('export {}\n')
+
+    const hashed = await fetch(`${proxy.origin()}/assets/index-Q6zc2uHV.js`)
+    expect(hashed.headers.get('cache-control')).toBe('private, max-age=31536000, immutable')
+
+    // An unversioned path must not inherit the immutable lifetime: it is
+    // revalidated, and the upstream's own no-store is preserved verbatim.
+    const unversioned = await fetch(`${proxy.origin()}/plugins/mobile.js`)
+    expect(unversioned.headers.get('cache-control')).toBe('no-store')
+  })
+
+  it('makes an unversioned document revalidate so a client fix can reach the phone', async () => {
+    const document = '<!doctype html><html><head></head><body>plain</body></html>'
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'text/html; charset=utf-8', 'content-length': String(Buffer.byteLength(document)), etag: '"shell-1"' })
+      response.end(document)
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const shell = await fetch(`${proxy.origin()}/`)
+    expect(shell.headers.get('cache-control')).toBe('no-cache')
+    // The validator has to survive, or `no-cache` would re-download the body.
+    expect(shell.headers.get('etag')).toBe('"shell-1"')
+  })
+
   it('serves the stock document when the upstream contract is unsupported', async () => {
     const unsupported = '<!doctype html><html><head><script>globalThis["__DSH_BOOT__"] = {"rev":"x","entries":[]};</script></head><body>stock</body></html>'
     const upstream = await startUpstream((_record, response) => {

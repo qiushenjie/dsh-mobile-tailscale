@@ -31,6 +31,7 @@ import {
   sendFailure,
 } from './http-security.js'
 import {
+  revisionedStaticCacheControl,
   rewriteRemoteMobileIndex,
   sanitizeRequestHeaders,
   sanitizeResponseHeaders,
@@ -85,6 +86,29 @@ function hasUpgradeToken(header: string | undefined): boolean {
 
 function httpStatusText(status: number): string {
   return STATUS_CODES[status] ?? 'Error'
+}
+
+/**
+ * The cache policy this channel sends back for a response.
+ *
+ * The LAN gateway hands every response the security layer's default `no-store`,
+ * but this channel writes sanitized headers on its own — and dropping the
+ * upstream policy *without* putting one back left responses open to heuristic
+ * caching: a phone could keep an old document, which keeps naming an old bundle
+ * revision, so a client fix never arrived even though the server had it, and the
+ * whole shell (measured: 6.6 MiB) was re-downloaded whenever it did not. So a
+ * content-addressed URL may live forever and everything else must at least be
+ * revalidated. An upstream `no-store` is kept verbatim: it is the strictest
+ * answer, and weakening it would be a privacy regression.
+ * @param request - The client request, used to test for a revision stamp.
+ * @param upstreamPolicy - The raw upstream `cache-control`, if any.
+ * @returns The cache-control value to send.
+ */
+function cacheControlFor(request: IncomingMessage, upstreamPolicy: string | string[] | undefined): string {
+  const revisioned = revisionedStaticCacheControl(request)
+  if (revisioned !== undefined) return revisioned
+  const policy = Array.isArray(upstreamPolicy) ? upstreamPolicy.join(',') : upstreamPolicy ?? ''
+  return /\bno-store\b/iu.test(policy) ? 'no-store' : 'no-cache'
 }
 
 /**
@@ -226,8 +250,13 @@ export class RemotePassthroughProxy {
       if (body.length > 0) upstreamRequest.write(body)
       upstreamRequest.end()
     })
-    if (document && await this.serveRewrittenDocument(proxied, response, upstream)) return
+    if (document && await this.serveRewrittenDocument(proxied, response, upstream, request)) return
     const headers = sanitizeResponseHeaders(proxied.headers, upstream)
+    // `sanitizeResponseHeaders` drops the upstream cache policy, and this
+    // channel used to stop there — so every phone page load re-downloaded the
+    // whole shell (measured: 6.6 MiB of revisioned bundles and hashed assets)
+    // even though each URL is content-addressed and can never change.
+    headers['cache-control'] = cacheControlFor(request, proxied.headers['cache-control'])
     response.writeHead(proxied.statusCode ?? 502, headers)
     if (method === 'HEAD') {
       proxied.resume()
@@ -261,6 +290,7 @@ export class RemotePassthroughProxy {
     proxied: IncomingMessage,
     response: ServerResponse,
     upstream: URL,
+    request: IncomingMessage,
   ): Promise<boolean> {
     if ((proxied.statusCode ?? 502) !== 200) return false
     const type = proxied.headers['content-type']
@@ -289,6 +319,7 @@ export class RemotePassthroughProxy {
     }
     const headers = sanitizeResponseHeaders(proxied.headers, upstream)
     headers['content-length'] = String(body.length)
+    headers['cache-control'] = cacheControlFor(request, proxied.headers['cache-control'])
     response.writeHead(proxied.statusCode ?? 502, headers)
     response.end(body)
     return true

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { NATIVE_MOBILE_STYLES, findDetailsSheetHost, findRightPanelHost, isComposerEditorFocus, isMenuSearchFocus, preservesMenuFocus, rightColumnOpen, rightPanelOpen, selectsSidebarRow, shouldAutoLoadEarlier } from '../src/native-mobile.js'
+import { BACKDROP_SETTLE_MS, NATIVE_MOBILE_STYLES, drawerBackgroundColor, findDetailsSheetHost, findRightPanelHost, isComposerEditorFocus, isMenuSearchFocus, nextSyncDelay, preservesMenuFocus, rightColumnOpen, rightPanelOpen, selectsSidebarRow, shouldAutoLoadEarlier } from '../src/native-mobile.js'
 
 /** Minimal stand-in for an element whose `closest` resolves to a fixed match. */
 function fakeElement(closest: Element | null): Element {
@@ -327,5 +327,66 @@ describe('native mobile presentation', () => {
   it('publishes the panel open state through the attribute the CSS selects on', () => {
     expect(NATIVE_MOBILE_STYLES).toContain('[data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"]')
     expect(NATIVE_MOBILE_STYLES).not.toContain('_panelHidden"]) { transform:translateX(0)')
+  })
+
+  it('gives the vertical pan back to every node inside the open right drawer', () => {
+    // The app's own rows claim the touch gesture (file drag), so the pane's
+    // scroller never received a finger drag and the drawer could not be scrolled.
+    expect(NATIVE_MOBILE_STYLES).toContain('[data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] * {')
+    expect(NATIVE_MOBILE_STYLES).toContain('touch-action:pan-y pinch-zoom !important;')
+    // Nesting every drawer descendant as its own momentum scroller is what made
+    // iOS drop the drag, so the pair must not come back. (The left sidebar list
+    // and the horizontal table scroller keep theirs: both are single scrollers.)
+    expect(NATIVE_MOBILE_STYLES).not.toContain('touch-action:pan-y pinch-zoom !important;\n    -webkit-overflow-scrolling:touch;')
+    expect(NATIVE_MOBILE_STYLES).toContain('overscroll-behavior:contain;')
+    // Wide content still pans sideways.
+    expect(NATIVE_MOBILE_STYLES).toContain(':is(pre,[data-dsh-mobile-table-scroll]) {')
+    expect(NATIVE_MOBILE_STYLES).toContain('touch-action:pan-x pan-y pinch-zoom !important;')
+    // The dockkit chain must not collapse, or the panel body has nothing to scroll.
+    expect(NATIVE_MOBILE_STYLES).toContain(':is([data-dockkit-host],[data-dockkit-pane],[data-dockkit-content]) {')
+    expect(NATIVE_MOBILE_STYLES).toContain('box-sizing:border-box !important;\n    min-height:0 !important;')
+  })
+
+  it('keeps the tap feedback inside the right drawer free of a re-layered subtree', () => {
+    // scale()+filter() re-composited the fixed, transformed drawer on every tap
+    // and read as a blink; the host paints its own pressed background there.
+    expect(NATIVE_MOBILE_STYLES).toContain('[data-dsh-mobile-workbench] { --dsw-alias-interactive-bg-hover:transparent !important; }')
+    const drawerFeedback = NATIVE_MOBILE_STYLES.slice(NATIVE_MOBILE_STYLES.indexOf('[data-dsh-mobile-workbench] :is('))
+    expect(drawerFeedback).toContain('transform:none !important;')
+    expect(drawerFeedback).toContain('filter:none !important;')
+    expect(drawerFeedback).toContain('opacity:.72 !important;')
+  })
+
+  it('coalesces DOM passes but lets the drawer follow its own state at once', () => {
+    expect(nextSyncDelay(1_000, 0)).toBe(0)
+    expect(nextSyncDelay(1_000, 900)).toBe(50)
+    expect(nextSyncDelay(1_200, 900)).toBe(0)
+    expect(nextSyncDelay(1_000, 900, 10)).toBe(0)
+    expect(nextSyncDelay(1_000, 995, 10)).toBe(5)
+    expect(BACKDROP_SETTLE_MS).toBe(180)
+  })
+
+  it('never paints the right drawer with a white fallback', () => {
+    // `--dsw-bg` is undefined in this build, so the old
+    // `background:var(--dsw-bg,#fff)` painted the fixed drawer white: opening and
+    // closing then flashed a white sheet over the dark theme (measured: 52% of
+    // the viewport for one frame on open, 10% on close).
+    expect(NATIVE_MOBILE_STYLES).not.toContain('background:var(--dsw-bg,#fff)')
+    expect(NATIVE_MOBILE_STYLES).not.toContain('background:var(--dsw-bg, #fff)')
+    expect(NATIVE_MOBILE_STYLES).toContain('background:var(--dsh-mobile-drawer-bg,var(--dsw-alias-bg-base,var(--dsw-bg,#fff))) !important;')
+    expect(NATIVE_MOBILE_STYLES).toContain('background:var(--dsh-mobile-drawer-bg,var(--dsw-alias-bg-base,var(--dsw-bg,#fff)));')
+  })
+
+  it('mirrors only an opaque pane surface onto the drawer background', () => {
+    const surface = {} as Element
+    const read = (color: string) => (() => ({ backgroundColor: color })) as unknown as (target: Element) => CSSStyleDeclaration
+    expect(drawerBackgroundColor(surface, read('rgb(21, 21, 23)'))).toBe('rgb(21, 21, 23)')
+    expect(drawerBackgroundColor(surface, read('rgb(21, 21, 23) '))).toBe('rgb(21, 21, 23)')
+    expect(drawerBackgroundColor(undefined, read('rgb(21, 21, 23)'))).toBeUndefined()
+    // A transparent pane must leave the CSS token chain in charge: mirroring it
+    // would make the drawer see-through during the transition.
+    expect(drawerBackgroundColor(surface, read('rgba(0, 0, 0, 0)'))).toBeUndefined()
+    expect(drawerBackgroundColor(surface, read('rgba(21, 21, 23, 0.4)'))).toBeUndefined()
+    expect(drawerBackgroundColor(surface, read(''))).toBeUndefined()
   })
 })
