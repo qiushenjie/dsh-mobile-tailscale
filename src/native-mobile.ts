@@ -1,5 +1,6 @@
 import { installDrawerPan } from './drawer-pan.js'
 import { installGestureTelemetry } from './gesture-telemetry.js'
+import { installPageFetchGuard } from './page-fetch-guard.js'
 import { installPageTiming } from './page-timing.js'
 import { installStripSwipe } from './strip-swipe.js'
 import { installTerminalKeyRepair } from './terminal-keys.js'
@@ -1141,6 +1142,11 @@ export function installNativeMobileSurface(): () => void {
   // page; the phone times the transfer and the paint from its own resource
   // timeline. See {@link installPageTiming}.
   const removePageTiming = installPageTiming()
+  // The page POST has no timeout anywhere in the stack, so a request that dies
+  // on a half-open socket leaves the session view on "载入历史…" forever; the
+  // call is an idempotent read, so a stalled attempt is replayed. See
+  // {@link installPageFetchGuard}.
+  const removePageFetchGuard = installPageFetchGuard()
   sync()
   return () => {
     observer.disconnect()
@@ -1149,6 +1155,7 @@ export function installNativeMobileSurface(): () => void {
     removeStripSwipe()
     removeGestureTelemetry()
     removePageTiming()
+    removePageFetchGuard()
     document.removeEventListener('click', onBranchClick, true)
     document.removeEventListener('click', onSidebarSessionSelect, true)
     document.removeEventListener('pointerdown', onPointerDownForFocus, true)
