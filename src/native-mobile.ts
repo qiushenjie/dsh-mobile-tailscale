@@ -163,8 +163,11 @@ html.dsh-native-mobile-active { -webkit-text-size-adjust:100%; text-size-adjust:
    add :active feedback here. Sidebar rows keep their deliberate neutral
    background handling above; opacity/transform still give them feedback.
    role=treeitem rows (the session list) are plain divs, so they are matched
-   explicitly. */
-html.dsh-native-mobile-active :is(a,button,[role="button"],[role="tab"],[role="treeitem"],label,[tabindex],[contenteditable]):active {
+   explicitly. Only real controls are listed: a container can carry tabindex
+   (dialogs, scroll regions) or contenteditable (the terminal's helper
+   textarea), and a long press used to fade the whole page to 72% - plus a
+   transform on a focused field upsets the phone keyboard. */
+html.dsh-native-mobile-active :is(a,button,[role="button"],[role="tab"],[role="treeitem"],[role="menuitem"],[role="option"],label):active {
   opacity:.72 !important;
   transform:scale(.97) !important;
   filter:brightness(.95) !important;

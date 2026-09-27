@@ -2,6 +2,10 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.4.4
+
+- **A long press on the settings page no longer fades the whole page.** The phone stylesheet dims whatever you press (`opacity:.72` plus a slight scale) so a tap feels acknowledged, and its selector listed `[tabindex]` and `[contenteditable]` next to real controls. Settings dialogs, scroll regions and the terminal's helper textarea carry one of those attributes, so pressing anywhere inside them dimmed the entire surface instead of the row under the finger. The feedback now applies only to real controls (`a`, `button`, `[role="button"|"tab"|"treeitem"|"menuitem"|"option"]`, `label`), which also keeps a transform off a focused field — a known way to disturb the phone keyboard.
+
 ## 0.4.3
 
 - **A phone stuck on「重新连接中」could not connect because the remote channel had run out of WebSocket slots.** Every handshake through the Tailscale Serve channel is proxied to the loopback DSH server, and the proxy refused a handshake once its live socket count reached `maxWebSockets` — with the old default of 16, a handful of half-open sockets left behind by crashed or sleeping clients was enough to make the phone retry forever (the browser only saw `429 busy`). The default is now 64, and a rejection is no longer silent: the host log gets `[dsh-mobile-tailscale] remote WebSocket rejected: N/64 sockets in use`, which is the line that identifies this failure in seconds.
