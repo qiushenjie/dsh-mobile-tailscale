@@ -1,4 +1,5 @@
 import { installDrawerPan } from './drawer-pan.js'
+import { installGestureTelemetry } from './gesture-telemetry.js'
 import { installTerminalKeyRepair } from './terminal-keys.js'
 
 /** Mobile feature and compatibility rules applied to DSH React surfaces. */
@@ -1124,11 +1125,16 @@ export function installNativeMobileSurface(): () => void {
   // iOS sometimes never lets the drag reach the drawer's scroller; see
   // {@link installDrawerPan}.
   const removeDrawerPan = installDrawerPan()
+  // Debug channel: the tab swipe cannot be reproduced off-device, so real drags
+  // in the drawer are recorded and posted to the remote proxy. See
+  // {@link installGestureTelemetry}; remove once the gesture is understood.
+  const removeGestureTelemetry = installGestureTelemetry()
   sync()
   return () => {
     observer.disconnect()
     removeTerminalKeyRepair()
     removeDrawerPan()
+    removeGestureTelemetry()
     document.removeEventListener('click', onBranchClick, true)
     document.removeEventListener('click', onSidebarSessionSelect, true)
     document.removeEventListener('pointerdown', onPointerDownForFocus, true)

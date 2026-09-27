@@ -1,4 +1,5 @@
 import { once } from 'node:events'
+import { mkdtemp, readFile } from 'node:fs/promises'
 import {
   createServer as createHttpServer,
   request as requestHttp,
@@ -7,6 +8,8 @@ import {
   type ServerResponse,
 } from 'node:http'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RemotePassthroughProxy } from '../src/remote-proxy.js'
 import { websocketAccept } from '../src/gateway.js'
@@ -432,7 +435,49 @@ describe('RemotePassthroughProxy', () => {
     expect(neighbour.status).toBe(200)
     expect(upstream.recorded).toHaveLength(1)
   })
+
+  it('keeps a device trace in the DSH home instead of forwarding it upstream', async () => {
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('upstream')
+    })
+    const home = await mkdtemp(join(tmpdir(), 'dsh-proxy-telemetry-'))
+    vi.stubEnv('DSH_HOME', home)
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const trace = { kind: 'gesture', delta: { x: -170, y: 4 }, steps: [{ type: 'touchstart' }] }
+    const response = await fetch(proxy.origin() + '/__dsh-mobile/telemetry', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(trace),
+    })
+    expect(response.status).toBe(204)
+
+    // The debug channel is answered locally: nothing reaches the app.
+    expect(upstream.recorded).toHaveLength(0)
+    const file = join(home, 'mobile-telemetry.jsonl')
+    const entry = await readTelemetry(file)
+    expect(entry).toMatchObject({ kind: 'device', payload: trace })
+    expect(typeof entry.at).toBe('string')
+
+    // Only POST is accepted, and a refusal is local too.
+    const refused = await fetch(proxy.origin() + '/__dsh-mobile/telemetry')
+    expect(refused.status).toBe(405)
+    expect(upstream.recorded).toHaveLength(0)
+  })
 })
+
+/** Wait for the queued telemetry write and return the single logged record. */
+async function readTelemetry(file: string): Promise<Record<string, unknown>> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const text = await readFile(file, 'utf8').catch(() => '')
+    if (text.trim() !== '') return JSON.parse(text.trim().split('\n').at(-1) ?? '{}') as Record<string, unknown>
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  throw new Error(`telemetry was never written to ${file}`)
+}
 
 describe('resolveLiveUpstream', () => {
   it('prefers a valid live origin, then DSH_WEB_URL, then the fallback', () => {

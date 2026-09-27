@@ -40,6 +40,12 @@ import {
 } from './gateway.js'
 import { relayUpgradedWebSocket } from './websocket-frames.js'
 import { clampHistoryPageBody, HISTORY_PAGE_PATH, HistoryPageBudget } from './history-page-clamp.js'
+import {
+  MAX_TELEMETRY_BODY_BYTES,
+  TelemetryLog,
+  TELEMETRY_PATH,
+  summarizePageRequest,
+} from './mobile-telemetry.js'
 
 const MAX_HEADER_BYTES = 16 * 1024
 /**
@@ -129,6 +135,8 @@ export class RemotePassthroughProxy {
   private upstreamCookieTask: Promise<string | undefined> | undefined
   /** Page sizes granted to the phone, so history pages stay small (see the module). */
   private readonly historyPages = new HistoryPageBudget()
+  /** Debug channel: device gesture traces and history-paging round trips. */
+  private readonly telemetry = new TelemetryLog()
 
   constructor(private readonly options: RemotePassthroughProxyOptions) {}
 
@@ -225,6 +233,10 @@ export class RemotePassthroughProxy {
     if (!['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) {
       throw new HttpError(405, 'method_not_allowed')
     }
+    if (target.decodedPathname === TELEMETRY_PATH) {
+      await this.acceptTelemetry(request, response)
+      return
+    }
     const body = method === 'GET' || method === 'HEAD'
       ? Buffer.alloc(0)
       : await this.readBoundedBody(request)
@@ -233,6 +245,10 @@ export class RemotePassthroughProxy {
     const clamped = method === 'POST' && target.decodedPathname === HISTORY_PAGE_PATH
       ? clampHistoryPageBody(body, this.historyPages)
       : undefined
+    // The phone's paging complaint is about *when* the host answers, not just
+    // how much it sends, so the round trip is timed from arrival to last byte.
+    const pageStartedAt = clamped === undefined ? undefined : Date.now()
+    const pageRequest = clamped === undefined ? undefined : summarizePageRequest(body)
     const upstream = this.options.resolveUpstream()
     const upstreamHeaders = sanitizeRequestHeaders(request, upstream)
     if (clamped !== undefined) upstreamHeaders['content-length'] = String(clamped.body.byteLength)
@@ -281,6 +297,52 @@ export class RemotePassthroughProxy {
       proxied.pipe(response)
       proxied.once('end', resolve)
     })
+    if (pageStartedAt !== undefined) {
+      this.telemetry.append({
+        at: new Date().toISOString(),
+        kind: 'history-page',
+        requestedAt: new Date(pageStartedAt).toISOString(),
+        /** Wall time from the phone's request to the last byte of the answer. */
+        ms: Date.now() - pageStartedAt,
+        status: proxied.statusCode ?? 0,
+        requestBytes: body.byteLength,
+        sentBytes: clamped?.body.byteLength ?? null,
+        sessionId: clamped?.record.sessionId ?? null,
+        first: clamped?.record.first ?? null,
+        granted: clamped?.record.maxMessages ?? null,
+        record: clamped?.record ?? null,
+        request: pageRequest ?? null,
+      })
+    }
+  }
+
+  /**
+   * Record one device trace and answer 204.
+   *
+   * The channel exists to explain a phone gesture that cannot be reproduced in
+   * a headless browser, so it must never be the reason a gesture fails: the
+   * entry is queued to disk and the phone gets an immediate, empty answer.
+   * @param request - The POSTed trace.
+   * @param response - The response to finish, so the phone is not left waiting.
+   */
+  private async acceptTelemetry(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    if ((request.method ?? 'GET') !== 'POST') throw new HttpError(405, 'method_not_allowed')
+    const body = await this.readBoundedBody(request, MAX_TELEMETRY_BODY_BYTES)
+    const text = body.toString('utf8')
+    let payload: unknown
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = { unparsed: text.slice(0, 4000) }
+    }
+    this.telemetry.append({
+      at: new Date().toISOString(),
+      kind: 'device',
+      remote: request.socket.remoteAddress ?? null,
+      bytes: body.byteLength,
+      payload,
+    })
+    response.writeHead(204, { 'cache-control': 'no-store' }).end()
   }
 
   /**
@@ -609,8 +671,7 @@ export class RemotePassthroughProxy {
     ].join('\r\n'))
   }
 
-  private async readBoundedBody(request: IncomingMessage): Promise<Buffer> {
-    const maximum = this.options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES
+  private async readBoundedBody(request: IncomingMessage, maximum = this.options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES): Promise<Buffer> {
     const chunks: Buffer[] = []
     let bytes = 0
     for await (const chunk of request) {
