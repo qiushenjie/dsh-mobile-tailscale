@@ -650,7 +650,7 @@ describe('phone terminal key repair', () => {
    * whose keydown the terminal ignored and whose `input` event never reached it
    * either.
    */
-  const runKey = async (options: { key?: string; keyCode?: number; traffic?: boolean; viaInput?: boolean; phone?: boolean }): Promise<{ dispatched: FakeEvent[]; frames: string[]; reported: unknown[] }> => {
+  const runKey = async (options: { key?: string; keyCode?: number; traffic?: boolean; viaInput?: boolean; phone?: boolean }): Promise<{ dispatched: FakeEvent[]; frames: string[]; reported: unknown[]; keyLog: unknown[] }> => {
     expect(shim).toBeDefined()
     const key = options.key ?? ' '
     const dispatched: FakeEvent[] = []
@@ -696,7 +696,8 @@ describe('phone terminal key repair', () => {
       win: unknown,
       event: unknown,
     ) => void
-    install(FakeWebSocket, document, { setTimeout, fetch: fakeFetch }, FakeKeyboardEvent)
+    const win: { setTimeout: typeof setTimeout; fetch: typeof fakeFetch; __DSH_MOBILE_KEYLOG__?: unknown[] } = { setTimeout, fetch: fakeFetch }
+    install(FakeWebSocket, document, win, FakeKeyboardEvent)
 
     if (options.viaInput === true) {
       captures.get('input')?.({ type: 'input', isTrusted: true, key: '', keyCode: 0, inputType: 'insertText', data: key, target: element } as FakeEvent)
@@ -705,7 +706,7 @@ describe('phone terminal key repair', () => {
     }
     if (options.traffic === true) FakeWebSocket.prototype.send(JSON.stringify({ endpoint: 'terminal/input', data: key }))
     await new Promise((resolve) => setTimeout(resolve, 400))
-    return { dispatched, frames, reported }
+    return { dispatched, frames, reported, keyLog: win.__DSH_MOBILE_KEYLOG__ ?? [] }
   }
 
   it('re-dispatches the space the terminal dropped', async () => {
@@ -721,10 +722,12 @@ describe('phone terminal key repair', () => {
   it('re-dispatches a symbol on the US key code xterm forwards', async () => {
     // xterm forwards a single-character key only when the key code is at least
     // 48, so a dropped ',' has to come back as 188, not as the IME's 229.
-    const { dispatched, frames } = await runKey({ key: ',', keyCode: 229 })
+    const { dispatched, frames, keyLog } = await runKey({ key: ',', keyCode: 229 })
     expect(dispatched.map(event => event.keyCode)).toEqual([188, 188])
     expect(frames.some(frame => frame.includes('","')) || frames.some(frame => frame.includes('","'))).toBe(true)
     expect(dispatched[0]?.key).toBe(',')
+    // The sheet reads this log, so an unrepairable key leaves evidence.
+    expect(keyLog.map(entry => (entry as { keyCodeUsed: number }).keyCodeUsed)).toEqual([188])
   })
 
   it('keeps the legacy 229 for a character no physical key produces', async () => {

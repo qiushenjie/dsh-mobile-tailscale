@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { chatStatusText, describeDownlinkFrame, describeOpenFrame, formatBytes, isHistoryStalled } from '../src/phone-watchdog.js'
+import { chatStatusText, describeDownlinkFrame, describeOpenFrame, formatBytes, isHistoryStalled, keyRepairHint } from '../src/phone-watchdog.js'
 
 /**
  * Stand-in for a chat flow node. Only the two things `chatStatusText` reads are
@@ -133,5 +133,19 @@ describe('formatBytes', () => {
     expect(formatBytes(999)).toBe('999B')
     expect(formatBytes(279_501)).toBe('273.0K')
     expect(formatBytes(11_116_757)).toBe('10.6M')
+  })
+})
+
+describe('keyRepairHint', () => {
+  it('names the character, the code it was sent with, and whether the repair fired', () => {
+    expect(keyRepairHint(10_000, [{ key: ' ', keyCodeUsed: 32, dispatched: true, at: 8_000 }])).toBe('" "→32 已补发@2s')
+    expect(keyRepairHint(10_000, [{ data: '，', keyCodeUsed: 229, dispatched: false }])).toBe('"，"→229 未补发')
+  })
+
+  it('shows only the last four keys and stays silent with nothing to show', () => {
+    const log = [1, 2, 3, 4, 5].map(index => ({ key: String(index), keyCodeUsed: 48 + index, dispatched: true }))
+    expect(keyRepairHint(0, log).split('→')).toHaveLength(5)
+    expect(keyRepairHint(0, log)).not.toContain('"1"')
+    expect(keyRepairHint(0, [])).toBe('')
   })
 })

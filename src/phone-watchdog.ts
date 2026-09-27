@@ -228,6 +228,44 @@ function shortUrl(url: string): string {
   }
 }
 
+/** One key the phone's keyboard repair inspected, as the injected shim recorded it. */
+export interface KeyRepairNote {
+  readonly key?: string
+  readonly data?: string
+  readonly keyCodeUsed?: number
+  readonly dispatched?: boolean
+  readonly at?: number
+}
+
+/**
+ * What the phone keyboard repair did to the last few keys, for the sheet.
+ *
+ * The shim runs in the document as its own script, so it can only hand this over
+ * through a window global. Reading it here means a key that still does not reach
+ * the terminal leaves evidence the user can screenshot instead of a silence we
+ * have to guess about.
+ */
+export function keyRepairHint(now: number, log?: readonly KeyRepairNote[]): string {
+  let notes = log
+  if (notes === undefined) {
+    try {
+      notes = (window as unknown as { __DSH_MOBILE_KEYLOG__?: KeyRepairNote[] }).__DSH_MOBILE_KEYLOG__
+    } catch {
+      return ''
+    }
+  }
+  if (!Array.isArray(notes) || notes.length === 0) return ''
+  return notes
+    .slice(-4)
+    .map((note) => {
+      const text = note.key ?? note.data ?? '?'
+      const code = typeof note.keyCodeUsed === 'number' ? note.keyCodeUsed : 0
+      const age = typeof note.at === 'number' && note.at > 0 ? `@${Math.round((now - note.at) / 1000)}s` : ''
+      return `${JSON.stringify(text)}→${code}${note.dispatched === true ? ' 已补发' : ' 未补发'}${age}`
+    })
+    .join(' ')
+}
+
 function sessionHint(): string {
   try {
     for (let index = 0; index < localStorage.length; index += 1) {
@@ -407,6 +445,8 @@ export function installPhoneWatchdog(options: PhoneWatchdogOptions = {}): () => 
     const slow = [...state.pending.values()].sort((left, right) => left.at - right.at).slice(0, MAX_PENDING_SHOWN)
     for (const request of slow) lines.push(`  ${Math.round((now - request.at) / 1000)}s ${request.url}`)
     lines.push(`自愈：DSH 重连 ${state.heals} 次${state.heals === 0 ? '' : state.lastHealUsedDsh ? '（已调用）' : '（无句柄，已强断）'} · 刷新 ${state.reloads} 次`)
+    const keyRepairs = keyRepairHint(now)
+    if (keyRepairs !== '') lines.push(`按键修复：${keyRepairs}`)
     lines.push(`会话缓存 ${sessionHint()}`)
     return lines.join('\n')
   }

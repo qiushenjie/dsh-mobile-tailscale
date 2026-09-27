@@ -291,7 +291,9 @@ const inspect=(target,detail,event,key)=>{const at=traffic;window.setTimeout(()=
 if(traffic===at){const keyCode=keyCodeFor(event,key);const init={key:key,code:typeof event.code==="string"?event.code:"",keyCode:keyCode,which:keyCode,charCode:key.charCodeAt(0),bubbles:true,cancelable:true,composed:true};
 target.dispatchEvent(new KeyboardEvent("keydown",init));
 target.dispatchEvent(new KeyboardEvent("keypress",Object.assign({},init)));dispatched=true}
-window.setTimeout(()=>report(Object.assign({},detail,{keyCodeUsed:keyCodeFor(event,key),trafficAt:at,afterOriginal:afterOriginal,afterRepair:traffic,dispatched:dispatched,value:textOf(target)})),150)},110)};
+window.setTimeout(()=>{const payload=Object.assign({},detail,{keyCodeUsed:keyCodeFor(event,key),trafficAt:at,afterOriginal:afterOriginal,afterRepair:traffic,dispatched:dispatched,value:textOf(target)});
+try{const log=window.__DSH_MOBILE_KEYLOG__=window.__DSH_MOBILE_KEYLOG__||[];log.push(Object.assign({at:Date.now()},payload));if(log.length>8)log.shift()}catch(error){}
+report(payload)},150)},110)};
 const usable=(event)=>{if(event.isTrusted!==true)return undefined;const target=event.target;if(!target||typeof target.closest!=="function")return undefined;
 if(!target.closest(".xterm"))return undefined;if(!document.documentElement.classList.contains("dsh-native-mobile-active"))return undefined;return target};
 const schedule=(target,detail,event,key)=>{const now=Date.now();if(now<pendingUntil)return;pendingUntil=now+300;inspect(target,detail,event,key)};
