@@ -253,41 +253,52 @@ const MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP = `(()=>{if(window.__DSH_TRANSPOR
 const MOBILE_SESSION_WINDOW_BOOTSTRAP = `(()=>{const send=WebSocket.prototype.send;WebSocket.prototype.send=function(data){if(typeof data==="string"&&data.includes('"endpoint":"session/follow"')){try{const frame=JSON.parse(data);const request=frame&&frame.payload&&frame.payload.args&&frame.payload.args.request;if(request&&typeof request==="object"){if(typeof request.maxMessages!=="number"||request.maxMessages>${MOBILE_SESSION_WINDOW_MESSAGES})request.maxMessages=${MOBILE_SESSION_WINDOW_MESSAGES};delete request.turnWindow;data=JSON.stringify(frame)}}catch(error){}}return send.call(this,data)}})();`
 
 /**
- * Gives the terminal back its space bar on a phone keyboard.
+ * Gives the terminal back the keys a phone keyboard loses.
  *
  * The terminal DSH ships is xterm.js, which reads keystrokes from `keydown` and
  * steps aside whenever the event carries the legacy IME code 229 - the code an
- * iOS Chinese keyboard reports for every key. Letters survive that because the
- * IME commits them through composition events, but a space bar pressed with an
- * empty composition produces no composition at all, so the keystroke is dropped
- * and the cursor never moves. The terminal is DSH's own module, so the repair
- * has to be done from the phone bootstrap: when a trusted space keydown inside
- * `.xterm` is followed by no traffic (mux frame or request) and no `input`
- * event, the key is re-dispatched with the legacy fields xterm expects.
+ * iOS Chinese keyboard reports for keys it owns. Letters survive that because
+ * the IME commits them through composition events, but a space bar pressed with
+ * an empty composition produces no composition at all, and a symbol key on the
+ * same keyboard is just as likely to arrive as a 229 keydown with nothing behind
+ * it, so the keystroke is dropped and the terminal never sees the character. The
+ * terminal is DSH's own module, so the repair has to be done from the phone
+ * bootstrap: when a trusted keydown (or an `input`/`beforeinput` carrying one
+ * character) inside `.xterm` is followed by no traffic - no mux frame, no
+ * request - the key is re-dispatched with the fields xterm expects.
  *
- * A space that already works sends its frame during the original keydown, so
- * the repair stays out of the way on desktop, Android, and every normal path.
+ * A key that already works sends its frame during the original keydown, so the
+ * repair stays out of the way on desktop, Android, and every normal path. The
+ * repair keeps a punctuation key on its US key code (the map below, the codes
+ * xterm's own table uses) because xterm forwards a single-character `key` only
+ * when the key code is at least 48, and falls back to the legacy 229 for
+ * characters no physical key produces, such as the full-width punctuation a
+ * Chinese keyboard commits.
  */
-const MOBILE_TERMINAL_SPACE_BOOTSTRAP = `(()=>{const SPACE=32,PROBE="/mobile-access/key-probe";let traffic=0;
+const MOBILE_TERMINAL_KEY_BOOTSTRAP = `(()=>{const PROBE="/mobile-access/key-probe";let traffic=0;
 const send=WebSocket.prototype.send;WebSocket.prototype.send=function(data){traffic+=1;return send.call(this,data)};
 const startFetch=window.fetch;if(typeof startFetch==="function")window.fetch=function(){traffic+=1;return startFetch.apply(this,arguments)};
 try{const xhrSend=XMLHttpRequest.prototype.send;XMLHttpRequest.prototype.send=function(){traffic+=1;return xhrSend.apply(this,arguments)}}catch(error){}
 const report=(detail)=>{if(typeof startFetch!=="function")return;try{startFetch.call(window,PROBE,{method:"POST",cache:"no-store",keepalive:true,headers:{"Content-Type":"application/json"},body:JSON.stringify(detail)}).catch(()=>{})}catch(error){}};
 const textOf=(node)=>{try{return typeof node.value==="string"?node.value.slice(0,40):""}catch(error){return""}};
+const CODES={};[[32,32],[59,186],[58,186],[61,187],[43,187],[44,188],[60,188],[45,189],[95,189],[46,190],[62,190],[47,191],[63,191],[96,192],[126,192],[91,219],[123,219],[92,220],[124,220],[93,221],[125,221],[39,222],[34,222]].forEach((pair)=>{CODES[String.fromCharCode(pair[0])]=pair[1]});
+const printable=(text)=>{if(typeof text!=="string"||text.length!==1)return false;const code=text.charCodeAt(0);return code>=32&&code!==127};
+const keyCodeFor=(event,key)=>{const given=typeof event.keyCode==="number"?event.keyCode:0;if(given>=48&&given!==229)return given;
+if(key>="0"&&key<="9")return key.charCodeAt(0);const upper=key.toUpperCase();if(upper>="A"&&upper<="Z")return upper.charCodeAt(0);
+const mapped=CODES[key];return typeof mapped==="number"?mapped:229};
 let pendingUntil=0;
-const inspect=(target,detail)=>{const at=traffic;window.setTimeout(()=>{const afterOriginal=traffic;let dispatched=false;
-if(traffic===at){const init={key:" ",code:"Space",keyCode:SPACE,which:SPACE,charCode:0,bubbles:true,cancelable:true,composed:true};
+const inspect=(target,detail,event,key)=>{const at=traffic;window.setTimeout(()=>{const afterOriginal=traffic;let dispatched=false;
+if(traffic===at){const keyCode=keyCodeFor(event,key);const init={key:key,code:typeof event.code==="string"?event.code:"",keyCode:keyCode,which:keyCode,charCode:key.charCodeAt(0),bubbles:true,cancelable:true,composed:true};
 target.dispatchEvent(new KeyboardEvent("keydown",init));
-target.dispatchEvent(new KeyboardEvent("keypress",{key:" ",code:"Space",keyCode:SPACE,which:SPACE,charCode:SPACE,bubbles:true,cancelable:true,composed:true}));dispatched=true}
-window.setTimeout(()=>report(Object.assign({},detail,{trafficAt:at,afterOriginal:afterOriginal,afterRepair:traffic,dispatched:dispatched,value:textOf(target)})),150)},60)};
+target.dispatchEvent(new KeyboardEvent("keypress",Object.assign({},init)));dispatched=true}
+window.setTimeout(()=>report(Object.assign({},detail,{keyCodeUsed:keyCodeFor(event,key),trafficAt:at,afterOriginal:afterOriginal,afterRepair:traffic,dispatched:dispatched,value:textOf(target)})),150)},110)};
 const usable=(event)=>{if(event.isTrusted!==true)return undefined;const target=event.target;if(!target||typeof target.closest!=="function")return undefined;
 if(!target.closest(".xterm"))return undefined;if(!document.documentElement.classList.contains("dsh-native-mobile-active"))return undefined;return target};
-const schedule=(target,detail)=>{const now=Date.now();if(now<pendingUntil)return;pendingUntil=now+300;inspect(target,detail)};
+const schedule=(target,detail,event,key)=>{const now=Date.now();if(now<pendingUntil)return;pendingUntil=now+300;inspect(target,detail,event,key)};
 document.addEventListener("keydown",(event)=>{const target=usable(event);if(!target)return;
-if(event.key!==" "&&event.code!=="Space"&&event.keyCode!==SPACE)return;
-schedule(target,{from:"keydown",key:event.key,code:event.code,keyCode:event.keyCode,which:event.which})},true);
-const onText=(event)=>{const target=usable(event);if(!target)return;const data=typeof event.data==="string"?event.data:"";if(data.indexOf(" ")<0)return;
-schedule(target,{from:event.type,inputType:event.inputType,data:data,isComposing:event.isComposing===true})};
+if(!printable(event.key))return;schedule(target,{from:"keydown",key:event.key,code:event.code,keyCode:event.keyCode,which:event.which,isComposing:event.isComposing===true},event,event.key)},true);
+const onText=(event)=>{const target=usable(event);if(!target)return;const data=typeof event.data==="string"?event.data:"";
+if(!printable(data))return;schedule(target,{from:event.type,inputType:event.inputType,data:data,isComposing:event.isComposing===true},event,data)};
 document.addEventListener("beforeinput",onText,true);document.addEventListener("input",onText,true)})();`
 
 
@@ -867,7 +878,7 @@ export function rewriteRemoteMobileIndexWithBatches(html: string, layoutMode: Mo
   if (mobileBatches.length > 0) {
     site.parsed.rev = createHash('sha256').update(JSON.stringify({ entries, batches })).digest('hex').slice(0, 16)
   }
-  const replacement = `${MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP}${MOBILE_SESSION_WINDOW_BOOTSTRAP}${MOBILE_TERMINAL_SPACE_BOOTSTRAP}${MOBILE_TRUST_FLAG}${site.assignment}${JSON.stringify(site.parsed)};`
+  const replacement = `${MOBILE_AUTHENTICATED_TRANSPORT_BOOTSTRAP}${MOBILE_SESSION_WINDOW_BOOTSTRAP}${MOBILE_TERMINAL_KEY_BOOTSTRAP}${MOBILE_TRUST_FLAG}${site.assignment}${JSON.stringify(site.parsed)};`
   return Object.freeze({
     html: ensureMobileViewport(`${dropStockBootPreloads(html.slice(0, site.start))}${replacement}${dropStockBootPreloads(html.slice(site.scriptEnd))}`),
     ...(mobileBatches.length === 0 ? {} : { batches: mobileBatches }),

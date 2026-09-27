@@ -610,7 +610,7 @@ describe('current-generation dedicated layout', () => {
   })
 })
 
-describe('phone terminal space repair', () => {
+describe('phone terminal key repair', () => {
   const source = currentIndex([
     { id: '@deepseek-ai/dsh-client-runtime', url: '/runtime.js', rev: 'runtime' },
     {
@@ -625,7 +625,7 @@ describe('phone terminal space repair', () => {
     },
     { id: packageName, url: '/mobile.js', rev: 'mobile' },
   ])
-  const shim = rewriteRemoteMobileIndex(source).match(/\(\(\)=>\{const SPACE=32[\s\S]*?\}\)\(\);/u)?.[0]
+  const shim = rewriteRemoteMobileIndex(source).match(/\(\(\)=>\{const PROBE="\/mobile-access\/key-probe"[\s\S]*?\}\)\(\);/u)?.[0]
 
   interface FakeEvent {
     readonly type: string
@@ -646,12 +646,13 @@ describe('phone terminal space repair', () => {
 
   /**
    * Run the injected repair against a fake terminal. `traffic` stands for a
-   * terminal that already put the space on the wire itself, `viaInput` for a
-   * phone whose keydown the terminal ignored and whose `input` event never
-   * reached it either.
+   * terminal that already put the key on the wire itself, `viaInput` for a phone
+   * whose keydown the terminal ignored and whose `input` event never reached it
+   * either.
    */
-  const runSpace = async (options: { traffic?: boolean; viaInput?: boolean; phone?: boolean }): Promise<{ dispatched: FakeEvent[]; frames: string[]; reported: unknown[] }> => {
+  const runKey = async (options: { key?: string; keyCode?: number; traffic?: boolean; viaInput?: boolean; phone?: boolean }): Promise<{ dispatched: FakeEvent[]; frames: string[]; reported: unknown[] }> => {
     expect(shim).toBeDefined()
+    const key = options.key ?? ' '
     const dispatched: FakeEvent[] = []
     const frames: string[] = []
     const reported: unknown[] = []
@@ -663,7 +664,7 @@ describe('phone terminal space repair', () => {
       dispatchEvent: (event: FakeEvent) => {
         dispatched.push(event)
         // xterm listens on the terminal element and forwards what it understands.
-        if (event.type === 'keydown' && event.key === ' ') frames.push(JSON.stringify({ endpoint: 'terminal/input', data: event.key }))
+        if (event.type === 'keydown' && event.key.length === 1) frames.push(JSON.stringify({ endpoint: 'terminal/input', data: event.key }))
       },
     }
     const FakeWebSocket = function (this: unknown) {} as unknown as { prototype: { send: (data: string) => void } }
@@ -697,19 +698,18 @@ describe('phone terminal space repair', () => {
     ) => void
     install(FakeWebSocket, document, { setTimeout, fetch: fakeFetch }, FakeKeyboardEvent)
 
-    const keydown = { type: 'keydown', isTrusted: true, key: ' ', keyCode: 229, target: element } as FakeEvent
     if (options.viaInput === true) {
-      captures.get('input')?.({ type: 'input', isTrusted: true, key: '', keyCode: 0, inputType: 'insertText', data: ' ', target: element } as FakeEvent)
+      captures.get('input')?.({ type: 'input', isTrusted: true, key: '', keyCode: 0, inputType: 'insertText', data: key, target: element } as FakeEvent)
     } else {
-      captures.get('keydown')?.(keydown)
+      captures.get('keydown')?.({ type: 'keydown', isTrusted: true, key, keyCode: options.keyCode ?? 229, target: element } as FakeEvent)
     }
-    if (options.traffic === true) FakeWebSocket.prototype.send(JSON.stringify({ endpoint: 'terminal/input', data: ' ' }))
-    await new Promise((resolve) => setTimeout(resolve, 320))
+    if (options.traffic === true) FakeWebSocket.prototype.send(JSON.stringify({ endpoint: 'terminal/input', data: key }))
+    await new Promise((resolve) => setTimeout(resolve, 400))
     return { dispatched, frames, reported }
   }
 
   it('re-dispatches the space the terminal dropped', async () => {
-    const { dispatched, frames, reported } = await runSpace({})
+    const { dispatched, frames, reported } = await runKey({})
     // The keydown is what xterm acts on; the keypress is its legacy fallback and
     // is dropped by xterm itself once the keydown was handled.
     expect(dispatched.map(event => event.type)).toEqual(['keydown', 'keypress'])
@@ -718,18 +718,35 @@ describe('phone terminal space repair', () => {
     expect(reported).toHaveLength(1)
   })
 
-  it('repairs a space that only arrived as text, which is the shape iOS sends', async () => {
-    const { dispatched } = await runSpace({ viaInput: true })
-    expect(dispatched.map(event => event.type)).toEqual(['keydown', 'keypress'])
+  it('re-dispatches a symbol on the US key code xterm forwards', async () => {
+    // xterm forwards a single-character key only when the key code is at least
+    // 48, so a dropped ',' has to come back as 188, not as the IME's 229.
+    const { dispatched, frames } = await runKey({ key: ',', keyCode: 229 })
+    expect(dispatched.map(event => event.keyCode)).toEqual([188, 188])
+    expect(frames.some(frame => frame.includes('","')) || frames.some(frame => frame.includes('","'))).toBe(true)
+    expect(dispatched[0]?.key).toBe(',')
   })
 
-  it('leaves a space alone once the terminal put it on the wire itself', async () => {
-    const { dispatched } = await runSpace({ traffic: true })
+  it('keeps the legacy 229 for a character no physical key produces', async () => {
+    const { dispatched } = await runKey({ key: '，', keyCode: 229 })
+    expect(dispatched.map(event => event.keyCode)).toEqual([229, 229])
+    expect(dispatched[0]?.key).toBe('，')
+  })
+
+  it('repairs a key that only arrived as text, which is the shape iOS sends', async () => {
+    const { dispatched } = await runKey({ key: '?', viaInput: true })
+    expect(dispatched.map(event => event.type)).toEqual(['keydown', 'keypress'])
+    expect(dispatched[0]?.key).toBe('?')
+    expect(dispatched[0]?.keyCode).toBe(191)
+  })
+
+  it('leaves a key alone once the terminal put it on the wire itself', async () => {
+    const { dispatched } = await runKey({ key: ';', traffic: true })
     expect(dispatched).toHaveLength(0)
   })
 
   it('never fires outside the phone surface', async () => {
-    const { dispatched } = await runSpace({ phone: false })
+    const { dispatched } = await runKey({ phone: false })
     expect(dispatched).toHaveLength(0)
   })
 })

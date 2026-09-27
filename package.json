@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-tailscale",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "private": false,
   "description": "把电脑上运行的 DeepSeek Harness Web 端，通过 Tailscale Serve 安全地交给同一 tailnet 内的手机浏览器使用。",
   "type": "module",

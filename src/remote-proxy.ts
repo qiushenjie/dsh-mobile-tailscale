@@ -258,10 +258,10 @@ export class RemotePassthroughProxy {
       else response.end(health)
       return
     }
-    // Temporary: the phone's keyboard repair reports what a real phone sent for
-    // a space bar the terminal dropped. The host log is the only place a phone
-    // can leave evidence this plugin can read, and the body is bounded so a
-    // runaway page cannot grow the log.
+    // Temporary: the phone's keyboard repair reports what a real phone sent for a
+    // key the terminal dropped (a space bar, or a symbol the IME owned). The host
+    // log is the only place a phone can leave evidence this plugin can read, and
+    // the body is bounded so a runaway page cannot grow the log.
     if (target.search === '' && target.decodedPathname === `${AUTH_PREFIX}/key-probe`) {
       if (method !== 'POST') throw new HttpError(405, 'method_not_allowed')
       const body = await this.readBoundedBody(request)
