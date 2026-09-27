@@ -13,6 +13,9 @@
  * across desktop/CLI restarts without manual re-pointing. Starting also
  * recovers the common stale-config failure where port 443 is already serving a
  * TCP forward (or another entry) by clearing it when safe and retrying once.
+ * Teardown and a running watchdog both compare the node's registered handler
+ * against this controller's own origin, so an entry this controller never
+ * created is never cleared and one that vanished is restored.
  * @module dsh-mobile-tailscale/tailscale-serve
  */
 
@@ -50,6 +53,22 @@ const execFileAsync = promisify(execFile)
 /** Environment escape hatch for a Tailscale install in an unusual location. */
 const TAILSCALE_BIN_ENV = 'DSH_MOBILE_TAILSCALE_BIN'
 
+/** Read the node's serve configuration. Shared by teardown and the watchdog. */
+const SERVE_STATUS_ARGS = ['serve', 'status', '--json'] as const
+
+/**
+ * Cadence of the serve watchdog. The port-443 entry can disappear without this
+ * plugin acting: the Tailscale daemon drops the config when the node
+ * re-authenticates, and a second controller for the same loopback port can run
+ * `serve --https=443 off` *after* a newer one registered (the reload race).
+ * Neither path changes the persisted switch, so the panel keeps reporting
+ * `ready` while every phone request gets connection-refused.
+ */
+const SERVE_WATCHDOG_INTERVAL_MS = 60_000
+
+/** First watchdog pass, short enough to heal a reload race before anyone notices. */
+const SERVE_WATCHDOG_FIRST_MS = 5_000
+
 function publicStatus(status: TailscaleServeStatus): TailscaleServeStatus {
   return Object.freeze({
     enabled: status.enabled,
@@ -57,6 +76,36 @@ function publicStatus(status: TailscaleServeStatus): TailscaleServeStatus {
     ...(status.origin === undefined ? {} : { origin: status.origin }),
     ...(status.errorCode === undefined ? {} : { errorCode: status.errorCode }),
   })
+}
+
+/** Trailing-slash-insensitive form of a serve origin, for entry comparison. */
+export function normalizeServeOrigin(origin: string): string {
+  return origin.trim().replace(/\/+$/u, '')
+}
+
+/**
+ * Whether the node's serve configuration forwards `/` to `target`.
+ *
+ * `tailscale serve status --json` reports handlers under
+ * `Web["<host>:443"].Handlers["/"].Proxy`, so the typed shape is not needed
+ * here — only the one string that decides whether a teardown would clear our
+ * own entry or an unrelated 443 entry the user configured themselves.
+ * @param status - Parsed `tailscale serve status --json`, or anything else.
+ * @param target - Loopback origin this controller registered.
+ * @returns True when some entry proxies `/` to exactly that origin.
+ */
+export function serveEntryTargetsProxy(status: unknown, target: string): boolean {
+  const web = (status as { Web?: unknown } | null | undefined)?.Web
+  if (web === null || typeof web !== 'object') return false
+  const wanted = normalizeServeOrigin(target)
+  for (const entry of Object.values(web as Record<string, unknown>)) {
+    const handlers = (entry as { Handlers?: unknown } | null | undefined)?.Handlers
+    if (handlers === null || typeof handlers !== 'object') continue
+    const root = (handlers as Record<string, unknown>)['/']
+    const proxy = (root as { Proxy?: unknown } | null | undefined)?.Proxy
+    if (typeof proxy === 'string' && normalizeServeOrigin(proxy) === wanted) return true
+  }
+  return false
 }
 
 /**
@@ -161,6 +210,10 @@ export class TailscaleServeController {
   private disposed = false
   private latest: TailscaleServeStatus = Object.freeze({ enabled: false, state: 'off' })
   private queue: Promise<void> = Promise.resolve()
+  /** Loopback origin the 443 entry is expected to point at while enabled. */
+  private serveTarget: string | undefined
+  /** Watchdog handles; unref'd so they never hold the host process open. */
+  private watchdogTimers: NodeJS.Timeout[] = []
   constructor(private readonly options: TailscaleServeControllerOptions) {}
 
   /** Restore the remote switch without coupling it to LAN availability. */
@@ -233,6 +286,26 @@ export class TailscaleServeController {
     return undefined
   }
 
+  /**
+   * Re-register the port-443 entry when it no longer points at this
+   * controller's proxy. Called by the watchdog, and safe to call directly: a
+   * healthy entry is left untouched and an unrelated 443 entry is never
+   * modified, only replaced once this controller owns it.
+   */
+  async reconcile(): Promise<void> {
+    if (this.disposed || !this.enabled) return
+    const target = this.serveTarget
+    if (target === undefined) return
+    const status = await this.readServeEntries()
+    if (status !== undefined && serveEntryTargetsProxy(status, target)) return
+    try {
+      await this.enqueue(() => this.applyServe(target))
+    } catch {
+      // A pass that cannot re-register retries on the next tick; the published
+      // status keeps the last known state instead of flapping to an error.
+    }
+  }
+
   async close(): Promise<void> {
     if (this.disposed) return
     this.disposed = true
@@ -296,6 +369,41 @@ export class TailscaleServeController {
         throw error
       }
     }
+    this.serveTarget = target
+    this.startWatchdog()
+  }
+
+  /**
+   * Re-verify the 443 entry shortly after enabling and then on a slow cadence.
+   * A registration that vanishes (daemon restart, reload race) is restored
+   * without the user touching the desktop panel.
+   */
+  private startWatchdog(): void {
+    this.stopWatchdog()
+    const tick = (): void => { void this.reconcile() }
+    this.watchdogTimers = [setTimeout(tick, SERVE_WATCHDOG_FIRST_MS), setInterval(tick, SERVE_WATCHDOG_INTERVAL_MS)]
+    for (const timer of this.watchdogTimers) timer.unref?.()
+  }
+
+  private stopWatchdog(): void {
+    for (const timer of this.watchdogTimers) {
+      clearTimeout(timer)
+      clearInterval(timer)
+    }
+    this.watchdogTimers = []
+  }
+
+  /** Parsed `serve status --json`, or undefined when it cannot be read. */
+  private async readServeEntries(): Promise<unknown | undefined> {
+    try {
+      const { stdout } = await execFileAsync(this.bin(), [...SERVE_STATUS_ARGS], {
+        windowsHide: true,
+        timeout: 30_000,
+      })
+      return JSON.parse(stdout) as unknown
+    } catch {
+      return undefined
+    }
   }
 
   private async applyServe(target: string): Promise<void> {
@@ -333,13 +441,26 @@ export class TailscaleServeController {
   }
 
   private async stopServe(): Promise<void> {
-    try {
-      await execFileAsync(this.bin(), ['serve', '--https=443', 'off'], {
-        windowsHide: true,
-        timeout: 30_000,
-      })
-    } catch {
-      // Turning serve off when nothing is configured is harmless.
+    this.stopWatchdog()
+    // Only clear the entry this controller registered. `serve --https=443 off`
+    // is a node-global switch: running it while the 443 entry belongs to
+    // someone else (a user's own serve entry, or a newer controller for the
+    // same loopback port during a reload) would take their origin down
+    // instead. No registration of ours means there is nothing to clear.
+    const target = this.serveTarget
+    this.serveTarget = undefined
+    if (target !== undefined) {
+      const status = await this.readServeEntries()
+      if (status === undefined || serveEntryTargetsProxy(status, target)) {
+        try {
+          await execFileAsync(this.bin(), ['serve', '--https=443', 'off'], {
+            windowsHide: true,
+            timeout: 30_000,
+          })
+        } catch {
+          // Turning serve off when nothing is configured is harmless.
+        }
+      }
     }
     await this.closeProxy()
   }
