@@ -122,7 +122,11 @@ html.dsh-native-mobile-active { -webkit-text-size-adjust:100%; text-size-adjust:
      footer only ever showed a bare "本会话 …" fragment. Let the dock wrap and
      hand the readout a full row of its own. */
   [data-dsh-mobile-center] [data-composer-card] ~ [class*="_dock"] { box-sizing:border-box !important; display:flex !important; flex-wrap:wrap !important; align-items:center !important; row-gap:2px !important; height:auto !important; max-width:100% !important; }
-  [data-dsh-mobile-center] [data-composer-card] ~ [class*="_dock"] :is([class*="cm-root"],[class*="cm-footer-stack"]) { box-sizing:border-box !important; flex:1 1 100% !important; width:100% !important; min-width:0 !important; max-width:100% !important; font-size:11px !important; line-height:18px !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; }
+  /* order:1 parks the cost readout after every other dock child (the app's
+     usage pills and the context ring), so the two rows on a phone are
+     "pills + ring" and then the full-width cost line. Without it the ring was
+     pushed onto a line of its own and the dock ate three rows. */
+  [data-dsh-mobile-center] [data-composer-card] ~ [class*="_dock"] :is([class*="cm-root"],[class*="cm-footer-stack"]) { box-sizing:border-box !important; order:1 !important; flex:1 1 100% !important; width:100% !important; min-width:0 !important; max-width:100% !important; font-size:11px !important; line-height:18px !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; }
   /* Message runtime details are inline on desktop. Give the clock/runtime
      label its own wrapping row on narrow screens so TTFT and throughput do
      not push the action buttons or clip at the viewport edge. */
@@ -271,6 +275,18 @@ html.dsh-native-mobile-active [data-dsh-mobile-header] [class*="_sessionLogButto
   /* Wide content still has to pan sideways inside the drawer. */
   html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] :is(pre,[data-dsh-mobile-table-scroll]) {
     touch-action:pan-x pan-y pinch-zoom !important;
+  }
+  /* The dockkit tab strip is the app's own horizontal scroller
+     (._stripTabs_1s7ij_257{overflow-x:auto}) and it declares touch-action:none
+     on both the bar and the strip; the blanket pan-y above outranks that, so
+     the tabs past the drawer's right edge became unreachable. Hand the
+     horizontal pan back to the strip chain (bar, strip and their children),
+     which is what makes "swipe the open files" work again. The right details
+     tabs of the older build (._3LvJsq_detailTabs{overflow:auto hidden}) get the
+     same treatment. */
+  html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] :is([class*="_tabStrip"],[class*="_stripTabs"],[class*="_detailTabs"]),
+  html.dsh-native-mobile-active [data-dsh-mobile-workbench][data-dsh-mobile-workbench-open="true"] :is([class*="_tabStrip"],[class*="_stripTabs"],[class*="_detailTabs"]) * {
+    touch-action:pan-x pinch-zoom !important;
   }
   /* Keep the dockkit chain between the drawer and the app's own scroller from
      collapsing to zero height: the panel body then has nothing left to scroll. */

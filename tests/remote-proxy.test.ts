@@ -69,6 +69,7 @@ interface RecordedRequest {
   readonly method: string
   readonly path: string
   readonly headers: IncomingMessage['headers']
+  body: string
 }
 
 async function startUpstream(
@@ -80,8 +81,12 @@ async function startUpstream(
       method: request.method ?? 'GET',
       path: request.url ?? '/',
       headers: request.headers,
+      body: '',
     }
     recorded.push(record)
+    const chunks: Buffer[] = []
+    request.on('data', (chunk: Buffer) => chunks.push(chunk))
+    request.on('end', () => { record.body = Buffer.concat(chunks).toString('utf8') })
     onRequest(record, response)
   })
   const port = await listen(server)
@@ -200,6 +205,43 @@ describe('RemotePassthroughProxy', () => {
     await proxy.start()
 
     expect(await (await fetch(proxy.origin() + '/')).text()).toBe('plain')
+  })
+
+  it('shrinks the history page a phone asks for before the host ever sees it', async () => {
+    // The stock client posts `maxMessages: 500`, and the host answers with
+    // megabytes the phone must transfer and parse before it can paint.
+    const upstream = await startUpstream((_record, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end('{"ok":true}')
+    })
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(upstream.origin) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const pageBody = (maxMessages: number): string => JSON.stringify({
+      type: 'client-request',
+      rpcId: 'rpc-1',
+      method: 'session/page',
+      payload: { args: { request: { address: { kind: 'session', sessionId: 'session-a' }, throughSeq: 9, maxMessages, turnWindow: { minMessages: 50, minTurns: 2 } } } },
+    })
+    const post = async (path: string, body: string): Promise<void> => {
+      await fetch(proxy.origin() + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+    }
+
+    await post('/api/session/page', pageBody(500))
+    await post('/api/session/page', pageBody(500))
+    await post('/api/session/other', pageBody(500))
+
+    const first = JSON.parse(upstream.recorded[0]!.body) as { payload: { args: { request: Record<string, unknown> } } }
+    expect(first.payload.args.request.maxMessages).toBe(20)
+    // The host rejects a request whose `turnWindow.minMessages` exceeds it.
+    expect(first.payload.args.request.turnWindow).toEqual({ minMessages: 20, minTurns: 2 })
+    expect(upstream.recorded[0]!.headers['content-length']).toBe(String(Buffer.byteLength(upstream.recorded[0]!.body)))
+
+    // Later pages may be larger; every other route is left exactly as it came.
+    const later = JSON.parse(upstream.recorded[1]!.body) as { payload: { args: { request: { maxMessages: number } } } }
+    expect(later.payload.args.request.maxMessages).toBe(60)
+    expect(upstream.recorded[2]!.body).toBe(pageBody(500))
   })
 
   it('gives every response a cache policy: forever when content-addressed, revalidate otherwise', async () => {

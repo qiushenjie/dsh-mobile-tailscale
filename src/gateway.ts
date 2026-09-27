@@ -57,6 +57,7 @@ import {
 } from './version.js'
 import { addressAllowed, isLoopbackAddress, type ParsedCidr, RequestTrustPolicy } from './network.js'
 import { relayUpgradedWebSocket } from './websocket-frames.js'
+import { clampHistoryPageBody, HISTORY_PAGE_PATH, HistoryPageBudget } from './history-page-clamp.js'
 import type { DeviceStore } from './storage.js'
 import { listComputerImages, readComputerImage } from './computer-images.js'
 import {
@@ -87,14 +88,17 @@ interface ActiveWebSocket {
 
 const MAX_CONTROL_BODY_BYTES = 16 * 1024
 const MAX_HEADER_BYTES = 16 * 1024
-// The mobile page size is no longer clamped at the HTTP layer. It used to be
-// rewritten into the JSON-RPC body of `POST /api/session.history`, but DSH
-// 0.1.7 removed that route and the method with it: session history now travels
-// as typed session-controller frames over the `/api/remote.mux` WebSocket,
-// where the request carries `maxMessages` inside the protocol payload. The
-// rewrite therefore moved down to the frame layer — see
-// `websocket-frames.ts`, which both proxies now run on the client→upstream
-// direction.
+// The mobile page size is bounded in two places. This layer rewrites the JSON
+// body of `POST /api/session/page`, the route that carries every history page a
+// phone asks for after its first snapshot — see `history-page-clamp.ts`. That
+// rewrite used to target `POST /api/session.history` here; DSH 0.1.7 removed the
+// route, and the pages their replacements return are large enough that leaving
+// them alone cost the phone megabytes per page (measured: 500 messages =
+// 4,517,693 bytes / 1167 records). The snapshot itself travels as typed
+// session-controller frames over the `/api/remote.mux` WebSocket, where the
+// request carries `maxMessages` inside the protocol payload, so the frame layer
+// clamps it too — see `websocket-frames.ts`, which both proxies run on the
+// client→upstream direction.
 const DISCOVERY_QUERY = Buffer.from('DSH_MOBILE_DISCOVER_V1', 'ascii')
 const DISCOVERY_PROTOCOL = 1
 const DISCOVERY_INTERVAL_MS = 3_000
@@ -894,6 +898,8 @@ export class MobileAccessGateway {
   private readonly activeRequests = new Map<number, ActiveRequest>()
   private readonly activeWebSockets = new Map<number, ActiveWebSocket>()
   private readonly mobileBootBatches = new Map<string, StoredMobileBootBatch>()
+  /** Page sizes granted to the phone, so history pages stay small (see the module). */
+  private readonly historyPages = new HistoryPageBudget()
   private upstreamCookie: string | undefined
   private upstreamCookieExpiresAt = 0
   private upstreamCookieTask: Promise<string> | undefined
@@ -1686,6 +1692,8 @@ export class MobileAccessGateway {
     response: ServerResponse,
     authorization: SessionAuthorization,
   ): Promise<void> {
+    // A new document is a new first paint: let every session open small again.
+    this.historyPages.reset()
     const holder: { request?: ClientRequest } = {}
     const operation = this.allocateRequest(authorization, response, holder)
     try {
@@ -1930,9 +1938,13 @@ export class MobileAccessGateway {
     const operation = this.allocateRequest(authorization, response, holder)
     let bodyDone: Promise<void> | undefined
     try {
+      const clamped = request.method === 'POST' && request.url?.split('?', 1)[0] === HISTORY_PAGE_PATH
+        ? clampHistoryPageBody(await readBoundedBody(request, this.config.maxBodyBytes), this.historyPages)
+        : undefined
       const upstreamHeaders = sanitizeRequestHeaders(request, this.config.upstreamOrigin)
       const upstreamCookie = await this.upstreamCookieHeader()
       if (upstreamCookie !== undefined) upstreamHeaders.cookie = upstreamCookie
+      if (clamped !== undefined) upstreamHeaders['content-length'] = String(clamped.body.byteLength)
       const upstreamResponse = new Promise<IncomingMessage>((resolve, reject) => {
         const upstreamRequest = requestHttp({
           protocol: 'http:',
@@ -1949,7 +1961,12 @@ export class MobileAccessGateway {
         })
         upstreamRequest.once('response', resolve)
         upstreamRequest.once('error', reject)
-        bodyDone = pipeline(request, new ByteLimitTransform(this.config.maxBodyBytes), upstreamRequest)
+        if (clamped === undefined) {
+          bodyDone = pipeline(request, new ByteLimitTransform(this.config.maxBodyBytes), upstreamRequest)
+        } else {
+          upstreamRequest.end(clamped.body)
+          bodyDone = Promise.resolve()
+        }
         void bodyDone.catch(reject)
       })
       const proxied = await upstreamResponse

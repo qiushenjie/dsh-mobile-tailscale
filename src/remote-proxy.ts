@@ -39,6 +39,7 @@ import {
   websocketAccept,
 } from './gateway.js'
 import { relayUpgradedWebSocket } from './websocket-frames.js'
+import { clampHistoryPageBody, HISTORY_PAGE_PATH, HistoryPageBudget } from './history-page-clamp.js'
 
 const MAX_HEADER_BYTES = 16 * 1024
 /**
@@ -126,6 +127,8 @@ export class RemotePassthroughProxy {
   private upstreamCookieOrigin: string | undefined
   private upstreamCookieExpiresAt = 0
   private upstreamCookieTask: Promise<string | undefined> | undefined
+  /** Page sizes granted to the phone, so history pages stay small (see the module). */
+  private readonly historyPages = new HistoryPageBudget()
 
   constructor(private readonly options: RemotePassthroughProxyOptions) {}
 
@@ -225,10 +228,18 @@ export class RemotePassthroughProxy {
     const body = method === 'GET' || method === 'HEAD'
       ? Buffer.alloc(0)
       : await this.readBoundedBody(request)
+    // A page request asks the host for 500 messages and the host answers with
+    // megabytes; shrink it before it leaves, the same way the frame clamp does.
+    const clamped = method === 'POST' && target.decodedPathname === HISTORY_PAGE_PATH
+      ? clampHistoryPageBody(body, this.historyPages)
+      : undefined
     const upstream = this.options.resolveUpstream()
     const upstreamHeaders = sanitizeRequestHeaders(request, upstream)
+    if (clamped !== undefined) upstreamHeaders['content-length'] = String(clamped.body.byteLength)
     // The document is rewritten below, so it has to arrive uncompressed.
     const document = method === 'GET' && target.decodedPathname === '/'
+    // A new document is a new first paint: let every session open small again.
+    if (document) this.historyPages.reset()
     if (document) upstreamHeaders['accept-encoding'] = 'identity'
     const upstreamCookie = await this.upstreamCookieFor(upstream)
     if (upstreamCookie !== undefined) upstreamHeaders.cookie = upstreamCookie
@@ -247,7 +258,8 @@ export class RemotePassthroughProxy {
       })
       upstreamRequest.once('response', resolve)
       upstreamRequest.once('error', reject)
-      if (body.length > 0) upstreamRequest.write(body)
+      const outgoing = clamped === undefined ? body : clamped.body
+      if (outgoing.length > 0) upstreamRequest.write(outgoing)
       upstreamRequest.end()
     })
     if (document && await this.serveRewrittenDocument(proxied, response, upstream, request)) return
