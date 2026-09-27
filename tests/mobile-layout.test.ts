@@ -41,6 +41,33 @@ describe('dedicated mobile layout boot', () => {
     expect(output).toContain('viewport-fit=cover')
   })
 
+  it('keeps the stock layout when the layout module declares a dependency the profile does not know', () => {
+    // DSH 0.1.7 added `@deepseek-ai/dsh-client-shortcuts` to the stock layout
+    // module and moved to `sidebar`/`main`/`rightbar`/`shell.leading` slots.
+    // `mobile-layout.js` implements the older `conversation`/`details` contract,
+    // so replacing the module here would serve a page whose conversation has no
+    // slot to render into.
+    const output = rewriteMobileIndex(currentIndex([
+      {
+        id: '@deepseek-ai/dsh-client-ui-layout',
+        url: '/layout.js',
+        rev: 'layout',
+        inject: [
+          '@deepseek-ai/dsh-client-locale',
+          '@deepseek-ai/dsh-client-ui-renderer',
+          '@deepseek-ai/dsh-client-ui-session',
+          '@deepseek-ai/dsh-client-ui-theme',
+          '@deepseek-ai/dsh-client-shortcuts',
+        ],
+      },
+    ]))
+
+    expect(output).toContain('"url":"/layout.js"')
+    expect(output).not.toContain('/mobile-access/mobile-layout.js')
+    expect(output).toContain('window.__DSH_MOBILE_FRONTEND__="dedicated"')
+    expect(output).toContain('viewport-fit=cover')
+  })
+
   it('orders the authenticated mobile client before settings without retaining the sidebar cycle', () => {
     const output = rewriteMobileIndex(index([
       { id: '@deepseek-ai/dsh-client-connection', url: '/connection.js', rev: 'connection', inject: [] },

@@ -330,20 +330,39 @@ function locateBootManifest(html: string): BootManifestSite {
   return { start: assignment.index, assignment: assignment[0], scriptEnd, parsed }
 }
 
-/** Resolve the unique stock layout module and its supported dependency profile. */
-function requireLayoutModule(entries: BootGraphEntry[]): { readonly slots: string; readonly entry: BootGraphEntry } {
+/**
+ * Resolve the unique stock layout module and its supported dependency profile.
+ *
+ * `dedicated` reports whether this fork's `mobile-layout.js` can stand in for
+ * that module: it may only do so when every dependency the stock module
+ * declares is one the matched profile already knows. DSH 0.1.7 reshaped the
+ * layout contract — its stock layout module now also depends on
+ * `@deepseek-ai/dsh-client-shortcuts` (and no longer on
+ * `@deepseek-ai/dsh-client-runtime`) and registers the `sidebar` / `main`
+ * (keyed) / `rightbar` / `shell.overlay` / `shell.leading` slots, while
+ * `mobile-layout.js` declares `conversation` / `details`. Serving a layout the
+ * rest of the page does not match leaves the conversation with no slot to
+ * render into, so an unknown dependency keeps the stock layout and the DOM
+ * layer adapts the stock DOM instead.
+ */
+function requireLayoutModule(entries: BootGraphEntry[]): { readonly slots: string; readonly entry: BootGraphEntry; readonly dedicated: boolean } {
   const layout = entries.filter(entry => entry !== null && typeof entry === 'object' && entry.id === MOBILE_LAYOUT_MODULE)
-  if (layout.length !== 1 || typeof layout[0]?.url !== 'string' || typeof layout[0].rev !== 'string') {
+  if (layout.length !== 1) throw new Error('upstream DSH boot manifest has no unique layout module')
+  const entry = layout[0]
+  if (entry === undefined || typeof entry.url !== 'string' || typeof entry.rev !== 'string') {
     throw new Error('upstream DSH boot manifest has no unique layout module')
   }
-  if (!Array.isArray(layout[0].inject)) {
+  if (!Array.isArray(entry.inject)) {
     throw new Error('upstream DSH layout module has unsupported dependencies')
   }
+  const inject: readonly string[] = entry.inject
   const dependencyProfile = MOBILE_LAYOUT_DEPENDENCY_PROFILES.find(profile => (
-    profile.dependencies.every(dependency => layout[0]?.inject?.includes(dependency))
+    profile.dependencies.every(dependency => inject.includes(dependency))
   ))
   if (dependencyProfile === undefined) throw new Error('upstream DSH layout module has unsupported dependencies')
-  return { slots: dependencyProfile.slots, entry: layout[0] }
+  const known = new Set<string>(dependencyProfile.dependencies)
+  const dedicated = inject.every(dependency => known.has(dependency))
+  return { slots: dependencyProfile.slots, entry, dedicated }
 }
 
 function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
@@ -351,8 +370,10 @@ function rewriteMobileIndexWithBatch(html: string): RewrittenMobileIndex {
   const parsed = site.parsed
   const entries = parsed.entries as BootGraphEntry[]
   const layout = requireLayoutModule(entries)
-  layout.entry.url = MOBILE_LAYOUT_PATH
-  layout.entry.rev = `dsh-mobile-layout-${DSH_MOBILE_VERSION}`
+  if (layout.dedicated) {
+    layout.entry.url = MOBILE_LAYOUT_PATH
+    layout.entry.rev = `dsh-mobile-layout-${DSH_MOBILE_VERSION}`
+  }
   const remoteSettings = orderAuthenticatedSettings(entries, layout.slots)
 
   let mobileBatch: MobileBootBatchPlan | undefined
