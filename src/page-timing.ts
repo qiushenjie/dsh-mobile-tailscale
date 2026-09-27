@@ -36,6 +36,16 @@ export const PAINT_SAMPLE_DELAYS_MS = [0, 250, 1000, 3000]
 export const MAX_REPORTED_PAGES = 40
 
 /**
+ * Entries to keep in the resource timeline.
+ *
+ * Chrome stops recording once the buffer is full (250 by default) and the app
+ * is chatty — two cost-meter calls a second is enough to bury a page request
+ * within minutes, which would leave this recorder silently blind on exactly the
+ * long-lived phone session it exists to measure.
+ */
+export const RESOURCE_BUFFER_SIZE = 2000
+
+/**
  * The part of `PerformanceResourceTiming` this module reads. Everything is
  * optional except the name, so a partial entry still yields a usable record.
  */
@@ -55,6 +65,14 @@ export interface ResourceTimingLike {
 /** Minimal shape of the document this module needs (counts rendered turns). */
 export interface TurnSource {
   querySelectorAll?(selector: string): { readonly length: number }
+}
+
+/** The slice of `Performance` this module uses to keep the timeline alive. */
+export interface ResourceBufferTarget {
+  setResourceTimingBufferSize?(size: number): void
+  clearResourceTimings?(): void
+  addEventListener?(type: string, listener: () => void): void
+  removeEventListener?(type: string, listener: () => void): void
 }
 
 /** A recorded page: timings in milliseconds, sizes in bytes. */
@@ -90,6 +108,7 @@ export interface PageTimingOptions {
   readonly resources?: () => readonly ResourceTimingLike[]
   readonly sleep?: (ms: number) => Promise<void>
   readonly pollMs?: number
+  readonly buffer?: ResourceBufferTarget
 }
 
 /** True for the paged-history route, absolute or relative. */
@@ -159,6 +178,35 @@ export async function describePage(
 }
 
 /**
+ * Ask for room in the resource timeline and keep sweeping it when it fills.
+ *
+ * Chrome silently drops new entries once the timeline is full, so a session
+ * open for minutes would starve this recorder. Sweeping costs at most the
+ * entries recorded since the previous poll (a quarter second) and keeps the
+ * timeline readable for as long as the page lives.
+ * @param target - The performance object (injectable for tests).
+ * @returns A function that stops sweeping.
+ */
+export function reserveResourceBuffer(target: ResourceBufferTarget | undefined): () => void {
+  if (target === undefined) return () => undefined
+  try {
+    target.setResourceTimingBufferSize?.(RESOURCE_BUFFER_SIZE)
+  } catch {
+    // A browser that refuses the size still gets the sweep below.
+  }
+  if (typeof target.addEventListener !== 'function') return () => undefined
+  const sweep = (): void => {
+    try {
+      target.clearResourceTimings?.()
+    } catch {
+      // Nothing to do: the recorder will simply see fewer entries.
+    }
+  }
+  target.addEventListener('resourcetimingbufferfull', sweep)
+  return () => target.removeEventListener?.('resourcetimingbufferfull', sweep)
+}
+
+/**
  * Install the recorder.
  *
  * It never touches the app's transport: it only reads the resource timeline,
@@ -171,6 +219,8 @@ export function installPageTiming(options: PageTimingOptions = {}): () => void {
   const doc = options.document ?? (typeof document === 'undefined' ? undefined : document)
   const resources = options.resources ?? defaultResources()
   if (resources === undefined) return () => undefined
+  const buffer = options.buffer ?? (typeof performance === 'undefined' ? undefined : performance)
+  const releaseBuffer = reserveResourceBuffer(buffer)
   const now = options.now ?? ((): number => (typeof performance === 'undefined' ? Date.now() : performance.now()))
   const sleep = options.sleep ?? wait
   const endpoint = options.endpoint ?? TELEMETRY_ENDPOINT
@@ -199,6 +249,7 @@ export function installPageTiming(options: PageTimingOptions = {}): () => void {
   return () => {
     stopped = true
     clearInterval(timer)
+    releaseBuffer()
   }
 }
 

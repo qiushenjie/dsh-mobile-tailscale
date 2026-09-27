@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import {
   PAINT_SAMPLE_DELAYS_MS,
+  RESOURCE_BUFFER_SIZE,
   countTurns,
   describePage,
   installPageTiming,
   isHistoryPageUrl,
+  reserveResourceBuffer,
   type ResourceTimingLike,
   type TurnSource,
 } from '../src/page-timing.js'
@@ -120,5 +122,52 @@ describe('page timing', () => {
     await new Promise((resolve) => setTimeout(resolve, 25))
     expect(responded).toBe(1)
     expect(JSON.parse(sent[0] ?? '{}')).toMatchObject({ kind: 'page-timing', baselineTurns: 12 })
+  })
+
+  it('keeps the resource timeline big enough and sweeps it when it fills', () => {
+    const calls: string[] = []
+    let size: number | undefined
+    let sweep: (() => void) | undefined
+    const stop = reserveResourceBuffer({
+      setResourceTimingBufferSize: (value) => {
+        size = value
+      },
+      clearResourceTimings: () => calls.push('clear'),
+      addEventListener: (type, listener) => {
+        calls.push(`on:${type}`)
+        sweep = listener
+      },
+      removeEventListener: (type) => calls.push(`off:${type}`),
+    })
+    expect(size).toBe(RESOURCE_BUFFER_SIZE)
+    expect(size).toBeGreaterThan(250)
+    expect(calls).toEqual(['on:resourcetimingbufferfull'])
+    sweep?.()
+    expect(calls).toContain('clear')
+    stop()
+    expect(calls).toContain('off:resourcetimingbufferfull')
+  })
+
+  it('reserves the timeline on install and releases it on cleanup', async () => {
+    let size: number | undefined
+    const removed: string[] = []
+    const stop = installPageTiming({
+      endpoint: '/__dsh-mobile/telemetry',
+      send: () => undefined,
+      document: turns([1]),
+      resources: () => [],
+      pollMs: 1000,
+      sleep: async () => undefined,
+      buffer: {
+        setResourceTimingBufferSize: (value) => {
+          size = value
+        },
+        addEventListener: () => undefined,
+        removeEventListener: (type) => removed.push(type),
+      },
+    })
+    expect(size).toBe(RESOURCE_BUFFER_SIZE)
+    stop()
+    expect(removed).toEqual(['resourcetimingbufferfull'])
   })
 })
