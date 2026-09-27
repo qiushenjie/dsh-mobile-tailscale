@@ -14,18 +14,18 @@
 | 远程面板显示 `ready`，但手机打不开地址 | [4](#4-远程通道显示-ready-但不可达) |
 | 日志刷 `TimeoutOverflowWarning` / `upstream_unavailable` | [5](#5-timeoutoverflowwarning--upstream_unavailable) |
 | 插件安装时报 `resolves outside the installation closure` | [6](#6-resolves-outside-the-installation-closure) |
-| 局域网网关起不来 / 3443 未监听 | [7](#7-局域网网关未监听) |
-| 手机端「设置 → 模型」报 `settings are unavailable in this browser`、会话里选不了模型 | [11](#11-手机端设置与模型不可用) |
-| 点开菜单（模型列表、会话行的三个点）却自己关掉或跳转走 | [12](#12-点开的菜单被自己关掉) |
+| 手机端「设置 → 模型」报 `settings are unavailable in this browser`、会话里选不了模型 | [10](#10-手机端设置与模型不可用) |
+| 点开菜单（模型列表、会话行的三个点）却自己关掉或跳转走 | [11](#11-点开的菜单被自己关掉) |
 
 ## 0. 先确定日志与状态位置
 
 ```bash
-# DSH Desktop 的 DSH_HOME（macOS）
-export DSH_HOME="$HOME/Library/Application Support/dsh-desktop/harness"
+# DSH_HOME（桌面版）
+export DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 
-# 日志（这是最重要的证据来源）
-LOG="$HOME/Library/Logs/DSH Desktop/harness.log"
+# 日志（最重要的证据来源；先看这两个目录，文件名随版本变化）
+ls -la "$DSH_HOME/logs/" "$HOME/Library/Logs/DeepSeek Harness/"
+LOG="$DSH_HOME/logs/desktop-next.log"
 
 # 插件状态目录
 ls -la "$DSH_HOME/mobile-access/"
@@ -73,7 +73,7 @@ grep -n "mobile-access (dsh-mobile-tailscale)" "$LOG" | tail -3
 
 1. 从日志里读出抛错的那个插件包名。
 2. 按对应章节修（版本类见 [3](#3-unsupported-deepseek-harness-version)）。
-3. 想先恢复其他插件：把肇事插件从 profile 摘掉（见 [8](#8-从-profile-摘除一个插件)），然后重启 DSH Desktop。**不需要**手动退出 Safe Mode —— 它只是内存标记，下次启动会正常走 `web` profile。
+3. 想先恢复其他插件：把肇事插件从 profile 摘掉（见 [7](#7-从-profile-摘除一个插件)），然后重启 DSH Desktop。**不需要**手动退出 Safe Mode —— 它只是内存标记，下次启动会正常走 `web` profile。
 
 ## 2. `ERR_PNPM_UNEXPECTED_STORE`
 
@@ -177,7 +177,7 @@ try { assertSupportedDshVersion('<解析到的版本>'); console.log('放行') }
 "
 ```
 
-**处置**：升级插件到已覆盖该版本的新版。若新版本尚未发布，见 [8](#8-从-profile-摘除一个插件) 先摘除以免拖垮宿主。
+**处置**：升级插件到已覆盖该版本的新版。若新版本尚未发布，见 [7](#7-从-profile-摘除一个插件) 先摘除以免拖垮宿主。
 
 > **设计约定（勿回退）**：激活期遇到未验证版本只应**告警并继续**（`DSH_MOBILE_UNVERIFIED_DSH_VERSION`），不得抛错。抛错会把宿主的插件树一起弄挂。
 
@@ -245,7 +245,7 @@ PY
 
 **处置**：升级到 0.3.3+。修复后本次启动应为 **0 / 0**。
 
-> 附带说明：`/mobile-access/health` 在**远程路径返回 404 是预期的** —— 该端点属于局域网网关；远程免配对镜像只提供 `metadata`、`mobile-layout.js`、`custom.css`、扩展清单。
+> 附带说明：`/mobile-access/health` 在远程路径返回 404 是预期的 —— 远程镜像只提供 `metadata`、`mobile-layout.js`、`custom.css` 与扩展清单。
 
 ## 6. `resolves outside the installation closure`
 
@@ -280,35 +280,7 @@ rm -rf "$PROBE"
 
 **处置**：若 `@deepseek-ai/*` / `react` 已不在 `problems` 中，**不要改 `peerDependencies`** —— 在已验证可用的清单上做投机改动只会引入新风险。
 
-## 7. 局域网网关未监听
-
-**判定命令**：
-
-```bash
-lsof -nP -iTCP:3443 -sTCP:LISTEN
-lsof -nP -iUDP:3443        # 设备发现广播
-curl -sk -o /dev/null -w "%{http_code}\n" https://<LAN-IP>:3443/mobile-access/health
-# 200 = 健康
-
-# 插件自报状态（<web-port> 用 DSH WebServer 的端口）
-curl -s -H "Host: 127.0.0.1" http://127.0.0.1:<web-port>/api/mobile-access/control
-curl -s -H "Host: 127.0.0.1" http://127.0.0.1:<web-port>/api/mobile-access/remote/control
-# 期望：{"running":true,"origin":"https://<LAN-IP>:3443",...}
-#      {"provider":"tailscale","running":true,"state":"ready","origin":"https://...ts.net/"}
-```
-
-**常见原因**：
-
-- 插件没装 / 没加载 → 先看 [1](#1-dsh-desktop-进入-safe-mode)、[3](#3-unsupported-deepseek-harness-version)。
-- `control.json` 里开关是关的：
-  ```bash
-  cat "$DSH_HOME/mobile-access/control.json"        # {"version":1,"enabled":true}
-  cat "$DSH_HOME/mobile-access/remote/control.json"
-  ```
-- 局域网地址变了 / 选错网卡：`setup.json` 记录的是网卡名，插件会自动跟随地址变化；必要时用
-  `dsh plugin --profile web exec dsh-mobile setup --address 192.168.x.x` 重选。
-
-## 8. 从 profile 摘除一个插件
+## 7. 从 profile 摘除一个插件
 
 当某个插件正在拖垮宿主（[1](#1-dsh-desktop-进入-safe-mode) / [3](#3-unsupported-deepseek-harness-version)）而你想先保其他插件时。
 
@@ -346,16 +318,17 @@ grep -c "<package-name>" "$DSH_HOME/profiles/web/pnpm-lock.yaml"   # 应为 0
 
 然后重启 DSH Desktop 即可脱离 Safe Mode。
 
-## 9. 健康检查清单
+## 8. 健康检查清单
 
-手机功能出问题时，按顺序跑完这四项再下结论：
+手机功能出问题时，按顺序跑完这五项再下结论：
 
 ```bash
 # 1) 插件在 profile 里且已加载
 grep -n "DSH entry loaded" "$LOG" | tail -1
 
-# 2) 局域网网关
-curl -sk -o /dev/null -w "LAN %{http_code}\n" https://<LAN-IP>:3443/mobile-access/health
+# 2) 插件自报的远程状态（<web-port> 用 DSH WebServer 的端口）
+curl -s -H "Host: 127.0.0.1" http://127.0.0.1:<web-port>/api/mobile-access/remote/control
+# 期望：{"provider":"tailscale","running":true,"state":"ready","origin":"https://...ts.net/"}
 
 # 3) 远程 443 归属
 tailscale serve status --json
@@ -370,20 +343,20 @@ t=s[s.rfind('[desktop] starting'):];print('TimeoutOverflowWarning:', len(re.find
 "
 ```
 
-期望：`DSH entry loaded` / `LAN 200` / `TCP.443.HTTPS = true` / `remote 200` / `TimeoutOverflowWarning: 0`。
+期望：`DSH entry loaded` / `state: ready` / `TCP.443.HTTPS = true` / `remote 200` / `TimeoutOverflowWarning: 0`。
 
-## 10. 卸载与数据清理
+## 9. 卸载与数据清理
 
 ```bash
 dsh plugin --profile web exec dsh-mobile purge --yes
 dsh plugin --profile web remove dsh-mobile-tailscale
 ```
 
-`purge` 删除 `$DSH_HOME/mobile-access/`（设置、证书、设备、自定义文件、扩展）。注意其中 `tls/` 与 `devices.json` 含**凭据**，外发或打包前请先清除。
+`purge` 删除 `$DSH_HOME/mobile-access/`（设置、远程节点登录状态、自定义文件与扩展）。注意其中 `remote/tailscale/` 与 `devices.json` 含**凭据**，外发或打包前请先清除。
 
-## 11. 手机端设置与模型不可用
+## 10. 手机端设置与模型不可用
 
-**现象**：手机（局域网或 tailnet）上「设置 → 模型」报 `settings are unavailable in this browser` / `加载提供方目录失败`，会话里的模型选择器也拿不到模型列表。桌面端一切正常。
+**现象**：手机（tailnet）上「设置 → 模型」报 `settings are unavailable in this browser` / `加载提供方目录失败`，会话里的模型选择器也拿不到模型列表。桌面端一切正常。
 
 **根因**：DSH 在插件激活时**只读一次**宿主信任提示来决定设置后端（`ctx.remote.$host.isLoopback ? "host" : "memory"`）。取值是 `memory` 时就没有宿主支持的设置面，模型目录随之加载失败。
 
@@ -407,13 +380,13 @@ console.log(out.includes('\"inject\":[\"@deepseek-ai/dsh-api-remotes\",\"dsh-mob
 "
 ```
 
-取 `/tmp/dsh-index.html` 的方式见 [4](#4-远程通道显示-ready-但不可达) 的 token 交换步骤。
+`/tmp/dsh-index.html` 可以直接抓：`curl -s https://<machine>.<tailnet>.ts.net/ > /tmp/dsh-index.html`。
 
 **远程通道另有独立成因**：远程由回环直通代理服务，它必须自己对首页做同样的改写（`rewriteRemoteMobileIndex`）。该改写曾以 `Content-Length` 为前置条件，而 DSH 用 `Transfer-Encoding: chunked` 返回首页 → **每次请求都跳过改写**，远程通道上这套修复等于没生效。所以远程排查时，要确认改写真的执行了，而不是只看面板状态。
 
 **处置**：升级到 0.3.5+。若升级后远程仍失败，看启动日志里有没有 `remote proxy served the stock document: ...` —— 那是改写被跳过的证据。
 
-## 12. 点开的菜单被自己关掉
+## 11. 点开的菜单被自己关掉
 
 **现象**：两个不同的表现，根因都在本插件的 stock 面适配层（`native-mobile.ts`）：
 

@@ -51,7 +51,6 @@
   },
   "scripts": {
     "build": "tsdown",
-    "check:mobile-release": "node ./scripts/check-mobile-release.mjs",
     "check:dsh-compatibility": "node ./scripts/check-dsh-compatibility.mjs",
     "check:release-tag": "node ./scripts/check-release-version.mjs --tag-env",
     "check:version": "node ./scripts/check-release-version.mjs",
@@ -61,19 +60,19 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "prepack": "npm run check:version && npm run build",
-    "verify": "npm run check:version && npm run check:mobile-release && npm run typecheck && npm run test && npm run build && npm pack --dry-run"
+    "verify": "npm run check:version && npm run typecheck && npm run test && npm run build && npm pack --dry-run"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/saya-ch/dsh-mobile.git"
+    "url": "git+https://github.com/qiushenjie/dsh-mobile-tailscale.git"
   },
   "bugs": {
-    "url": "https://github.com/saya-ch/dsh-mobile/issues"
+    "url": "https://github.com/qiushenjie/dsh-mobile-tailscale/issues"
   },
-  "homepage": "https://github.com/saya-ch/dsh-mobile#readme",
+  "homepage": "https://github.com/qiushenjie/dsh-mobile-tailscale#readme",
   "publishConfig": {
     "access": "public"
   },
@@ -82,7 +81,6 @@
     "dsh",
     "dsh-plugin",
     "plugin",
-    "android",
     "lan",
     "remote-access",
     "tailscale",

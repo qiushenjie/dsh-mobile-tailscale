@@ -1,6 +1,6 @@
 # Security policy
 
-`dsh-mobile` exposes a control surface that can run tools on the host computer. Treat every paired device as security-sensitive.
+`dsh-mobile-tailscale` exposes a control surface that can run tools on the host computer through an authenticated loopback proxy. Treat every device that can open the remote origin as a fully trusted operator.
 
 ## Supported versions
 
@@ -8,27 +8,22 @@ Security fixes target the newest stable release. Prereleases receive fixes only 
 
 ## Reporting a vulnerability
 
-Do not open a public issue for a suspected vulnerability. Use GitHub's private vulnerability-reporting form for `saya-ch/dsh-mobile`. Include the affected version, deployment topology, reproduction steps, and whether a device credential, session Cookie, or local access is required.
+Do not open a public issue for a suspected vulnerability. Use GitHub's private vulnerability-reporting form for `qiushenjie/dsh-mobile-tailscale`. Include the affected version, deployment topology, reproduction steps, and whether a session Cookie or local access is required.
 
 The maintainer will acknowledge a complete report within seven days. Publication timing is coordinated with the reporter after a fix and a revocation or upgrade path are available.
 
 ## Deployment requirements
 
-- Keep the ordinary DSH Web listener on loopback.
-- Expose only the plugin-owned HTTPS listener to the LAN.
-- DNS-SD/mDNS, periodic UDP announcements, active UDP query replies, and HTTPS discovery return only the device name, public HTTPS origin, port, protocol version, and stable non-secret installation identifier. Discovery never returns the CA, a pairing key, a device token, Cookies, credentials, or private configuration.
-- Only after a user selects a device and enters the fingerprint-bound pairing key may Android fetch the public CA from that exact HTTPS origin. The bootstrap GET sends no key or credential. The app retains the CA in its encrypted credential record and never adds it to Android's system trust settings. Native requests use a private trust store; WebView accepts only the otherwise-untrusted leaf signed by that CA, for the exact origin and validity period. Every other TLS error is cancelled.
-- Browser clients require a certificate trusted by that browser platform. Android uses the pairing-key-bound app-private CA. Its WebView exception is restricted to `SSL_UNTRUSTED` for an exact-origin, currently valid leaf signed by that CA; hostname, validity, signature, and every other TLS error remain fail-closed.
-- Keep pairing closed except during a short local onboarding action.
-- Revoke a lost device immediately and rotate the device registry if credential theft is suspected.
-- Do not expose the LAN gateway through router port forwarding. Optional remote access uses a separate loopback gateway behind the selected Tailscale Funnel or cpolar service. The provider terminates public TLS, while DSH pairing, device authentication, CSRF checks, and session revocation remain enforced by the plugin gateway.
-- The Funnel node stores its Tailscale login state under `$DSH_HOME/mobile-access/remote/tailscale/`. The plugin does not request or store a Tailscale password, Auth Key, or OAuth secret.
-- cpolar is downloaded only after confirmation from a pinned official artifact whose size and SHA-256 are verified. Its Authtoken is stored in a private, self-update-disabled configuration under `$DSH_HOME/mobile-access/`, never returned by the admin API or written to logs. Cleanup removes the managed executable, configuration, logs, and independent remote device registry.
-- Disabling remote access stops the selected provider process without affecting LAN access. Resetting remote access also removes provider state and the independent remote device registry.
-- Treat every paired device as a fully trusted operator. Stock DSH methods reached through the authenticated loopback proxy may read configuration or run tools with the desktop user's authority.
-- Treat `mobile.js` as application code with the paired page's same-origin authority. Restrict write access to trusted host-side DSH sessions and review generated API calls or browser-permission use.
+- Keep the ordinary DSH Web listener on loopback; the plugin's `upstreamOrigin` defaults to `http://127.0.0.1:3080`.
+- The plugin's own listener binds loopback only (`listenHost: 127.0.0.1`). It exposes nothing by itself: the only way out is the selected remote provider.
+- Expose the origin through **Tailscale Serve on the tailnet only** — never through Funnel, and never through router port forwarding. `tailscale serve status` must report `(tailnet only)`; the tailnet ACLs are the access boundary, so a device that is not signed in to the tailnet cannot reach the origin at all.
+- The provider terminates public TLS. Session cookie validation, CSRF checks, response-header sanitization, and session revocation stay enforced by the plugin's proxy before a request reaches DSH.
+- The Tailscale node's login state lives under `$DSH_HOME/mobile-access/remote/tailscale/`. The plugin never requests or stores a Tailscale password, Auth Key, or OAuth secret.
+- Remote access can be turned off at any time. Disabling it stops the plugin's proxy process and removes the Serve mapping the plugin owns, without touching other `tailscale serve` entries.
+- Treat every device that can open the origin as a fully trusted operator: stock DSH methods reached through the authenticated loopback proxy may read configuration or run tools with the desktop user's authority. Sign a lost device out of the tailnet.
+- Treat `mobile.js` as application code with the mobile page's same-origin authority. Restrict write access to trusted host-side DSH sessions and review generated API calls or browser-permission use.
 - Treat every extension `host.mjs` as a local program with the desktop user's Node.js privileges. It is never sandboxed and is not editable through the mobile gateway; only place code there that you trust.
-- Extension Actions and Routes receive filtered request data, a device identifier, and an abort signal. They cannot set proxy security headers or access the gateway's cookies, device tokens, CSRF tokens, or internal request headers.
+- Extension Actions and Routes receive filtered request data, a device identifier, and an abort signal. They cannot set proxy security headers or access the gateway's cookies, CSRF tokens, or internal request headers.
 
 ## Known limitation
 
