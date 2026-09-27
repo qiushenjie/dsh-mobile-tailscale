@@ -2,6 +2,10 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.4.3
+
+- **A phone stuck on「重新连接中」could not connect because the remote channel had run out of WebSocket slots.** Every handshake through the Tailscale Serve channel is proxied to the loopback DSH server, and the proxy refused a handshake once its live socket count reached `maxWebSockets` — with the old default of 16, a handful of half-open sockets left behind by crashed or sleeping clients was enough to make the phone retry forever (the browser only saw `429 busy`). The default is now 64, and a rejection is no longer silent: the host log gets `[dsh-mobile-tailscale] remote WebSocket rejected: N/64 sockets in use`, which is the line that identifies this failure in seconds.
+
 ## 0.4.2
 
 - **The file tree inside the phone's right drawer scrolls with a finger again.** 0.4.1 gave the open panel the height chain and `overflow-y:auto`, which a synthesised scroll gesture could already drive — but a real finger still did nothing, because a browser only scrolls when the node the finger lands on is allowed to pan vertically, and the app's own tree rows claim that gesture (they also implement mouse dragging). Every node inside the open panel now declares `touch-action: pan-y pinch-zoom`, so the drag reaches the scrolling body.

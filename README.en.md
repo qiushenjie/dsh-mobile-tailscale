@@ -98,7 +98,7 @@ Keys go in the `mobile-access` entry of the profile's `cordis.patch.yml` (or the
 | `mobileLayout` | `auto` | Phone layout strategy: `auto` replaces only when this plugin supports that layout generation, `mobile` always replaces, `stock` never replaces. |
 | `upstreamOrigin` | `http://127.0.0.1:3080` | Loopback upstream; the remote proxy follows `DSH_WEB_URL` first and falls back here. |
 | `stateFile` | required | The plugin's state file. The bundled `cordis.patch.yml` already sets it to `$DSH_HOME/mobile-access/state.json`, and the extensions directory is derived from it. |
-| `maxWebSockets` / `maxBodyBytes` / `upstreamTimeoutMs` | `16` / `160 MiB` / `30000` | The remote channel's concurrent WebSocket limit, request body limit, and upstream timeout. |
+| `maxWebSockets` / `maxBodyBytes` / `upstreamTimeoutMs` | `64` / `160 MiB` / `30000` | The remote channel's concurrent WebSocket limit, request body limit, and upstream timeout. |
 
 `customCssFile`, `customScriptFile`, `mobileLayoutFile`, and `mobileLayoutNextFile` are maintained by the plugin itself and normally need no hand-editing. The runtime files all live under `$DSH_HOME/mobile-access/`: `remote/control.json` (remote switch), `remote/provider.json` (provider), `mobile.css` / `mobile.js` (customization), `extensions/` (extensions).
 

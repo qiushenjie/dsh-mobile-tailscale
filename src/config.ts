@@ -119,7 +119,7 @@ export function parseMobileConfig(raw: unknown): ResolvedMobileConfig {
     mobileLayoutFile: defaultAsset('mobile-layout.js', value.mobileLayoutFile),
     mobileLayoutNextFile: defaultAsset('mobile-layout-next.js', value.mobileLayoutNextFile),
     mobileLayout: value.mobileLayout ?? 'auto',
-    maxWebSockets: integer(value.maxWebSockets, 'maxWebSockets', 16, 1, 256),
+    maxWebSockets: integer(value.maxWebSockets, 'maxWebSockets', 64, 1, 256),
     maxBodyBytes: integer(value.maxBodyBytes, 'maxBodyBytes', 160 * 1024 * 1024, 1024, 256 * 1024 * 1024),
     upstreamTimeoutMs: integer(value.upstreamTimeoutMs, 'upstreamTimeoutMs', 30_000, 1_000, 300_000),
   })

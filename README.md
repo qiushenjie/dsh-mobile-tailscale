@@ -98,7 +98,7 @@ flowchart LR
 | `mobileLayout` | `auto` | 手机布局策略：`auto` 只在本插件支持该布局代次时替换，`mobile` 强制替换，`stock` 从不替换。 |
 | `upstreamOrigin` | `http://127.0.0.1:3080` | 回环上游；远程代理优先跟随 `DSH_WEB_URL`，再回退到这里。 |
 | `stateFile` | 必填 | 插件状态文件。随包的 `cordis.patch.yml` 已设为 `$DSH_HOME/mobile-access/state.json`，扩展目录由它推导。 |
-| `maxWebSockets` / `maxBodyBytes` / `upstreamTimeoutMs` | `16` / `160 MiB` / `30000` | 远程通道的并发 WebSocket 上限、请求体上限、上游超时。 |
+| `maxWebSockets` / `maxBodyBytes` / `upstreamTimeoutMs` | `64` / `160 MiB` / `30000` | 远程通道的并发 WebSocket 上限、请求体上限、上游超时。 |
 
 `customCssFile`、`customScriptFile`、`mobileLayoutFile`、`mobileLayoutNextFile` 由插件自行维护，通常不用手写。运行时文件都在 `$DSH_HOME/mobile-access/`：`remote/control.json`（远程开关）、`remote/provider.json`（提供方）、`mobile.css` / `mobile.js`（自定义）、`extensions/`（扩展）。
 

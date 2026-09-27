@@ -33,7 +33,7 @@ describe('remote-channel configuration', () => {
     expect(isAbsolute(resolved.mobileLayoutNextFile)).toBe(true)
     expect(resolved.mobileLayoutNextFile.endsWith('mobile-layout-next.js')).toBe(true)
     expect(resolved.mobileLayout).toBe('auto')
-    expect(resolved.maxWebSockets).toBe(16)
+    expect(resolved.maxWebSockets).toBe(64)
     expect(resolved.maxBodyBytes).toBe(160 * 1024 * 1024)
     expect(resolved.upstreamTimeoutMs).toBe(30_000)
     expect(Object.isFrozen(resolved)).toBe(true)

@@ -78,7 +78,7 @@ const UPSTREAM_COOKIE_PAIR = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+=[\x21-\x3A\x3C-\x7E]
 const UPSTREAM_AUTH_REFRESH_MARGIN_MS = 30_000
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 30_000
 const DEFAULT_MAX_BODY_BYTES = 32 * 1024 * 1024
-const DEFAULT_MAX_WEB_SOCKETS = 32
+const DEFAULT_MAX_WEB_SOCKETS = 64
 /** Per-module bound while assembling a boot batch, matching the LAN gateway's. */
 const MAX_BOOT_ENTRY_BYTES = 8 * 1024 * 1024
 /** Bounds while assembling a whole batch, matching the LAN gateway's. */
@@ -514,7 +514,12 @@ export class RemotePassthroughProxy {
       throw new HttpError(400, 'bad_request')
     }
     if (decodedKey.length !== 16 || decodedKey.toString('base64') !== key) throw new HttpError(400, 'bad_request')
-    if (this.webSockets.size >= (this.options.maxWebSockets ?? DEFAULT_MAX_WEB_SOCKETS)) {
+    const limit = this.options.maxWebSockets ?? DEFAULT_MAX_WEB_SOCKETS
+    if (this.webSockets.size >= limit) {
+      // A pile of half-open sockets from crashed or sleeping clients used to be
+      // invisible: the only symptom was a phone that could never connect. Say so
+      // in the host log instead, with the numbers that matter.
+      console.warn(`[dsh-mobile-tailscale] remote WebSocket rejected: ${this.webSockets.size}/${limit} sockets in use`)
       throw new HttpError(429, 'busy')
     }
     const upstream = this.options.resolveUpstream()
