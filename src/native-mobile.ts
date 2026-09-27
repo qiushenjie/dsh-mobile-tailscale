@@ -116,17 +116,23 @@ html.dsh-native-mobile-active { -webkit-text-size-adjust:100%; text-size-adjust:
   [data-dsh-mobile-center] [data-composer-card] ~ * [class*="_root"] { box-sizing:border-box !important; width:100% !important; max-width:100% !important; margin-bottom:-6px !important; padding:3px 4px 0 !important; font-size:11px !important; line-height:18px !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; }
   [data-dsh-mobile-center] [data-composer-card] ~ [class*="_root"] [class*="_sep"],
   [data-dsh-mobile-center] [data-composer-card] ~ * [class*="_root"] [class*="_sep"] { margin:0 6px !important; }
-  /* The status dock under the composer (turn/token pills + the cost readout +
-     the context ring) is a nowrap flex row, and the pills are wider than the
-     phone on their own: the readout was squeezed into its own ellipsis, so the
-     footer only ever showed a bare "本会话 …" fragment. Let the dock wrap and
-     hand the readout a full row of its own. */
-  [data-dsh-mobile-center] [data-composer-card] ~ [class*="_dock"] { box-sizing:border-box !important; display:flex !important; flex-wrap:wrap !important; align-items:center !important; row-gap:2px !important; height:auto !important; max-width:100% !important; }
-  /* order:1 parks the cost readout after every other dock child (the app's
-     usage pills and the context ring), so the two rows on a phone are
-     "pills + ring" and then the full-width cost line. Without it the ring was
-     pushed onto a line of its own and the dock ate three rows. */
-  [data-dsh-mobile-center] [data-composer-card] ~ [class*="_dock"] :is([class*="cm-root"],[class*="cm-footer-stack"]) { box-sizing:border-box !important; order:1 !important; flex:1 1 100% !important; width:100% !important; min-width:0 !important; max-width:100% !important; font-size:11px !important; line-height:18px !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; }
+  /* The status dock under the composer holds the turn/token pills, the context
+     ring and the cost readout. Two problems on a 390px screen: the pills are
+     wider than the row on their own, so the readout used to be squeezed into a
+     bare "本会话 …" ellipsis; and as a wrapping flex row the ring could never
+     share the pills' line (150px + 149px + ring overflows, and flex-wrapping
+     prefers a new line over shrinking), so the footer spent three rows on
+     status alone. A two-column grid keeps the pills and the ring on one line
+     (the pills shrink only down to their text and then ellipsize, so the
+     leading turn/token numbers stay readable), the readout spans the row
+     underneath, and a notch-smaller face keeps the two rows tight: measured
+     772px for pills + ring, 790px for the readout, dock height 84px -> 54px. */
+  [data-dsh-mobile-center] [data-composer-card] ~ [class*="_dock"] { box-sizing:border-box !important; display:grid !important; grid-template-columns:minmax(0,1fr) auto !important; align-items:center !important; gap:1px 6px !important; height:auto !important; max-width:100% !important; padding-top:2px !important; padding-bottom:2px !important; }
+  [data-dsh-mobile-center] [data-composer-card] ~ [class*="_dock"] [class*="_label"] { font-size:10px !important; line-height:14px !important; overflow:hidden !important; text-overflow:ellipsis !important; white-space:nowrap !important; }
+  [data-dsh-mobile-center] [data-composer-card] ~ [class*="_dock"] [class*="_trigger"] { padding:0 !important; }
+  /* order:3 parks the readout after every other dock child, and grid-column
+     1/-1 gives it the full row. */
+  [data-dsh-mobile-center] [data-composer-card] ~ [class*="_dock"] :is([class*="cm-root"],[class*="cm-footer-stack"]) { box-sizing:border-box !important; grid-column:1 / -1 !important; order:3 !important; width:100% !important; min-width:0 !important; max-width:100% !important; font-size:10px !important; line-height:14px !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; }
   /* Message runtime details are inline on desktop. Give the clock/runtime
      label its own wrapping row on narrow screens so TTFT and throughput do
      not push the action buttons or clip at the viewport edge. */
