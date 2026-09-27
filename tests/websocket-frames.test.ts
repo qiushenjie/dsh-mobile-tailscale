@@ -87,7 +87,7 @@ describe('history page clamp', () => {
 
   it('leaves requests it cannot reason about exactly as they were', () => {
     // Already inside the budget: nothing to say.
-    expect(clampHistoryRequest(followFrame({ maxMessages: 20, turnWindow: { minMessages: 10, minTurns: 2 } }))).toBeUndefined()
+    expect(clampHistoryRequest(followFrame({ maxMessages: MOBILE_HISTORY_PAGE_MESSAGES, turnWindow: { minMessages: MOBILE_HISTORY_TURN_MIN_MESSAGES, minTurns: 2 } }))).toBeUndefined()
     // A turn window it cannot read is a signal to stay out of the way: the
     // host owns the validation, and guessing would change size or fail.
     expect(clampHistoryRequest(followFrame({ turnWindow: { minTurns: 2 } }))).toBeUndefined()

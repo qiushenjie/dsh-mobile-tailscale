@@ -30,8 +30,14 @@ import { Transform, type TransformCallback } from 'node:stream'
  * Messages the phone is allowed to pull per history page. Deliberately small:
  * each page arrives as one atomic frame, so this number is the phone's
  * time-to-first-content. Older content still loads on demand (`prepend`).
+ *
+ * Re-measured on a tool-heavy session (2026-09-28) through the phone channel: a
+ * 20-message page was 456 KB of JSON / 124 KB on the wire, a 60-message
+ * continuation page was 0.9-1.8 MB / 0.2-0.5 MB, and the phone showed nothing
+ * but the host's "载入历史…" placeholder until a whole payload had landed. So a
+ * page is 12 messages: one tap now stays well under 100 KB on the wire.
  */
-export const MOBILE_HISTORY_PAGE_MESSAGES = 20
+export const MOBILE_HISTORY_PAGE_MESSAGES = 12
 
 /**
  * Floor for `turnWindow.minMessages` when this rewrite has to invent a turn
@@ -40,7 +46,7 @@ export const MOBILE_HISTORY_PAGE_MESSAGES = 20
  * exceeds `maxMessages` ("gateway/bad-request"), so every clamp below keeps the
  * two consistent.
  */
-export const MOBILE_HISTORY_TURN_MIN_MESSAGES = 10
+export const MOBILE_HISTORY_TURN_MIN_MESSAGES = 8
 
 const OPCODE_TEXT = 0x1
 /** Client frames are small (open/cancel/uplink); anything larger stays raw. */

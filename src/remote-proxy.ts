@@ -291,22 +291,44 @@ export class RemotePassthroughProxy {
       response.end()
       return
     }
+    let sentBytes = 0
+    let upstreamMs: number | undefined
     await new Promise<void>((resolve, reject) => {
       proxied.once('error', reject)
       response.once('error', reject)
+      // Count what the phone actually received: the upstream compresses this
+      // answer, so these are wire bytes, not JSON bytes.
+      proxied.on('data', (chunk: Buffer) => {
+        sentBytes += chunk.length
+      })
       proxied.pipe(response)
-      proxied.once('end', resolve)
+      proxied.once('end', () => {
+        upstreamMs = pageStartedAt === undefined ? undefined : Date.now() - pageStartedAt
+        // `end` only means the upstream is done; the phone may still be
+        // receiving. Waiting for `finish` (or `close`, if the phone hangs up)
+        // turns the recorded time into the phone's wall time instead of the
+        // few milliseconds the local proxy needs to drain the app.
+        if (response.writableFinished) {
+          resolve()
+          return
+        }
+        response.once('finish', resolve)
+        response.once('close', resolve)
+      })
     })
     if (pageStartedAt !== undefined) {
       this.telemetry.append({
         at: new Date().toISOString(),
         kind: 'history-page',
         requestedAt: new Date(pageStartedAt).toISOString(),
-        /** Wall time from the phone's request to the last byte of the answer. */
+        /** Wall time from the phone's request until the answer left the socket. */
         ms: Date.now() - pageStartedAt,
+        /** The same span, but only until the app finished answering. */
+        upstreamMs: upstreamMs ?? null,
         status: proxied.statusCode ?? 0,
         requestBytes: body.byteLength,
-        sentBytes: clamped?.body.byteLength ?? null,
+        /** Wire bytes of the answer, as counted on the way to the phone. */
+        sentBytes,
         sessionId: clamped?.record.sessionId ?? null,
         first: clamped?.record.first ?? null,
         granted: clamped?.record.maxMessages ?? null,

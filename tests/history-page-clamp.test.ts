@@ -6,7 +6,7 @@ import {
   MAX_TRACKED_HISTORY_SESSIONS,
   MOBILE_HISTORY_CONTINUATION_PAGE_MESSAGES,
 } from '../src/history-page-clamp.js'
-import { MOBILE_HISTORY_PAGE_MESSAGES } from '../src/websocket-frames.js'
+import { MOBILE_HISTORY_PAGE_MESSAGES, MOBILE_HISTORY_TURN_MIN_MESSAGES } from '../src/websocket-frames.js'
 
 /** The body the stock client posts when the phone asks for another page. */
 function pageBody(options: { sessionId?: string; maxMessages?: number; turnWindow?: unknown } = {}): Buffer {
@@ -87,7 +87,7 @@ describe('clampHistoryPageBody', () => {
 
   it('invents a turn window when the request carries none', () => {
     const result = clampHistoryPageBody(pageBody({ maxMessages: 500 }), new HistoryPageBudget())
-    expect(requestOf(result!.body).turnWindow).toEqual({ minMessages: 10, minTurns: 2 })
+    expect(requestOf(result!.body).turnWindow).toEqual({ minMessages: MOBILE_HISTORY_TURN_MIN_MESSAGES, minTurns: 2 })
   })
 
   it('always writes a page size when the request asks for none', () => {

@@ -23,10 +23,12 @@ export const HISTORY_PAGE_PATH = '/api/session/page'
 
 /**
  * Messages per page after the first one. Larger than the first page because
- * every page costs a round trip of its own; this size still keeps one page of a
- * tool-heavy session near 1.1 MB of JSON (~300 KB on the wire).
+ * every page costs a round trip of its own, but kept small on purpose: measured
+ * through the phone channel (2026-09-28), 60 messages of a tool-heavy session
+ * were 0.9-1.8 MB of JSON (219-538 KB compressed) and the phone rendered
+ * nothing until the last byte had arrived. At 24 a tap is a fraction of that.
  */
-export const MOBILE_HISTORY_CONTINUATION_PAGE_MESSAGES = 60
+export const MOBILE_HISTORY_CONTINUATION_PAGE_MESSAGES = 24
 
 /** Sessions remembered while deciding whether a page is a session's first. */
 export const MAX_TRACKED_HISTORY_SESSIONS = 64

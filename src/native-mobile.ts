@@ -1,5 +1,6 @@
 import { installDrawerPan } from './drawer-pan.js'
 import { installGestureTelemetry } from './gesture-telemetry.js'
+import { installPageTiming } from './page-timing.js'
 import { installStripSwipe } from './strip-swipe.js'
 import { installTerminalKeyRepair } from './terminal-keys.js'
 
@@ -1136,6 +1137,10 @@ export function installNativeMobileSurface(): () => void {
   // in the drawer are recorded and posted to the remote proxy. See
   // {@link installGestureTelemetry}; remove once the gesture is understood.
   const removeGestureTelemetry = installGestureTelemetry()
+  // The server can only time how long the local app took to answer a history
+  // page; the phone times the transfer and the paint from its own resource
+  // timeline. See {@link installPageTiming}.
+  const removePageTiming = installPageTiming()
   sync()
   return () => {
     observer.disconnect()
@@ -1143,6 +1148,7 @@ export function installNativeMobileSurface(): () => void {
     removeDrawerPan()
     removeStripSwipe()
     removeGestureTelemetry()
+    removePageTiming()
     document.removeEventListener('click', onBranchClick, true)
     document.removeEventListener('click', onSidebarSessionSelect, true)
     document.removeEventListener('pointerdown', onPointerDownForFocus, true)

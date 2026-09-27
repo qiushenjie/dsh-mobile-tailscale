@@ -11,7 +11,9 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { MOBILE_HISTORY_CONTINUATION_PAGE_MESSAGES } from '../src/history-page-clamp.js'
 import { RemotePassthroughProxy } from '../src/remote-proxy.js'
+import { MOBILE_HISTORY_PAGE_MESSAGES } from '../src/websocket-frames.js'
 import { websocketAccept } from '../src/gateway.js'
 import { resolveLiveUpstream } from '../src/upstream.js'
 
@@ -236,14 +238,14 @@ describe('RemotePassthroughProxy', () => {
     await post('/api/session/other', pageBody(500))
 
     const first = JSON.parse(upstream.recorded[0]!.body) as { payload: { args: { request: Record<string, unknown> } } }
-    expect(first.payload.args.request.maxMessages).toBe(20)
+    expect(first.payload.args.request.maxMessages).toBe(MOBILE_HISTORY_PAGE_MESSAGES)
     // The host rejects a request whose `turnWindow.minMessages` exceeds it.
-    expect(first.payload.args.request.turnWindow).toEqual({ minMessages: 20, minTurns: 2 })
+    expect(first.payload.args.request.turnWindow).toEqual({ minMessages: MOBILE_HISTORY_PAGE_MESSAGES, minTurns: 2 })
     expect(upstream.recorded[0]!.headers['content-length']).toBe(String(Buffer.byteLength(upstream.recorded[0]!.body)))
 
     // Later pages may be larger; every other route is left exactly as it came.
     const later = JSON.parse(upstream.recorded[1]!.body) as { payload: { args: { request: { maxMessages: number } } } }
-    expect(later.payload.args.request.maxMessages).toBe(60)
+    expect(later.payload.args.request.maxMessages).toBe(MOBILE_HISTORY_CONTINUATION_PAGE_MESSAGES)
     expect(upstream.recorded[2]!.body).toBe(pageBody(500))
   })
 
