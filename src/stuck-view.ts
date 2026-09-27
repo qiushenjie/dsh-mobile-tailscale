@@ -18,31 +18,44 @@
  * additionally requires an actually empty conversation, so nothing here can fire
  * on a view that is showing content.
  *
- * The recovered view is then kept, and the ladder is deliberately patient: the
- * app needs several seconds to paint a page on a phone (measured 7 s on a slow
- * open), so the watch reports at 5 s, closes the app's sockets at 15 s only if
- * the conversation is still empty, and reloads 30 s after that — as a single
- * last resort per ten minutes, never while the page is hidden or offline. A
- * reload is visible (the shell paints before the remembered session opens), so
- * it is kept rare on purpose: the socket rebuild is the recovery the device
- * measurements actually showed working.
+ * The recovery that works is the one the device showed: closing the app's mux
+ * socket makes the connection layer rebuild its generation, which re-opens
+ * `session/follow` and publishes the window about a second later. On the device
+ * the hint sat on screen for 5-20 s before that happened, because the watch
+ * waited 15 s to act; the HTTP page behind it had already answered in
+ * milliseconds. So the watch now acts as soon as the placeholder is clearly not
+ * momentary — the host's own hint element, an empty conversation, 2 s — and
+ * retries the rebuild with a 2x backoff (2 s, 6 s, 14 s). A reload stays the
+ * last resort at 30 s, once per ten minutes, never while the page is hidden or
+ * offline: it is visible (the shell paints before the remembered session opens)
+ * while the socket rebuild is not.
  */
 
 import { pageFetchStats, type PageFetchStats } from './page-fetch-guard.js'
 import { TELEMETRY_ENDPOINT } from './page-timing.js'
 import { openingWindowMissing, reconnectSockets, socketWatchStats, type SocketWatchStats } from './socket-watch.js'
 
-/** How long an empty conversation may show the hint before it is reported. */
-export const STUCK_VIEW_DELAY_MS = 5_000
+/**
+ * How long an empty conversation may show the hint before the watch acts.
+ *
+ * A healthy open publishes the window within a few hundred milliseconds of the
+ * page answering; a device measured 1-6 s for a slow one. Two seconds is long
+ * enough to leave an ordinary open alone and short enough that a stall costs a
+ * blink rather than a stare.
+ */
+export const STUCK_VIEW_DELAY_MS = 2_000
 
-/** How long the view may stay empty before the app's sockets are rebuilt. */
-export const STUCK_VIEW_RECONNECT_AFTER_MS = 15_000
+/** Multiplier between rebuild attempts: 2 s, 6 s, 14 s into the stall. */
+export const STUCK_VIEW_RECONNECT_BACKOFF = 2
+
+/** Rebuilds allowed before only the reload is left. */
+export const STUCK_VIEW_MAX_RECONNECTS = 3
 
 /** How long a rebuilt carrier gets before the page is reloaded. */
 export const STUCK_VIEW_RELOAD_AFTER_MS = 30_000
 
 /** How often the hint is looked for. */
-export const STUCK_VIEW_POLL_MS = 1_000
+export const STUCK_VIEW_POLL_MS = 500
 
 /** Reloads allowed inside the window, across page loads. */
 export const STUCK_VIEW_RELOAD_LIMIT = 1
@@ -108,6 +121,10 @@ export interface StuckViewRecord {
   online: boolean
   /** True when an open `session/follow` is still missing its opening frame. */
   stalled: boolean
+  /** Rebuild number within this stall, on `reconnect`. */
+  attempt?: number
+  /** Sockets the rebuild closed, on `reconnect`. */
+  closed?: number
   sockets: SocketWatchStats | null
   pageFetch: PageFetchStats | null
 }
@@ -127,8 +144,10 @@ export interface StuckViewHost {
   reconnect?: (reason: string) => number
   turns?: () => number
   online?: () => boolean
+  stalled?: () => boolean
   delayMs?: number
-  reconnectAfterMs?: number
+  reconnectBackoff?: number
+  maxReconnects?: number
   reloadAfterMs?: number
   pollMs?: number
   reloadLimit?: number
@@ -179,7 +198,8 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
   if (doc === undefined) return () => undefined
   const now = host.now ?? ((): number => Date.now())
   const delayMs = host.delayMs ?? STUCK_VIEW_DELAY_MS
-  const reconnectAfterMs = host.reconnectAfterMs ?? STUCK_VIEW_RECONNECT_AFTER_MS
+  const reconnectBackoff = host.reconnectBackoff ?? STUCK_VIEW_RECONNECT_BACKOFF
+  const maxReconnects = host.maxReconnects ?? STUCK_VIEW_MAX_RECONNECTS
   const reloadAfterMs = host.reloadAfterMs ?? STUCK_VIEW_RELOAD_AFTER_MS
   const pollMs = host.pollMs ?? STUCK_VIEW_POLL_MS
   const reloadLimit = host.reloadLimit ?? STUCK_VIEW_RELOAD_LIMIT
@@ -198,14 +218,21 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
   const unschedule = host.clearInterval
     ?? ((handle: number): void => globalThis.clearInterval(handle as unknown as ReturnType<typeof globalThis.setInterval>))
   const online = host.online ?? ((): boolean => typeof navigator === 'undefined' || navigator.onLine !== false)
+  const stalled = host.stalled ?? ((): boolean => openingWindowMissing(sockets()))
   const send = host.send ?? defaultSend
 
   let stuckSince: number | null = null
   let reported = false
-  let reconnectAt: number | null = null
+  let reconnects = 0
+  let nextReconnectAt = 0
   let gaveUp = false
 
-  const report = (phase: StuckViewPhase, stuckMs: number, hint: string | null): void => {
+  const report = (
+    phase: StuckViewPhase,
+    stuckMs: number,
+    hint: string | null,
+    extra: { attempt?: number; closed?: number } = {},
+  ): void => {
     const record: StuckViewRecord = {
       kind: 'stuck-view',
       at: new Date(now()).toISOString(),
@@ -215,10 +242,12 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
       turns: turns(),
       hidden: doc.visibilityState === 'hidden',
       online: online(),
-      stalled: openingWindowMissing(sockets()),
+      stalled: stalled(),
       sockets: sockets() ?? null,
       pageFetch: pageStats() ?? null,
     }
+    if (extra.attempt !== undefined) record.attempt = extra.attempt
+    if (extra.closed !== undefined) record.closed = extra.closed
     send(endpoint, JSON.stringify(record))
   }
 
@@ -260,7 +289,8 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
   const reset = (): void => {
     stuckSince = null
     reported = false
-    reconnectAt = null
+    reconnects = 0
+    nextReconnectAt = 0
     gaveUp = false
   }
 
@@ -280,26 +310,29 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
     }
     if (stuckSince === null) {
       stuckSince = now()
+      nextReconnectAt = delayMs
       return
     }
     const stuckMs = now() - stuckSince
-    if (stuckMs < delayMs) return
+    if (reconnects === 0 && stuckMs < delayMs) return
     if (!reported) {
       reported = true
       report('detected', stuckMs, hint)
     }
     // Without a network there is nothing to rebuild and no page to reload.
     if (!online()) return
-    if (reconnectAt === null) {
-      if (stuckMs < reconnectAfterMs) return
-      reconnectAt = now()
+    if (reconnects < maxReconnects && stuckMs >= nextReconnectAt) {
+      reconnects += 1
+      // 2 s, then 6 s, then 14 s into the stall: each rebuild gets a fair
+      // chance to publish the window before the next one is tried.
+      nextReconnectAt = stuckMs + delayMs * reconnectBackoff ** reconnects
       const closed = reconnect('stuck-view')
-      report('reconnect', stuckMs, hint)
+      report('reconnect', stuckMs, hint, { attempt: reconnects, closed })
       // Nothing to rebuild: the reload is the only lever left.
       if (closed === 0) escalate(stuckMs, hint)
       return
     }
-    if (now() - reconnectAt >= reloadAfterMs) escalate(stuckMs, hint)
+    if (reconnects >= maxReconnects && stuckMs >= reloadAfterMs) escalate(stuckMs, hint)
   }
 
   const handle = schedule(tick, pollMs)

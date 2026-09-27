@@ -2,6 +2,10 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.6.4
+
+- **A stalled conversation view is rebuilt two seconds in, not fifteen.** Device rows from the 0.6.3 build show the app leaving 「载入历史…」 on screen for 5-20 s while the HTTP history page behind it had answered in milliseconds, and that closing the app's mux socket brings the conversation back about a second later — the watchdog was simply waiting 15 s before doing it. The watch now acts at 2 s (the host's own placeholder element plus an empty conversation) and retries the rebuild on a 2x backoff — 2 s, 6 s, 14 s — after which the page reload stays the last resort at 30 s, once per ten minutes. With only the `session/follow` opening frame withheld on the live app the deployed build reports `detected` and `reconnect` at 2.5 s, a second rebuild at 6.5 s and a third at 14.5 s, where the previous build's first close only came with the 45 s reload. Fewer reloads also means less of the shell flash the phone shows while reloading.
+
 ## 0.6.3
 
 - **The stuck-view watchdog no longer mistakes a healthy conversation for a stalled one.** 0.6.2's first version searched the whole document for a leaf whose text merely *contained* 「载入历史」, so the moment a message talked about the placeholder — including the release note that announced the fix — the conversation was reported as stuck: on the device the watch closed sockets and reloaded the page at 28 and 46 rendered turns, spent the reload budget, and left the next real stall (`detected` at 0 turns) with its ladder already given up. The detector is now the host's real placeholder element — the `hint` class of the conversation CSS module, which `ChatView` renders only while `openState === 'loading'` — and every action additionally requires an empty conversation (zero `[data-chat-turn]`), so a view that is showing content is never reported, rebuilt or reloaded.

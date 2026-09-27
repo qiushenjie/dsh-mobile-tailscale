@@ -121,10 +121,12 @@ function stalledSockets(overrides: Partial<SocketWatchStats> = {}): SocketWatchS
 function harness(options: {
   document?: StuckViewDocument
   delayMs?: number
-  reconnectAfterMs?: number
+  reconnectBackoff?: number
+  maxReconnects?: number
   reloadAfterMs?: number
   reconnect?: () => number
   sockets?: () => SocketWatchStats | undefined
+  stalled?: () => boolean
   storage?: StuckViewStorage
   turns?: number | (() => number)
   online?: boolean
@@ -147,9 +149,11 @@ function harness(options: {
     turns: () => (typeof options.turns === 'function' ? options.turns() : options.turns ?? 0),
     storage: options.storage ?? memoryStorage(),
     location: { reload: () => { reloads += 1 } },
-    delayMs: options.delayMs ?? 5_000,
-    reconnectAfterMs: options.reconnectAfterMs ?? 15_000,
-    reloadAfterMs: options.reloadAfterMs ?? 15_000,
+    delayMs: options.delayMs ?? 2_000,
+    reconnectBackoff: options.reconnectBackoff ?? 2,
+    maxReconnects: options.maxReconnects ?? 3,
+    reloadAfterMs: options.reloadAfterMs ?? 30_000,
+    ...(options.stalled === undefined ? {} : { stalled: options.stalled }),
     online: () => options.online ?? true,
   })
   const phases = (): string[] => records.map(record => record.phase)
@@ -198,25 +202,25 @@ describe('isPlaceholderText', () => {
 describe('installStuckViewWatch', () => {
   it('polls on the configured interval and stops on dispose', () => {
     const test = harness({})
-    expect(test.timers.interval).toBe(1_000)
+    expect(test.timers.interval).toBe(500)
     test.started()
     expect(test.timers.cleared).toEqual([7])
   })
 
-  it('waits for the placeholder to persist, then reports a detection', () => {
+  it('waits for the placeholder to persist, then reports and rebuilds at once', () => {
     const test = harness({})
     test.timers.tick()
     expect(test.records).toEqual([])
-    test.time.advance(4_999)
+    test.time.advance(1_999)
     test.timers.tick()
     expect(test.records).toEqual([])
     test.time.advance(1)
     test.timers.tick()
-    expect(test.phases()).toEqual(['detected'])
+    expect(test.phases()).toEqual(['detected', 'reconnect'])
     expect(test.records[0]).toMatchObject({
       kind: 'stuck-view',
       phase: 'detected',
-      stuckMs: 5_000,
+      stuckMs: 2_000,
       hint: '载入历史…',
       turns: 0,
       hidden: false,
@@ -225,43 +229,52 @@ describe('installStuckViewWatch', () => {
       sockets: { installed: true, open: 1, records: [{ followOpens: 1, followSnapshots: 0 }] },
       pageFetch: null,
     })
+    expect(test.records[1]).toMatchObject({ phase: 'reconnect', attempt: 1, closed: 1, stuckMs: 2_000 })
     expect(Number.isNaN(Date.parse(test.records[0]?.at ?? ''))).toBe(false)
-  })
-
-  it('rebuilds the sockets only after the view has been empty for fifteen seconds', () => {
-    const test = harness({})
-    test.timers.tick()
-    test.time.advance(5_000)
-    test.timers.tick()
-    expect(test.phases()).toEqual(['detected'])
-    test.time.advance(9_999)
-    test.timers.tick()
-    expect(test.phases()).toEqual(['detected'])
-    test.time.advance(1)
-    test.timers.tick()
-    expect(test.phases()).toEqual(['detected', 'reconnect'])
     expect(test.reloads()).toBe(0)
   })
 
-  it('reloads fifteen seconds after the rebuild, not before', () => {
+  it('backs off between rebuilds: two seconds, then six, then fourteen', () => {
     const test = harness({})
     test.timers.tick()
-    test.time.advance(15_000)
+    test.time.advance(2_000)
     test.timers.tick()
-    expect(test.phases()).toEqual(['detected', 'reconnect'])
-    test.time.advance(14_999)
+    expect(test.records.map(record => [record.phase, record.stuckMs])).toEqual([['detected', 2_000], ['reconnect', 2_000]])
+    test.time.advance(3_999)
     test.timers.tick()
-    expect(test.reloads()).toBe(0)
+    expect(test.records.filter(record => record.phase === 'reconnect')).toHaveLength(1)
     test.time.advance(1)
     test.timers.tick()
-    expect(test.phases()).toEqual(['detected', 'reconnect', 'reload'])
+    expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', attempt: 2, stuckMs: 6_000 })
+    test.time.advance(7_999)
+    test.timers.tick()
+    expect(test.records.filter(record => record.phase === 'reconnect')).toHaveLength(2)
+    test.time.advance(1)
+    test.timers.tick()
+    expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', attempt: 3, stuckMs: 14_000 })
+    expect(test.reloads()).toBe(0)
+  })
+
+  it('stops rebuilding and reloads thirty seconds into the stall', () => {
+    const test = harness({})
+    test.timers.tick()
+    test.time.advance(2_000)
+    test.timers.tick()
+    test.time.advance(4_000)
+    test.timers.tick()
+    test.time.advance(8_000)
+    test.timers.tick()
+    expect(test.reloads()).toBe(0)
+    test.time.advance(16_000)
+    test.timers.tick()
+    expect(test.phases()).toEqual(['detected', 'reconnect', 'reconnect', 'reconnect', 'reload'])
     expect(test.reloads()).toBe(1)
   })
 
   it('reloads at once when there is no socket to rebuild', () => {
     const test = harness({ reconnect: () => 0 })
     test.timers.tick()
-    test.time.advance(15_000)
+    test.time.advance(2_000)
     test.timers.tick()
     expect(test.phases()).toEqual(['detected', 'reconnect', 'reload'])
     expect(test.reloads()).toBe(1)
@@ -376,6 +389,24 @@ describe('installStuckViewWatch', () => {
     test.time.advance(15_000)
     test.timers.tick()
     expect(test.reloads()).toBe(1)
+  })
+
+  it('leaves a merely slow open alone', () => {
+    const nodes: StuckViewElement[] = [hintNode()]
+    const document: StuckViewDocument = {
+      visibilityState: 'visible',
+      querySelectorAll: (selector: string): ArrayLike<StuckViewElement> => selector.includes('data-chat-turn') ? [] : nodes,
+    }
+    const test = harness({ document })
+    test.timers.tick()
+    test.time.advance(1_500)
+    test.timers.tick()
+    // The window arrives before the two second mark: nothing was rebuilt.
+    nodes.splice(0, nodes.length)
+    test.time.advance(500)
+    test.timers.tick()
+    expect(test.records).toEqual([])
+    expect(test.reloads()).toBe(0)
   })
 
   it('does nothing without a document', () => {
