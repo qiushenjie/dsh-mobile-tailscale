@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BACKDROP_SETTLE_MS, NATIVE_MOBILE_STYLES, drawerBackgroundColor, findDetailsSheetHost, findRightPanelHost, isComposerEditorFocus, isMenuSearchFocus, nextSyncDelay, preservesMenuFocus, rightColumnOpen, rightPanelOpen, selectsSidebarRow, shouldAutoLoadEarlier } from '../src/native-mobile.js'
+import { BACKDROP_SETTLE_MS, HISTORY_FILL_INTERVAL_MS, HISTORY_FILL_MAX_PAGES, HISTORY_FILL_MAX_STALLS, NATIVE_MOBILE_STYLES, drawerBackgroundColor, findDetailsSheetHost, findRightPanelHost, isComposerEditorFocus, isMenuSearchFocus, nextSyncDelay, preservesMenuFocus, rightColumnOpen, rightPanelOpen, selectsSidebarRow, shouldAutoLoadEarlier, shouldFillEarlierHistory } from '../src/native-mobile.js'
 
 /** Minimal stand-in for an element whose `closest` resolves to a fixed match. */
 function fakeElement(closest: Element | null): Element {
@@ -142,6 +142,8 @@ describe('native mobile presentation', () => {
     expect(NATIVE_MOBILE_STYLES).toContain('[data-dsh-mobile-composer-model-label] { flex:1 1 auto !important; max-width:none !important')
     expect(NATIVE_MOBILE_STYLES).toContain('[data-dsh-mobile-history-loader] button:not(:disabled)')
     expect(NATIVE_MOBILE_STYLES).toContain('[data-dsh-mobile-history-loader] button:disabled')
+    expect(NATIVE_MOBILE_STYLES).toContain('pointer-events:auto !important')
+    expect(NATIVE_MOBILE_STYLES).not.toContain('clip-path:inset(50%)')
     expect(NATIVE_MOBILE_STYLES).toContain('[class*="_rowHead"]:has(> [class*="_rowIdentity"]) { flex-wrap:nowrap !important')
     expect(NATIVE_MOBILE_STYLES).toContain('[class*="_rowActions"] { flex:0 0 auto !important; flex-wrap:nowrap !important')
     expect(NATIVE_MOBILE_STYLES).toContain('[class*="_rowActions"] button { flex:none !important; width:auto !important; min-width:44px !important')
@@ -154,6 +156,22 @@ describe('native mobile presentation', () => {
     expect(shouldAutoLoadEarlier(64, 64)).toBe(false)
     expect(shouldAutoLoadEarlier(40, 48)).toBe(false)
     expect(shouldAutoLoadEarlier(180, 80)).toBe(false)
+  })
+
+  it('fills earlier history while a compact transcript cannot scroll at all', () => {
+    // A transcript that fits the viewport is the case the scroll trigger can
+    // never reach, so the fill is the only way back into older turns.
+    expect(shouldFillEarlierHistory(false, true, true, HISTORY_FILL_INTERVAL_MS, 0, 0)).toBe(true)
+    // Once the loaded pages make it scrollable the fill hands over to the scroll.
+    expect(shouldFillEarlierHistory(true, true, true, HISTORY_FILL_INTERVAL_MS, 0, 0)).toBe(false)
+    // Never while the user is reading further down, without a button, or too soon.
+    expect(shouldFillEarlierHistory(false, false, true, HISTORY_FILL_INTERVAL_MS, 0, 0)).toBe(false)
+    expect(shouldFillEarlierHistory(false, true, false, HISTORY_FILL_INTERVAL_MS, 0, 0)).toBe(false)
+    expect(shouldFillEarlierHistory(false, true, true, HISTORY_FILL_INTERVAL_MS - 1, 0, 0)).toBe(false)
+    // An app that stops growing the transcript is not hammered for ever.
+    expect(shouldFillEarlierHistory(false, true, true, HISTORY_FILL_INTERVAL_MS, HISTORY_FILL_MAX_STALLS, 0)).toBe(false)
+    // Nor is a transcript that keeps growing but never becomes scrollable.
+    expect(shouldFillEarlierHistory(false, true, true, HISTORY_FILL_INTERVAL_MS, 0, HISTORY_FILL_MAX_PAGES)).toBe(false)
   })
 
   it('treats a row control as a control, not as selecting the row', () => {

@@ -8,7 +8,7 @@ export const NATIVE_MOBILE_STYLES = `
    (which exceed 720px wide) are covered too. */
 html.dsh-native-mobile-active { -webkit-text-size-adjust:100%; text-size-adjust:100%; }
 @media (max-width:720px) {
-  html.dsh-native-mobile-active,html.dsh-native-mobile-active body { width:100%; height:100%; overflow:hidden; }
+  html.dsh-native-mobile-active,html.dsh-native-mobile-active body { width:100%; height:100%; max-width:100%; overflow:hidden; overscroll-behavior-x:none; }
   html.dsh-native-mobile-active { --dsh-mobile-motion-duration:200ms; --dsh-mobile-motion-ease:cubic-bezier(.22,1,.36,1); }
   html.dsh-native-mobile-active :is(a,button,[role="button"],[role="tab"],[tabindex]) { -webkit-tap-highlight-color:transparent; }
   html.dsh-native-mobile-active [data-dsh-mobile-sidebar] [role="treeitem"] { -webkit-tap-highlight-color:transparent; touch-action:manipulation; }
@@ -25,7 +25,7 @@ html.dsh-native-mobile-active { -webkit-text-size-adjust:100%; text-size-adjust:
   html.dsh-native-mobile-active [data-dsh-mobile-sidebar] [class*="_sessionRow"] [class*="_time"] { display:none !important; }
   html.dsh-native-mobile-active [data-dsh-mobile-sidebar] [class*="_rowActions"] button { box-sizing:border-box !important; width:32px !important; min-width:32px !important; height:32px !important; min-height:32px !important; }
   [data-dsh-mobile-frame] { grid-template-columns:0 minmax(0,1fr) 0 !important; width:100% !important; height:100dvh !important; overflow:hidden !important; }
-  [data-dsh-mobile-center] { grid-column:2 !important; width:100vw !important; min-width:0 !important; }
+  [data-dsh-mobile-center] { grid-column:2 !important; width:100% !important; max-width:100% !important; min-width:0 !important; }
   [data-dsh-mobile-center] > * { min-width:0 !important; }
   [data-dsh-mobile-header] { box-sizing:border-box !important; width:calc(100% - 16px) !important; margin:0 8px !important; min-width:0; padding-top:max(4px,env(safe-area-inset-top)) !important; padding-right:8px !important; padding-left:42px !important; }
   [data-dsh-mobile-header] [class*="_titleRow"] { box-sizing:border-box !important; display:flex !important; align-items:center !important; min-width:0; min-height:32px !important; height:32px !important; gap:6px !important; padding:0 6px !important; }
@@ -93,8 +93,13 @@ html.dsh-native-mobile-active { -webkit-text-size-adjust:100%; text-size-adjust:
   [data-dsh-mobile-center] pre { max-width:100%; overflow-x:auto; }
   [data-dsh-mobile-center] :is(img,video,canvas,svg) { max-width:100%; }
   [data-dsh-mobile-message-scroll] { box-sizing:border-box !important; width:100% !important; padding:8px 10px 20px !important; }
-  [data-dsh-mobile-history-loader] { position:relative !important; min-height:1px !important; }
-  [data-dsh-mobile-history-loader] button:not(:disabled) { position:absolute !important; width:1px !important; height:1px !important; margin:-1px !important; padding:0 !important; clip-path:inset(50%) !important; opacity:0 !important; overflow:hidden !important; pointer-events:none !important; }
+  /* The transcript scrolls one way only: an overflowing composer row used to
+     leave the conversation column with a few pixels of sideways travel, which
+     iOS turns into a full-page rubber-band. Tables and code blocks keep the
+     inner scrollers granted above. */
+  [data-conversation-scroll] { overflow-x:hidden !important; overscroll-behavior-x:none !important; }
+  [data-dsh-mobile-history-loader] { position:relative !important; min-height:0 !important; padding:2px 0 4px !important; }
+  [data-dsh-mobile-history-loader] button:not(:disabled) { position:static !important; display:block !important; box-sizing:border-box !important; width:auto !important; height:auto !important; min-height:32px !important; margin:0 auto !important; padding:2px 14px !important; font-size:12px !important; line-height:18px !important; clip-path:none !important; opacity:1 !important; pointer-events:auto !important; }
   [data-dsh-mobile-history-loader] button:disabled { min-height:28px !important; padding:4px 12px !important; }
   [data-dsh-mobile-message-column] { box-sizing:border-box !important; width:100% !important; max-width:none !important; margin:0 !important; padding:0 !important; gap:10px !important; }
   [data-dsh-mobile-message-column] > * { width:100% !important; max-width:100% !important; }
@@ -111,6 +116,13 @@ html.dsh-native-mobile-active { -webkit-text-size-adjust:100%; text-size-adjust:
   [data-dsh-mobile-center] [data-composer-card] ~ * [class*="_root"] { box-sizing:border-box !important; width:100% !important; max-width:100% !important; margin-bottom:-6px !important; padding:3px 4px 0 !important; font-size:11px !important; line-height:18px !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; }
   [data-dsh-mobile-center] [data-composer-card] ~ [class*="_root"] [class*="_sep"],
   [data-dsh-mobile-center] [data-composer-card] ~ * [class*="_root"] [class*="_sep"] { margin:0 6px !important; }
+  /* The status dock under the composer (turn/token pills + the cost readout +
+     the context ring) is a nowrap flex row, and the pills are wider than the
+     phone on their own: the readout was squeezed into its own ellipsis, so the
+     footer only ever showed a bare "本会话 …" fragment. Let the dock wrap and
+     hand the readout a full row of its own. */
+  [data-dsh-mobile-center] [data-composer-card] ~ [class*="_dock"] { box-sizing:border-box !important; display:flex !important; flex-wrap:wrap !important; align-items:center !important; row-gap:2px !important; height:auto !important; max-width:100% !important; }
+  [data-dsh-mobile-center] [data-composer-card] ~ [class*="_dock"] :is([class*="cm-root"],[class*="cm-footer-stack"]) { box-sizing:border-box !important; flex:1 1 100% !important; width:100% !important; min-width:0 !important; max-width:100% !important; font-size:11px !important; line-height:18px !important; white-space:normal !important; overflow:visible !important; text-overflow:clip !important; }
   /* Message runtime details are inline on desktop. Give the clock/runtime
      label its own wrapping row on narrow screens so TTFT and throughput do
      not push the action buttons or clip at the viewport edge. */
@@ -218,7 +230,13 @@ html.dsh-native-mobile-active [data-dsh-mobile-header] [class*="_sessionLogButto
        sync() and the alias token is the theme's real surface. */
     background:var(--dsh-mobile-drawer-bg,var(--dsw-alias-bg-base,var(--dsw-bg,#fff))) !important;
     box-shadow:-18px 0 46px rgb(15 23 42 / 18%) !important;
-    overflow:auto !important;
+    /* The app lays its docked panes out as a strip inside this box (measured:
+       730px of content in a 340px drawer), so a plain overflow:auto turned the
+       drawer into a sideways scroller that slid the empty tab host into view.
+       Only the vertical axis scrolls; wide content keeps its own scrollers. */
+    overflow-y:auto !important;
+    overflow-x:hidden !important;
+    overscroll-behavior-x:none !important;
   }
   /* The open state is published as an attribute by the DOM pass rather than
      inferred from a class token: the older workbench hid itself with
@@ -423,6 +441,53 @@ export function rightPanelOpen(panel: HTMLElement): boolean {
 /** Whether a user-driven scroll moved upward into the automatic history-loading zone. */
 export function shouldAutoLoadEarlier(previousTop: number, currentTop: number): boolean {
   return currentTop <= AUTO_HISTORY_THRESHOLD_PX && currentTop < previousTop - 0.5
+}
+
+/**
+ * How long the automatic history fill waits between two attempts.
+ *
+ * The fill exists because the phone's compact flow collapses thinking and tool
+ * rows to a few pixels each: a freshly loaded transcript can be SHORTER than the
+ * viewport. There is then no scroll range to react to and
+ * {@link shouldAutoLoadEarlier} can never fire, which left the newest turns on
+ * screen with no way back into the older ones.
+ */
+export const HISTORY_FILL_INTERVAL_MS = 1500
+
+/** Consecutive fill attempts that grew nothing before the fill gives up. */
+export const HISTORY_FILL_MAX_STALLS = 2
+
+/**
+ * Pages one uninterrupted fill may pull before it gives up.
+ *
+ * The stall counter compares the transcript height between two attempts, and
+ * the app grows the transcript from above, so its own scroll compensation fires
+ * a scroll event that restarts the counter. The page budget is the hard stop
+ * that keeps a transcript which stays too short to scroll from being filled for
+ * ever; a fresh user gesture resets it.
+ */
+export const HISTORY_FILL_MAX_PAGES = 12
+
+/**
+ * Whether the automatic history fill should pull one more page.
+ *
+ * Only a transcript that cannot meaningfully scroll is filled. Once the loaded
+ * pages have made it scrollable the user's own upward scroll drives
+ * {@link shouldAutoLoadEarlier}, so the fill stops rather than draining the
+ * whole session into the phone.
+ * @param hasScrollRange - Whether the transcript scrolls by more than {@link AUTO_HISTORY_THRESHOLD_PX}.
+ * @param atTop - Whether the transcript sits at (or within the threshold of) its top.
+ * @param buttonAvailable - Whether the app's enabled `load earlier` button is present.
+ * @param sinceLastAttemptMs - Time elapsed since the previous fill attempt.
+ * @param stalls - Consecutive attempts that did not grow the transcript.
+ * @param attempts - Pages this fill already pulled since the last user gesture.
+ * @returns Whether another page should be requested.
+ */
+export function shouldFillEarlierHistory(hasScrollRange: boolean, atTop: boolean, buttonAvailable: boolean, sinceLastAttemptMs: number, stalls: number, attempts: number): boolean {
+  if (hasScrollRange || !atTop || !buttonAvailable) return false
+  if (attempts >= HISTORY_FILL_MAX_PAGES) return false
+  if (sinceLastAttemptMs < HISTORY_FILL_INTERVAL_MS) return false
+  return stalls < HISTORY_FILL_MAX_STALLS
 }
 
 /**
@@ -748,6 +813,10 @@ export function installNativeMobileSurface(): () => void {
   let transitionTarget: HTMLElement | undefined
   let historyScroller: HTMLElement | undefined
   let historyPreviousTop = 0
+  let historyFillAt = 0
+  let historyFillHeight = -1
+  let historyFillStalls = 0
+  let historyFillPages = 0
   const historyLoadButton = (): HTMLButtonElement | undefined => {
     const loader = historyScroller === undefined ? undefined : firstByClassSuffix(historyScroller, '_older')
     return loader?.querySelector<HTMLButtonElement>('button') ?? undefined
@@ -757,9 +826,35 @@ export function installNativeMobileSurface(): () => void {
     const currentTop = Math.max(0, historyScroller.scrollTop)
     const shouldLoad = shouldAutoLoadEarlier(historyPreviousTop, currentTop)
     historyPreviousTop = currentTop
+    // A fresh gesture deserves fresh fill attempts: the transcript may have
+    // become scrollable while the fill had already given up.
+    historyFillStalls = 0
+    historyFillPages = 0
     if (!shouldLoad) return
     const button = historyLoadButton()
     if (button === undefined || button.disabled || button.getAttribute('aria-disabled') === 'true') return
+    button.click()
+  }
+  /**
+   * Pull one page of older history while the transcript is too short to scroll.
+   *
+   * See {@link shouldFillEarlierHistory} for why this exists next to the scroll
+   * trigger: a compact flow can fit inside the viewport, and the app's own
+   * button cannot be reached by scrolling in that case.
+   */
+  const fillEarlierHistory = (): void => {
+    if (historyScroller === undefined) return
+    const button = historyLoadButton()
+    if (button === undefined) return
+    const range = historyScroller.scrollHeight - historyScroller.clientHeight
+    const atTop = Math.max(0, historyScroller.scrollTop) <= AUTO_HISTORY_THRESHOLD_PX
+    const available = !button.disabled && button.getAttribute('aria-disabled') !== 'true'
+    if (!shouldFillEarlierHistory(range > AUTO_HISTORY_THRESHOLD_PX, atTop, available, Date.now() - historyFillAt, historyFillStalls, historyFillPages)) return
+    const height = historyScroller.scrollHeight
+    historyFillStalls = historyFillHeight === height ? historyFillStalls + 1 : 0
+    historyFillHeight = height
+    historyFillAt = Date.now()
+    historyFillPages += 1
     button.click()
   }
   const bindHistoryScroller = (next: HTMLElement | undefined): void => {
@@ -871,19 +966,11 @@ export function installNativeMobileSurface(): () => void {
       if (historyLoader !== undefined) {
         historyLoader.dataset.dshMobileHistoryLoader = 'true'
         historyLoader.setAttribute('aria-live', 'polite')
-        const button = historyLoader.querySelector<HTMLButtonElement>('button')
-        if (button !== null) {
-          button.tabIndex = -1
-          // Only written when it changes: `aria-hidden` is one of the observed
-          // attributes, so re-writing the same value would schedule this pass
-          // again for ever.
-          const wanted = button.disabled ? null : 'true'
-          if (button.getAttribute('aria-hidden') !== wanted) {
-            if (wanted === null) button.removeAttribute('aria-hidden')
-            else button.setAttribute('aria-hidden', wanted)
-          }
-        }
+        // The button stays a real, tappable control: it is the only way into the
+        // older turns when the compact transcript fits the viewport, and a
+        // hidden (1px, pointer-events:none) button left nothing to tap.
       }
+      fillEarlierHistory()
       const messageColumn = conversation === null ? undefined : firstByClassSuffix(conversation, '_column')
       const messageScroll = messageColumn?.parentElement
       if (messageColumn !== undefined && messageScroll !== null && messageScroll !== undefined && classToken(messageScroll, '_scroll')) {
