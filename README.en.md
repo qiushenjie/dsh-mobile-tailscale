@@ -1,275 +1,155 @@
 <p align="center">
-  <img src="assets/brand/repository-hero.png" alt="Use DeepSeek Harness from a phone" width="100%">
+  <img src="assets/brand/repository-hero.png" alt="Use DeepSeek Harness from your computer on a phone" width="100%">
 </p>
 
 <h1 align="center">dsh-mobile-tailscale</h1>
 
-<p align="center">Secure, live access to DeepSeek Harness from a phone.</p>
+<p align="center">Use the DeepSeek Harness on your computer, securely, from your phone's browser.</p>
 
 <p align="center">
   <a href="https://github.com/qiushenjie/dsh-mobile-tailscale"><img src="https://img.shields.io/badge/github-qiushenjie%2Fdsh--mobile--tailscale-181717?logo=github" alt="GitHub"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-0F172A" alt="Apache-2.0"></a>
 </p>
 
-<p align="center"><a href="README.md">简体中文</a> · <a href="CHANGELOG.md">Changelog</a></p>
-
-> dsh-mobile-tailscale is a fork of [dsh-mobile](https://github.com/saya-ch/dsh-mobile), a DeepSeek Harness community plugin; the native app supports Android only.
->
-> **Difference from upstream**: the remote path no longer uses Tailscale Funnel, cpolar, or QR pairing. It uses **Tailscale Serve** instead — once the computer and phone sign in to the same tailnet, the phone browser opens the computer's MagicDNS name directly. No pairing, no manual certificate trust, no public exposure.
->
-> LAN access is unchanged: QR / pairing-link / key pairing, device management, and auto-discovery all work as upstream.
-
-dsh-mobile-tailscale is a DeepSeek Harness plugin that lets a mobile browser or the Android app connect over a protected LAN or a Tailscale Serve remote path. Local and remote access keep the same sessions, Workspaces, messages, and tools while using separate switches without modifying DeepSeek Harness source.
-
-LAN mobile access runs on its own HTTPS origin with pinned certificates; only paired devices pass validation. Tailscale Serve remote access is visible only to devices on the same tailnet and has no pairing step.
-
-It also lets you customize the phone from a DSH conversation: `/mobile <what you want>`.
-
-## What it does
-
-- **Continue DSH work from a phone**: the same sessions, Workspaces, messages, and tools, in real time.
-- **Customize the phone UI by talking to DSH**: change the mobile layout, interactions, and features from a conversation; open pages refresh within seconds.
-- **A dedicated touch layout**: session drawer, tool details, settings, question cards, and composer reorganized for phones.
-- **LAN auto-discovery, no re-pairing**: Wi-Fi, hotspot, or IP changes normally recover automatically.
-- **Direct Tailscale Serve remote**: any device on the same tailnet opens `https://<machine>.<tailnet>.ts.net` with no pairing or certificates.
-- **One-click connection diagnostics**: check versions, gateway, network interface, firewall, and the remote path, then copy a report without credentials or full addresses.
-- **Faster connection recovery**: remote reopen restores trust in parallel, reuses revisioned assets, and compresses mobile boot batches.
-- **Three LAN pairing methods**: QR code, pairing link, and key.
-
-Paired LAN devices are considered fully trusted and can operate DSH on the computer; use this only on trusted home, office, or VPN networks. For Tailscale remote access, the trust boundary is the tailnet itself.
-
-## Quick start
-
-> **Before you start**
->
-> - The plugin's **package name** is `dsh-mobile-tailscale`; the **executable it ships** is `dsh-mobile` (all subcommands such as `setup` run through it, e.g. `dsh plugin --profile web exec dsh-mobile setup`).
-> - Installing via `dsh-mobile-tailscale@latest` requires the package to be published on npm (`npm view dsh-mobile-tailscale` shows a version). If it is not published yet (local fork / development), use "Option 3: Install from source" below.
-
-### Option 1: `dsh` command installed
-
-**Windows (PowerShell)** — the DSH Desktop installer puts `dsh` on PATH:
-
-```powershell
-dsh plugin --profile web add dsh-mobile-tailscale@latest
-dsh plugin --profile web exec dsh-mobile setup
-dsh --profile web
-```
-
-**macOS (Terminal)** — DSH Desktop does **not** add `dsh` to PATH by default. Either:
-
-1. Install the CLI globally, matching the version bundled with your Desktop (recommended):
-
-```bash
-npm install -g @deepseek-ai/dsh@0.1.1-rc.2
-```
-
-2. Or invoke the CLI bundled inside the Desktop app (the version in the path changes when Desktop is upgraded; verify with `--version`):
-
-```bash
-DSH_CLI="/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js"
-node "$DSH_CLI" --version
-```
-
-Then run (`dsh` and `node "$DSH_CLI"` are equivalent):
-
-```bash
-dsh plugin --profile web add dsh-mobile-tailscale@latest
-dsh plugin --profile web exec dsh-mobile setup
-dsh --profile web
-```
-
-### Option 2: DeepSeek Harness source checkout
-
-> Run these commands in the **DeepSeek Harness source repository root**, not in this plugin's directory — `dsh` is a workspace executable of the DSH monorepo, and only there does `pnpm dsh` resolve.
-
-```bash
-corepack enable; pnpm install
-pnpm dsh plugin --profile web add dsh-mobile-tailscale@latest
-pnpm dsh plugin --profile web exec dsh-mobile setup
-pnpm dsh --profile web
-```
-
-The same commands work from a PowerShell prompt in the source root on Windows.
-
-### Option 3: Install from source (no npm publish needed)
-
-Use this when the plugin has not been published to npm yet (local fork / development). The full flow: **clone → install deps → build → pack → add to profile → initialize**.
-
-**Prerequisites**: Node.js 20+ (enable corepack to use pnpm).
-
-**1. Clone and install dependencies:**
-
-```bash
-git clone https://github.com/qiushenjie/dsh-mobile-tailscale.git
-cd dsh-mobile-tailscale
-corepack enable
-npm install        # or pnpm install
-```
-
-**2. Build and pack:**
-
-```bash
-npm run build
-npm pack           # produces dsh-mobile-tailscale-<version>.tgz
-```
-
-> `npm pack` validates that `package.json`'s version matches `versionName` in `apps/mobile/android/app/build.gradle.kts`; align them first if they differ. Use `pnpm pack` if npm errors with EPERM on its cache, or `npm pack --ignore-scripts` to skip the validation and pack directly.
-
-**3. Add the tarball to the web profile and initialize:**
-
-**Windows (PowerShell):**
-
-```powershell
-dsh plugin --profile web add .\dsh-mobile-tailscale-0.3.2.tgz
-dsh plugin --profile web exec dsh-mobile setup
-dsh --profile web
-```
-
-**macOS (Terminal):**
-
-```bash
-TGZ=$(ls dsh-mobile-tailscale-*.tgz | head -1)
-dsh plugin --profile web add "$PWD/$TGZ"
-dsh plugin --profile web exec dsh-mobile setup
-dsh --profile web
-```
-
-(Use the version number printed by `npm pack` in the tarball filename; if the `dsh` command is unavailable, see Option 1 for the Desktop-bundled CLI.)
-
-**Iterating during development**: after each source change, repeat steps 2–3 (`build` + `pack` + `add`) to overwrite the installed copy. If DSH Desktop is already running, fully quit and reopen it so the new plugin bundle loads.
-
-`setup` automatically selects and remembers the current LAN; Wi-Fi, hotspot, and IP changes normally recover without re-pairing. Use `--address 192.168.x.x` only when automatic selection fails. Settings, certificates, devices, and customization files live under `$DSH_HOME/mobile-access/`.
-
-After installation, start DSH and use the connection guide below to choose LAN or remote access.
-
-## Connection guide
-
-LAN and remote access are independent connections. Prefer LAN while the phone is near the computer for the lowest latency, and enable remote access only when leaving that network. Each path keeps its own switch and state.
-
-### Local network
-
-Use this when the phone and computer share Wi-Fi, Ethernet, or a phone hotspot. It is the default and simplest path.
-
 <p align="center">
-  <img src="assets/screenshots/lan-access.png" width="82%" alt="DSH Mobile LAN access, pairing QR code, and device management">
+  <a href="#install">Install</a> ·
+  <a href="#usage">Usage</a> ·
+  <a href="#what-the-phone-side-does">What the phone side does</a> ·
+  <a href="#customize">Customize</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#troubleshooting">Troubleshooting</a> ·
+  <a href="CHANGELOG.md">Changelog</a> ·
+  <a href="README.md">中文</a>
 </p>
 
-1. Connect the phone and computer to the same local network, then open **Mobile Access → Local network** in the lower-left corner of DeepSeek Harness.
-2. If needed, select **Enable local access**, then select **Create and copy key**. The panel displays a pairing QR code.
-3. In the Android app, open **Local network**, scan for computers, select the device, then scan the QR code or paste the pairing key.
-4. Pairing creates persistent device trust. Later app launches discover and connect automatically; Wi-Fi, hotspot, and DHCP address changes normally do not require pairing again.
+> dsh-mobile-tailscale is a fork of [dsh-mobile](https://github.com/saya-ch/dsh-mobile), a DeepSeek Harness community plugin. Its remote path uses **Tailscale Serve** — no Funnel, no cpolar, and no QR pairing: once the computer and the phone sign in to the same tailnet, the phone browser opens the computer's node name directly.
+>
+> Since `0.6.0`, both the **Mobile Access** panel in the lower-left corner of the desktop and this document describe that one channel only: the panel has no app download, no LAN pairing QR code, no pairing key, and no device management.
 
-The app is optional: select **Copy pairing link** and open it in a mobile browser. The browser must manually trust the plugin certificate on the first visit.
+## What this is
 
-### Remote access (Tailscale Serve)
+A DSH plugin. It hands the DSH Web client running on your computer to phones in the same tailnet over HTTPS via **Tailscale Serve**:
 
-Use this after the phone leaves the computer's network. No port forwarding, Funnel, or cpolar. Remote access is disabled by default.
-
-**Prerequisites**: install [Tailscale](https://tailscale.com/download) on both the computer and the phone, and sign in to the same tailnet.
-
-1. Open **Mobile Access → Remote** in the lower-left corner of DeepSeek Harness.
-2. Select **Enable Tailscale Serve**. The plugin runs `tailscale serve --bg --https=443 http://127.0.0.1:3080` locally and uses the computer's MagicDNS name as the remote address.
-3. Once ready, the panel shows an address like `https://<machine>.<tailnet>.ts.net`.
-4. Open that address in a mobile browser (or the Android app's remote entry). Same-tailnet access works directly, with no pairing.
-
-- Turn off the remote switch when not in use (the plugin runs `tailscale serve --https=443 off`).
-- The remote origin is tailnet-only; it is never exposed to the public internet.
-- If the address is unreachable, check that `tailscale status` shows online, that `tailscale serve status` lists the proxy, and that DSH Web listens on `127.0.0.1:3080`.
-- DSH Desktop users must set the Web port to 3080 (`dsh-desktop.port: 3080`) and enable browser access so Tailscale Serve can forward correctly.
-
-## Extend and customize
-
-Type `/mobile <what you want>` in a DSH conversation, and DSH edits the phone client's files for you; changes apply within a few seconds. For example:
-
-```text
-/mobile turn the phone UI into an old CRT terminal, with messages scrolling like terminal output
-```
-
-It can also drive computer capabilities the phone can use, like reading the machine's live state:
-
-```text
-/mobile give the phone a cyberpunk-style computer monitor panel that shows live CPU, memory, and disk usage
-```
-
-Two kinds of changes are supported: the phone UI itself (theme, layout, buttons), and computer capabilities the phone can use (browsing computer files, running programs on the computer). `/mobile` hands the request to the DSH agent, which edits files under the local DSH configuration directory (`$DSH_HOME/mobile-access/`); the phone client applies them automatically. UI changes live in `mobile.css`/`mobile.js`. Computer capabilities come from extensions under `extensions/`, whose `host.mjs` runs with the local user's privileges on the computer. DeepSeek Harness source is not modified.
-
-<sub>You can even use an extension to connect to SillyTavern running on the same computer, give it a lightweight mobile frontend, and open it from the same app.</sub>
-
-> `host.mjs` has the same privileges as a local program. Create and run only computer-side extensions that you understand and trust.
-
-The examples above, applied:
-
-<p align="center">
-  <img src="assets/screenshots/crt-terminal-2.png" width="22%" alt="Mobile UI customized into an old CRT terminal">
-  <img src="assets/screenshots/crt-terminal-1.png" width="22%" alt="Mobile UI customized into an old CRT terminal">
-  <img src="assets/screenshots/cyberpunk-monitor-2.png" width="22%" style="margin-left:10px" alt="Mobile UI customized into a cyberpunk monitor panel">
-  <img src="assets/screenshots/cyberpunk-monitor-1.png" width="22%" style="margin-left:8px" alt="Mobile UI customized into a cyberpunk monitor panel">
-</p>
-
-## App vs mobile browser
-
-| Method          | Best for                    | Notes                                                                      |
-| --------------- | --------------------------- | -------------------------------------------------------------------------- |
-| Android app     | Daily use                  | Home screen splits LAN and remote entries; LAN auto-discovers and pairs, remote opens the tailnet address |
-| Mobile browser  | Temporary or cross-platform | Open the HTTPS address shown in the Mobile Access card; LAN needs one-time certificate trust, remote opens directly |
-
-The Android app is a thin Kotlin WebView shell and does not bundle a second page; the mobile browser opens the same page. To troubleshoot compatibility, append `?frontend=stock` to the browser URL to temporarily return to the desktop page layout.
-
-## How it works
+- Open `https://<computer-node>.<tailnet>.ts.net` in the phone browser and you are in — no app to install, no QR code to scan, no login page.
+- Access control is tailnet membership itself, and the certificate is issued by Let's Encrypt, so there is no certificate warning.
+- DSH's source is not modified: on the host side it adds only one loopback passthrough proxy, and on the client side it only injects phone-side interaction and layout fixes.
 
 ```mermaid
 flowchart LR
-  Phone["Android app / mobile browser"] -->|"LAN HTTPS"| Lan["LAN gateway"]
-  Phone -->|"tailnet HTTPS"| Serve["Tailscale Serve"]
-  Lan --> Gateway["DSH Mobile Gateway Core"]
-  Serve --> DSH["Native DSH Web & Host (127.0.0.1:3080)"]
-  Gateway -->|"loopback proxy"| DSH
-  DSH -->|"same Workspaces, sessions, and event stream"| Phone
+  Phone["Phone browser"] -->|"tailnet HTTPS"| Serve["Tailscale Serve"]
+  Serve --> Proxy["Loopback passthrough proxy"]
+  Proxy --> DSH["Native DSH Web & Host (loopback)"]
+  DSH -->|"same workspace, session, and event stream"| Phone
 ```
 
-The plugin has three layers: the Host face handles LAN discovery, pairing, HTTPS, loopback proxying, Tailscale Serve control, and the extension registry; the Client face provides the standalone mobile layout and extension SDK; the Android app provides a restricted native bridge. DeepSeek Harness source and the 3080 desktop page are never modified; installation and removal go entirely through the plugin mechanism.
+## Install
+
+Requires Node `^22.19.0 || >=24.0.0`; install [Tailscale](https://tailscale.com/download) on both the phone and the computer and sign in to the same tailnet. This package is not published to npm yet (`npm view dsh-mobile-tailscale` returns 404), so install from source:
+
+```bash
+git clone https://github.com/qiushenjie/dsh-mobile-tailscale.git && cd dsh-mobile-tailscale
+npm ci && npm run build && npm pack
+dsh plugin --profile web add "$PWD/$(ls -1 dsh-mobile-tailscale-*.tgz | sort -V | tail -1)"
+dsh --profile web
+```
+
+macOS's DSH Desktop does not add `dsh` to PATH, so use the bundled CLI instead (the app name and path change as Desktop is upgraded; confirm with `--version` first):
+
+```bash
+DSH_APP="/Applications/DeepSeek Harness.app"   # older builds may be /Applications/DSH Desktop.app
+node "$DSH_APP/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js" --version
+```
+
+If that path does not exist (newer builds pack the implementation into `app.asar`), install a global CLI matching your Desktop version instead — `npm install -g @deepseek-ai/dsh@0.1.7-rc.2` — and then call `dsh` directly.
+
+- **The remote path does not need `dsh-mobile setup`**: the bundled `cordis.patch.yml` already points at the state file and the loopback listener, so you only flip the switch in the panel. (`dsh-mobile` is the CLI this plugin provides; it also has `purge` and `extension create` subcommands.)
+- **Reinstalling the same version over the top has no effect** (pnpm only reports `added 0`): first `rm -rf $DSH_HOME/profiles/<profile>/node_modules/dsh-mobile-tailscale`, then `add`.
+- **Host-side code is not hot-replaced**: after upgrading the plugin, fully quit and reopen DSH Desktop; client-side assets only need the phone page refreshed.
+
+## Usage
+
+1. In the lower-left corner of DSH, open the **Mobile Access** panel and click **Enable remote access**.
+2. Once the panel shows `https://<computer-node>.<tailnet>.ts.net`, open it in the phone browser.
+3. Click **Disable remote access** when you are done (the phone page disconnects immediately).
+
+The panel has only one view: the remote address (**Copy address**), the enable/disable switch, one status line, **Reconnect**, and **Diagnostics** (which runs a redacted self-check). The switch, reconnect, and reset accept calls from the local computer only. Health check: `https://<computer-node>.<tailnet>.ts.net/mobile-access/health` returning `{"ok":true}` means the channel is healthy.
+
+## What the phone side does
+
+The phone opens the same session and event stream as the computer; the plugin does four things on the client side:
+
+- **Reflow for touch**: the session drawer, tool details, the settings page, question cards, and the composer reflow on narrow screens; the right sidebar becomes a scrollable drawer on narrow screens instead of covering the conversation, and it scrolls normally inside.
+- **Remove touch noise**: the composer font size is ≥16px (so iOS does not auto-zoom), press feedback applies only to real button/link rows, and terminal touch gestures switch to `pan-y`.
+- **Make the phone keyboard actually type**: spaces and symbols reach the terminal instead of being dropped, and the first character is no longer repeated two or three times.
+- **Speed up the remote channel**: long-lived caching of revisioned assets (navigation no longer re-downloads the whole shell), at most 20 messages in the session's first screen, older history paged in on demand, and desktop modules the phone cannot render pruned.
+
+Details and troubleshooting steps are in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+## Customize
+
+In a DSH conversation use `/mobile <request>`, and the agent edits the files under `$DSH_HOME/mobile-access/` directly; once saved, the changes take effect on the phone within seconds: for UI and interactions edit `mobile.css` / `mobile.js`; when you need computer capabilities use `extensions/`, whose `host.mjs` runs with your local privileges.
+
+```text
+/mobile turn the phone UI into an old-style terminal, with messages scrolling line by line like terminal output
+/mobile add a cyberpunk-style monitor panel to the phone, showing live CPU, memory, and disk usage
+```
+
+To scaffold an extension by hand: `dsh plugin --profile web exec dsh-mobile extension create <id> [--name <name>]`.
+
+<p align="center">
+  <img src="assets/screenshots/crt-terminal-2.png" width="22%" alt="/mobile turned into an old-style terminal">
+  <img src="assets/screenshots/crt-terminal-1.png" width="22%" alt="/mobile turned into an old-style terminal">
+  <img src="assets/screenshots/cyberpunk-monitor-2.png" width="22%" style="margin-left:10px" alt="/mobile cyberpunk monitor panel">
+  <img src="assets/screenshots/cyberpunk-monitor-1.png" width="22%" style="margin-left:8px" alt="/mobile cyberpunk monitor panel">
+</p>
+
+> `host.mjs` has the same privileges as a local program: create and run only extensions you understand and trust.
+
+## Configuration
+
+Keys go in the `mobile-access` entry of the profile's `cordis.patch.yml` (or the plugin manager's config panel); everything except `stateFile` may be omitted.
+
+| Key | Default | Notes |
+| --- | --- | --- |
+| `stateFile` | required | The plugin's state file. The bundled `cordis.patch.yml` already sets it to `$DSH_HOME/mobile-access/devices.json`. |
+| `upstreamOrigin` | `http://127.0.0.1:3080` | Loopback upstream; the remote proxy follows `DSH_WEB_URL` first, then falls back here. |
+| `maxWebSockets` / `maxBodyBytes` / `upstreamTimeoutMs` | `64` / `160 MiB` / `30000` | The remote channel's concurrent WebSocket limit, request body limit, and upstream timeout. |
+
+`customCssFile`, `customScriptFile`, and `mobileLayoutFile` are maintained by the plugin itself and normally need no hand-editing. The runtime files all live under `$DSH_HOME/mobile-access/`: `remote/control.json` (remote switch), `remote/provider.json` (provider), `mobile.css` / `mobile.js` (customization), `extensions/` (extensions).
+
+## Troubleshooting
+
+Start with [TROUBLESHOOTING.md](TROUBLESHOOTING.md) (which includes quick triage). The three most common cases:
+
+- **The panel shows "ready" but the address will not open**: confirm both sides are online with `tailscale status`, click **Reconnect**, or check the Tailscale Serve 443 mapping as in [§4](TROUBLESHOOTING.md#4-远程通道显示-ready-但不可达).
+- **The phone cannot open the address**: confirm Tailscale is running on the phone, that it is on the same tailnet as the computer, and that you opened the address the panel shows.
+- **The phone layout looks wrong**: append `?frontend=stock` to the address to fall back to the native desktop page for a moment; while developing, `?dsh-mobile-preview` previews the phone layout in a desktop browser.
 
 ## Security
 
-- LAN listening is only for trusted home, office, or hotspot networks; do not set up port forwarding yourself.
-- The Tailscale remote origin is visible only to the same tailnet; do not enable Tailscale Funnel or expose the node publicly. Turn off the remote switch when not in use.
-- Paired LAN devices can operate DeepSeek Harness on the computer and should be treated as fully trusted; revoke the device from the computer if a phone is lost.
-- The mobile gateway listens on the LAN only while enabled; after it is off, DeepSeek Harness keeps running normally on the computer.
+- Access control rests entirely on **tailnet membership**, so join only trusted devices to the tailnet.
+- Do not enable Tailscale Funnel, and do not expose the node to the public internet; turn the remote switch off when not in use.
+- The plugin listens on loopback only by default (`listenHost: 127.0.0.1`) and on no LAN port; the remote path needs no pairing and stores no pairing key or self-signed CA; the admin endpoints accept calls from the local computer only.
 
-See [SECURITY.md](SECURITY.md) for the full notes.
+For the full threat model see [SECURITY.md](SECURITY.md).
 
 ## Compatibility
 
-| dsh-mobile-tailscale | Verified DeepSeek Harness                                                  |
-| -------------------- | -------------------------------------------------------------------------- |
-| `0.3.4`, `0.3.3`     | `0.1.0-rc.5`, `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.1-rc.2`, `0.1.2-alpha.1`, `0.1.2-rc.1` |
-| `0.3.2`              | `0.1.0-rc.5`, `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.1-rc.2`, `0.1.2-alpha.1` |
-| `0.3.1`              | `0.1.0-rc.5`, `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.1-rc.2`, `0.1.2-alpha.1` |
-
-On startup the plugin compares the installed DSH Host version against the verified set above. **An unverified version only records a `DSH_MOBILE_UNVERIFIED_DSH_VERSION` warning and activation continues — it never aborts the Host**, because one plugin's version check must not stop the whole harness from booting. The frontend dependencies the mobile layout needs are still validated strictly where they are used, and fail closed there. CI continuously tracks the DSH main branch layout contract. If you see a compatibility warning after upgrading DSH, upgrade dsh-mobile-tailscale first. See the [troubleshooting guide](TROUBLESHOOTING.md) (Chinese) for diagnosis steps.
+Verified against DSH `0.1.0-rc.5`, `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.1-rc.2`, `0.1.2-alpha.1`, `0.1.2-rc.1`, `0.1.7-rc.2`. An unlisted version only records one warning and continues starting up; a newer DSH may reject the whole plugin before loading it based on `peerDependencies`, in which case upgrade the plugin, or explicitly grant an exemption for that exact version combination.
 
 ## Uninstall
 
-```powershell
-dsh plugin --profile web remove dsh-mobile-tailscale
+```bash
+dsh plugin --profile web remove dsh-mobile-tailscale   # remove the plugin only
+dsh plugin --profile web exec dsh-mobile purge --yes   # also clean up $DSH_HOME/mobile-access/
 ```
-
-Also remove plugin data:
-
-```powershell
-dsh plugin --profile web exec dsh-mobile purge --yes
-dsh plugin --profile web remove dsh-mobile-tailscale
-```
-
-In source-checkout mode, run the same commands from the DSH source root with `pnpm dsh` instead of `dsh`; on macOS without the `dsh` command, use the Desktop-bundled CLI (see Quick start, Option 1).
 
 ## Development
 
-```powershell
-npm ci
-npm run verify
+```bash
+npm ci && npm run verify   # version check + type check + tests + build + pack dry run
 ```
 
-For Android builds, see the [app docs](apps/mobile/README.zh-CN.md).
+## Origin and license
 
-Apache-2.0, see [LICENSE](LICENSE).
+Apache-2.0, see [LICENSE](LICENSE) for details. The project is forked from [dsh-mobile](https://github.com/saya-ch/dsh-mobile); since 0.4.0 it keeps only the Tailscale Serve channel, and the host and client implementations have been rewritten. Since 0.6.0 the desktop panel and this document describe that channel only.

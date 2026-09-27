@@ -191,7 +191,6 @@ async function setup(args: readonly string[]): Promise<void> {
   console.log(`Ask DSH to customize the mobile Web UI and features in: ${customCss} and ${customScript}`)
   console.log(`Additional extensions live in: ${extensions}`)
   console.log('Start DSH with: dsh --profile web')
-  console.log('Then open the Mobile card in the lower-left corner and create a pairing key.')
 }
 
 async function createExtensionScaffold(root: string, id: string, name: string, refuseExisting = true): Promise<void> {
