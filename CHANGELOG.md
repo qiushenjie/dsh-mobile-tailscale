@@ -2,6 +2,11 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.6.1
+
+- **Documentation only: the troubleshooting guide and the install section now match the current desktop app.** `TROUBLESHOOTING.md` assumed a pre-`asar` app bundle (`/Applications/DSH Desktop.app/Contents/Resources/app/node_modules/...`) and a `$DSH_HOME/.desktop-bin` pnpm shim; neither exists in the current build (`DeepSeek Harness.app`, implementation inside `Contents/Resources/app.asar`). The guide now names the current app, marks which absolute paths and probes are older-build-only, explains that the profile closure's symlink to the old `DSH Desktop.app` path is dangling (so peer-version resolution returns `unknown` and is allowed), retargets the pnpm-mismatch section at the app's bundled runtime (`Contents/Resources/runtime/pnpm/bin/pnpm.cjs`, 11.7.0, run with `primary-runtime/dependencies/node/bin/node`), and notes which log file belongs to which app generation. `README.md` / `README.en.md` present the global CLI (`npm install -g @deepseek-ai/dsh@0.1.7-rc.2`) as the install route, keeping the bundled CLI as an older-build note.
+- **No functional change.** The shipped `lib/` is byte-identical to 0.6.0.
+
 ## 0.6.0
 
 - **The desktop "移动访问" panel is remote-only now.** The LAN card in that panel was the last desktop surface advertising the app download and the QR-code / pairing-key / pairing-link flow, while the shipped remote path is Tailscale Serve and needs no pairing at all: the panel offered two competing stories and a phone could not tell which one the computer was actually serving. The panel is back to the single view upstream 0.4.9 had — remote address (**复制地址**), enable/disable, one status line, **Reconnect**, and **Diagnostics** — so the app-download row, the LAN/remote tab switcher, the QR box, the pairing key and link buttons, and the paired-device list are gone. The remote view is visible by default, and the panel's status strings no longer fall back to LAN wording.
