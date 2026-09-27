@@ -1157,7 +1157,8 @@ export function installNativeMobileSurface(): () => void {
   // arriving, which no page request can fix. See {@link installPageFetchGuard}.
   const removePageFetchGuard = installPageFetchGuard()
   // The host keeps that placeholder up forever when the opening frame is lost,
-  // so the phone watches for it, rebuilds the carrier, and reports what it saw.
+  // so the phone watches for the placeholder element itself — only while the
+  // conversation is empty — rebuilds the carrier, and reports what it saw.
   // See {@link installStuckViewWatch}.
   const removeStuckViewWatch = installStuckViewWatch({
     sockets: socketWatchStats,

@@ -4,40 +4,51 @@
  * 「载入历史…」 is the host's own `chat.loadingHistory` hint, shown while a
  * session opens. It is meant to be momentary: the opening window is published by
  * the `session/follow` stream. Measured on the live app, when that stream's
- * snapshot frame never arrives the hint stays up forever — the app never
- * retries, shows no error, and the HTTP history page behind it looks perfectly
- * healthy. Nothing in the stack recovers by itself.
+ * snapshot frame never arrives the hint stays up and the app never retries,
+ * shows no error, and the HTTP history page behind it looks perfectly healthy.
  *
- * So the plugin watches for that hint. After a few seconds it reports what the
- * page looks like, closes the app's sockets so the connection layer rebuilds
- * the stream (the measured recovery), and — if the view is still stuck —
- * reloads the page, rate limited so a slow open cannot become a reload loop.
+ * The first version of this watch searched the whole document for any leaf whose
+ * text merely *contained* 「载入历史」. That matched the conversation itself — a
+ * message that talks about the hint — so a perfectly healthy session was
+ * reported as stuck, its sockets were closed and the page reloaded, which spent
+ * the reload budget until a real stall met a watchdog that had already given up
+ * (observed on the device: `detected` at 28 and 49 turns, then `gave-up` on the
+ * stall that mattered). The detector is now the host's placeholder element
+ * itself — the `hint` class of the conversation CSS module — and every action
+ * additionally requires an actually empty conversation, so nothing here can fire
+ * on a view that is showing content.
  *
- * The gentle path is gated on the mechanism, not on the symptom: a socket is
- * only closed when one of the app's own `session/follow` opens is still waiting
- * for its snapshot frame. A slow-but-working open keeps receiving frames, and
- * killing its carrier would interrupt it for nothing, so that case goes
- * straight to the (rate limited) reload ladder.
+ * The recovered view is then kept, and the ladder is deliberately patient: the
+ * app needs several seconds to paint a page on a phone (measured 7 s on a slow
+ * open), so the watch reports at 5 s, closes the app's sockets at 15 s only if
+ * the conversation is still empty, and reloads 30 s after that — as a single
+ * last resort per ten minutes, never while the page is hidden or offline. A
+ * reload is visible (the shell paints before the remembered session opens), so
+ * it is kept rare on purpose: the socket rebuild is the recovery the device
+ * measurements actually showed working.
  */
 
 import { pageFetchStats, type PageFetchStats } from './page-fetch-guard.js'
 import { TELEMETRY_ENDPOINT } from './page-timing.js'
 import { openingWindowMissing, reconnectSockets, socketWatchStats, type SocketWatchStats } from './socket-watch.js'
 
-/** How long the hint must stay up before the view counts as stuck. */
-export const STUCK_VIEW_DELAY_MS = 3_000
+/** How long an empty conversation may show the hint before it is reported. */
+export const STUCK_VIEW_DELAY_MS = 5_000
 
-/** How long a rebuilt carrier gets to republish the conversation. */
-export const STUCK_VIEW_RECOVERY_MS = 6_000
+/** How long the view may stay empty before the app's sockets are rebuilt. */
+export const STUCK_VIEW_RECONNECT_AFTER_MS = 15_000
+
+/** How long a rebuilt carrier gets before the page is reloaded. */
+export const STUCK_VIEW_RELOAD_AFTER_MS = 30_000
 
 /** How often the hint is looked for. */
 export const STUCK_VIEW_POLL_MS = 1_000
 
 /** Reloads allowed inside the window, across page loads. */
-export const STUCK_VIEW_RELOAD_LIMIT = 3
+export const STUCK_VIEW_RELOAD_LIMIT = 1
 
 /** Sliding window for the reload limit. */
-export const STUCK_VIEW_RELOAD_WINDOW_MS = 300_000
+export const STUCK_VIEW_RELOAD_WINDOW_MS = 600_000
 
 /** Key holding the reload timestamps, so the limit survives a reload. */
 export const STUCK_VIEW_STORAGE_KEY = 'dsh-mobile.stuck-view.reloads'
@@ -46,15 +57,27 @@ export const STUCK_VIEW_STORAGE_KEY = 'dsh-mobile.stuck-view.reloads'
 export const STUCK_VIEW_TURN_SELECTOR = '[data-chat-turn]'
 
 /**
- * The host renders its placeholder from these locale strings; a match means the
- * view is still waiting for an opening window, not that the session is empty.
+ * The host's placeholder class. ChatView renders `.hint` from its CSS module, so
+ * the class in the built app is `_hint_<hash>`; the pattern also accepts a plain
+ * `hint` class so the match survives a different module setup.
  */
-const HINT_TEXTS = ['载入历史', 'loading history']
+const HINT_CLASS_PATTERN = /(^|[^a-z])hint([^a-z]|$)/i
+
+/**
+ * The exact strings the host renders for that class. Kept for the record and as
+ * a locale-independent fallback: a `hint`-classed leaf is the placeholder only
+ * when it is short, and these are the texts the host puts there.
+ */
+const HINT_TEXTS = ['载入历史…', 'loading history…']
+
+/** Longest text a placeholder may hold; keeps prose out of the match. */
+const HINT_TEXT_LIMIT = 32
 
 /** The element shape the hint search needs, so a test double is enough. */
 export interface StuckViewElement {
   childElementCount?: number
   textContent?: string | null
+  className?: string
 }
 
 /** The document shape the hint search needs, so a test double is enough. */
@@ -77,12 +100,14 @@ export interface StuckViewRecord {
   kind: 'stuck-view'
   at: string
   phase: StuckViewPhase
-  /** How long the hint had been up when this phase ran. */
+  /** How long the placeholder had been up when this phase ran. */
   stuckMs: number
   hint: string | null
   turns: number | null
   hidden: boolean
   online: boolean
+  /** True when an open `session/follow` is still missing its opening frame. */
+  stalled: boolean
   sockets: SocketWatchStats | null
   pageFetch: PageFetchStats | null
 }
@@ -99,13 +124,12 @@ export interface StuckViewHost {
   endpoint?: string
   sockets?: () => SocketWatchStats | undefined
   pageStats?: () => PageFetchStats | undefined
-  /** True when an observed open is still missing its opening window. */
-  carrierStalled?: () => boolean
   reconnect?: (reason: string) => number
   turns?: () => number
   online?: () => boolean
   delayMs?: number
-  recoveryMs?: number
+  reconnectAfterMs?: number
+  reloadAfterMs?: number
   pollMs?: number
   reloadLimit?: number
   reloadWindowMs?: number
@@ -113,8 +137,12 @@ export interface StuckViewHost {
 
 /**
  * The host's placeholder, when one is on screen.
+ *
+ * Only the conversation's own hint element counts: a leaf carrying the host's
+ * `hint` class with short text. Conversation content that happens to mention the
+ * hint's wording has no such class and is ignored.
  * @param doc - The document to search.
- * @returns The hint's own text, or null when the view is not waiting.
+ * @returns The hint's own text, or null when the placeholder is not up.
  */
 export function stuckHintOf(doc: StuckViewDocument): string | null {
   const nodes = doc.querySelectorAll('div, span, p')
@@ -122,14 +150,23 @@ export function stuckHintOf(doc: StuckViewDocument): string | null {
     const node = nodes[index]
     if (node === undefined) continue
     if ((node.childElementCount ?? 0) > 0) continue
+    const className = typeof node.className === 'string' ? node.className : ''
+    if (!HINT_CLASS_PATTERN.test(className)) continue
     const text = (node.textContent ?? '').trim()
-    if (text.length === 0 || text.length > 64) continue
-    const lowered = text.toLowerCase()
-    for (const hint of HINT_TEXTS) {
-      if (lowered.includes(hint)) return text
-    }
+    if (text.length === 0 || text.length > HINT_TEXT_LIMIT) continue
+    return text
   }
   return null
+}
+
+/**
+ * Whether the text is one of the host's own placeholder strings.
+ * @param text - Candidate hint text.
+ * @returns True for the known loading strings.
+ */
+export function isPlaceholderText(text: string): boolean {
+  const lowered = text.trim().toLowerCase()
+  return HINT_TEXTS.some((hint) => lowered === hint.toLowerCase())
 }
 
 /**
@@ -142,7 +179,8 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
   if (doc === undefined) return () => undefined
   const now = host.now ?? ((): number => Date.now())
   const delayMs = host.delayMs ?? STUCK_VIEW_DELAY_MS
-  const recoveryMs = host.recoveryMs ?? STUCK_VIEW_RECOVERY_MS
+  const reconnectAfterMs = host.reconnectAfterMs ?? STUCK_VIEW_RECONNECT_AFTER_MS
+  const reloadAfterMs = host.reloadAfterMs ?? STUCK_VIEW_RELOAD_AFTER_MS
   const pollMs = host.pollMs ?? STUCK_VIEW_POLL_MS
   const reloadLimit = host.reloadLimit ?? STUCK_VIEW_RELOAD_LIMIT
   const reloadWindowMs = host.reloadWindowMs ?? STUCK_VIEW_RELOAD_WINDOW_MS
@@ -150,7 +188,6 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
   const sockets = host.sockets ?? socketWatchStats
   const pageStats = host.pageStats ?? pageFetchStats
   const reconnect = host.reconnect ?? reconnectSockets
-  const stalled = host.carrierStalled ?? ((): boolean => openingWindowMissing(sockets()))
   const turns = host.turns ?? ((): number => doc.querySelectorAll(STUCK_VIEW_TURN_SELECTOR).length)
   const storage = host.storage ?? defaultStorage()
   const reload = host.location?.reload ?? ((): void => {
@@ -178,6 +215,7 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
       turns: turns(),
       hidden: doc.visibilityState === 'hidden',
       online: online(),
+      stalled: openingWindowMissing(sockets()),
       sockets: sockets() ?? null,
       pageFetch: pageStats() ?? null,
     }
@@ -219,16 +257,25 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
     }
   }
 
+  const reset = (): void => {
+    stuckSince = null
+    reported = false
+    reconnectAt = null
+    gaveUp = false
+  }
+
   const tick = (): void => {
     const hint = stuckHintOf(doc)
-    if (hint === null || doc.visibilityState === 'hidden') {
-      if (hint === null) {
-        if (reported && reconnectAt !== null) report('recovered', now() - (stuckSince ?? now()), null)
-        stuckSince = null
-        reported = false
-        reconnectAt = null
-        gaveUp = false
-      }
+    // A hidden page is neither stuck nor recovered: it is simply not being
+    // watched, so the clock restarts when it comes back to the foreground.
+    if (doc.visibilityState === 'hidden') {
+      reset()
+      return
+    }
+    // A view that is showing turns is not stuck, whatever else is on screen.
+    if (hint === null || turns() > 0) {
+      if (hint === null && reported) report('recovered', now() - (stuckSince ?? now()), null)
+      reset()
       return
     }
     if (stuckSince === null) {
@@ -241,17 +288,18 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
       reported = true
       report('detected', stuckMs, hint)
     }
+    // Without a network there is nothing to rebuild and no page to reload.
+    if (!online()) return
     if (reconnectAt === null) {
+      if (stuckMs < reconnectAfterMs) return
       reconnectAt = now()
-      // Only a carrier that provably lost its opening frame is worth closing.
-      if (!stalled()) return
       const closed = reconnect('stuck-view')
       report('reconnect', stuckMs, hint)
       // Nothing to rebuild: the reload is the only lever left.
       if (closed === 0) escalate(stuckMs, hint)
       return
     }
-    if (now() - reconnectAt >= recoveryMs) escalate(stuckMs, hint)
+    if (now() - reconnectAt >= reloadAfterMs) escalate(stuckMs, hint)
   }
 
   const handle = schedule(tick, pollMs)
