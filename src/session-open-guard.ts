@@ -39,15 +39,23 @@
  */
 
 import { TELEMETRY_ENDPOINT } from './page-timing.js'
-import { holdSessionOpen, type SessionHoldHandle } from './session-hold.js'
+import { holdSessionOpen, readRetention, type SessionHoldHandle } from './session-hold.js'
 
 /**
  * How long a `doOpen` pass gets to publish its opening frame before the app's
  * own `resync()` is asked for one. A healthy open publishes within a few hundred
- * milliseconds; the device measured 1-6 s for a slow one, and the DOM watch only
- * acts at 2 s, so this is the early, cheap retry in front of it.
+ * milliseconds (the device measured 97-239 ms for a first paint), so this is the
+ * earliest deadline that a slow-but-healthy open cannot trip.
  */
-export const SESSION_OPEN_GUARD_NO_FRAME_MS = 1_500
+export const SESSION_OPEN_GUARD_NO_FRAME_MS = 800
+
+/**
+ * No-frame repairs allowed per sessionId per page load. One lost opening frame
+ * is expected to be the whole story; the second is kept for a session switched
+ * away from and back, and the cap stops a session that cannot open at all from
+ * resyncing in a loop.
+ */
+export const SESSION_OPEN_GUARD_MAX_NO_FRAME_REPAIRS = 2
 
 /**
  * Stranded repairs allowed per sessionId per page load. The strand is a single
@@ -136,6 +144,8 @@ export interface SessionOpenRecord {
   resyncs?: number
   /** Why a held reference was given back, on `handback`. */
   reason?: string
+  /** The app's own retrieval row when the row was written, as `count source=count`. */
+  retention?: string
 }
 
 /** One session instance, as far as this guard reaches into it. */
@@ -200,6 +210,7 @@ export interface SessionOpenGuardOptions {
   clearInterval?: (handle: number) => void
   noFrameMs?: number
   maxRepairs?: number
+  maxNoFrameRepairs?: number
   maxReselects?: number
   holdMaxMs?: number
   telemetryLimit?: number
@@ -238,6 +249,7 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   const endpoint = options.endpoint ?? TELEMETRY_ENDPOINT
   const noFrameMs = options.noFrameMs ?? SESSION_OPEN_GUARD_NO_FRAME_MS
   const maxRepairs = options.maxRepairs ?? SESSION_OPEN_GUARD_MAX_REPAIRS
+  const maxNoFrameRepairs = options.maxNoFrameRepairs ?? SESSION_OPEN_GUARD_MAX_NO_FRAME_REPAIRS
   const maxReselects = options.maxReselects ?? SESSION_OPEN_GUARD_MAX_RESELECTS
   const holdMaxMs = options.holdMaxMs ?? SESSION_OPEN_GUARD_HOLD_MAX_MS
   const telemetryLimit = options.telemetryLimit ?? SESSION_OPEN_GUARD_TELEMETRY_LIMIT
@@ -248,8 +260,8 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   const known = new WeakSet<object>()
   /** Stranded repairs spent, per sessionId, for this page load. */
   const repairs = new Map<string, number>()
-  /** Sessions already asked to `resync()`, per page load. */
-  const resynced = new Set<string>()
+  /** No-frame repairs spent, per sessionId, for this page load. */
+  const noFrameRepairs = new Map<string, number>()
   /** The phone's own reference to each session whose open is in flight. */
   const holds = new Map<string, HoldEntry>()
   /** Sessions a `hold` row has already been written for, per page load. */
@@ -273,6 +285,7 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
       repairs?: number | undefined
       resyncs?: number | undefined
       reason?: string | undefined
+      retention?: string | undefined
     } = {},
   ): void => {
     if (sent >= telemetryLimit) return
@@ -289,11 +302,30 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
         ...(extra.repairs === undefined ? {} : { repairs: extra.repairs }),
         ...(extra.resyncs === undefined ? {} : { resyncs: extra.resyncs }),
         ...(extra.reason === undefined ? {} : { reason: extra.reason }),
+        ...(extra.retention === undefined ? {} : { retention: extra.retention }),
       }
       sent += 1
       send(endpoint, JSON.stringify(record))
     } catch {
       // Telemetry must never surface as an error, and never disturb a repair.
+    }
+  }
+
+  /**
+   * The app's reference rows for one session, as a one-line string, so a single
+   * telemetry line says whether the phone's own hold was in the count when the
+   * row was written. `undefined` when the app publishes nothing to read.
+   */
+  const retentionField = (sessionId: string): { retention?: string } => {
+    try {
+      const rows = readRetention(options.sessions(), sessionId)
+      if (rows === undefined) return {}
+      const sources = Object.entries(rows.retainedBy ?? {})
+        .map(([source, count]) => `${source}=${count}`)
+        .join(' ')
+      return { retention: `${rows.referenceCount ?? 0}${sources === '' ? '' : ` ${sources}`}` }
+    } catch {
+      return {}
     }
   }
 
@@ -408,10 +440,12 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
    * Take the phone's own reference to a session that is opening.
    *
    * This is the repair that makes a session switch instant: the app's navigation
-   * can release its reference a few milliseconds into the open, and an unheld
+   * releases its reference 12-16 ms into the open (measured), and an unheld
    * session is then retired and disposed *while loading*, which is the state the
-   * view never leaves. One row is written per session per page load; the sweeps
-   * that follow report the hand-back.
+   * view never leaves. The hold is taken as the pass starts, without waiting for
+   * `loading` to be observable, so it is in place before that release. One row is
+   * written per session per page load; the sweeps that follow report the
+   * hand-back.
    * @param session - The instance entering `loading`.
    * @param sessionId - Its published id.
    */
@@ -423,7 +457,6 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
       // The app re-materialised the id; the old instance is not what is opening.
       releaseHold(sessionId, 'replaced')
     }
-    if (!isLoading(session)) return
     let handle: SessionHoldHandle | undefined
     try {
       handle = options.holdSession?.(sessionId)
@@ -435,7 +468,7 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
     if (holdReported.has(sessionId)) return
     holdReported.add(sessionId)
     const mode = modeOf(session)
-    report('hold', sessionId, 0, { ...(mode === undefined ? {} : { mode }) })
+    report('hold', sessionId, 0, { ...(mode === undefined ? {} : { mode }), ...retentionField(sessionId) })
   }
 
   /** Give one held reference back, and say why. */
@@ -522,6 +555,7 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
       ...(mode === undefined ? {} : { mode }),
       by,
       ...(stack === undefined ? {} : { stack }),
+      ...retentionField(sessionId),
     })
   }
 
@@ -604,12 +638,55 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
    */
   const wrapPrototype = (prototype: object): number => {
     if ((prototype as Record<string, unknown>)[PROTOTYPE_MARK] === true) return 0
-    const methods = prototype as { doOpen?: unknown; dispose?: unknown; resync?: unknown }
+    const methods = prototype as { open?: unknown; doOpen?: unknown; dispose?: unknown; resync?: unknown }
     const originalDoOpen = methods.doOpen
     if (typeof originalDoOpen !== 'function') return 0
     const openPass = originalDoOpen as GuardMethod
+    const originalOpen = typeof methods.open === 'function' ? (methods.open as GuardMethod) : undefined
     const originalDispose = typeof methods.dispose === 'function' ? (methods.dispose as GuardMethod) : undefined
     const originalResync = typeof methods.resync === 'function' ? (methods.resync as GuardMethod) : undefined
+
+    /** Guards the re-entrant `open()` that `retain()` itself performs. */
+    let takingHold = false
+
+    /**
+     * The public `open()`: the point at which the reference has to exist.
+     *
+     * `retain()` starts the open, and the navigation it was retained under can
+     * release its reference in the *same synchronous task* — measured 13-18 ms
+     * after the pass began, with the phone's hold 15 ms later, because a
+     * microtask cannot run inside that task. Taking the hold here, before the
+     * pass runs at all, puts it ahead of the release instead of behind it.
+     * `retain()` itself calls `open()`, which re-enters this wrapper; the flag
+     * makes that re-entry take the original path.
+     */
+    const wrappedOpen = function (this: GuardableSession, ...args: unknown[]): unknown {
+      if (originalOpen === undefined) return undefined
+      try {
+        const session = this
+        const sessionId = idOf(session)
+        const held = holds.get(sessionId)
+        if (
+          !takingHold &&
+          sessionId !== UNKNOWN_SESSION_ID &&
+          held?.session !== session &&
+          session.openState !== 'open' &&
+          session.openPromise === null
+        ) {
+          takingHold = true
+          try {
+            takeHold(session, sessionId)
+          } catch {
+            // A hold that cannot be taken leaves the app exactly as it was.
+          } finally {
+            takingHold = false
+          }
+        }
+      } catch {
+        // Observation only: the caller still gets the original result.
+      }
+      return originalOpen.apply(this, args)
+    }
 
     /**
      * The original pass, observed. The returned value is the original's own, so
@@ -662,13 +739,15 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
             if (settled) return
             if (isRemoved(session)) return
             if (!isLoading(session)) return
-            if (resynced.has(sessionId)) return
-            resynced.add(sessionId)
+            if (resyncedThisPass) return
+            const spent = noFrameRepairs.get(sessionId) ?? 0
+            if (spent >= maxNoFrameRepairs) return
+            noFrameRepairs.set(sessionId, spent + 1)
             resyncedThisPass = true
             const mode = modeOf(session)
             report('no-frame', sessionId, now() - startedAt, {
               ...(mode === undefined ? {} : { mode }),
-              resyncs: 1,
+              resyncs: spent + 1,
             })
             void session.resync?.()
           } catch {
@@ -710,6 +789,18 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
       })
     } catch {
       return 0
+    }
+    if (originalOpen !== undefined) {
+      try {
+        Object.defineProperty(prototype, 'open', {
+          value: wrappedOpen,
+          writable: true,
+          configurable: true,
+          enumerable: false,
+        })
+      } catch {
+        // The microtask hold in `doOpen` remains as the later net.
+      }
     }
     if (originalDispose !== undefined) {
       try {

@@ -50,8 +50,18 @@ export interface SessionHoldHandle {
   release: (reason: string) => void
 }
 
-/** The retention row the app publishes for one session, when it publishes one. */
-function retentionOf(sessions: unknown, sessionId: string): SessionRetention | undefined {
+/**
+ * The retention row the app publishes for one session, when it publishes one.
+ *
+ * Exported because it is also what the guard's telemetry reports when a session
+ * is invalidated: whether the phone's own reference is in the count at that
+ * moment is the difference between "the app retired a held session" and "the
+ * hold never landed".
+ * @param sessions - The app's `sessions` service, or anything else.
+ * @param sessionId - The session to inspect.
+ * @returns The published row, or undefined when there is none to read.
+ */
+export function readRetention(sessions: unknown, sessionId: string): SessionRetention | undefined {
   try {
     return (sessions as RetainableSessions | undefined)?.retentionSnapshot?.(sessionId)
   } catch {
@@ -72,7 +82,7 @@ function retentionOf(sessions: unknown, sessionId: string): SessionRetention | u
 export function hasOtherHolder(sessions: unknown, sessionId: string): boolean {
   const service = sessions as RetainableSessions | undefined
   if (service === undefined || typeof service.retentionSnapshot !== 'function') return true
-  const retention = retentionOf(sessions, sessionId)
+  const retention = readRetention(sessions, sessionId)
   if (retention === undefined) return true
   const by = retention.retainedBy ?? {}
   for (const source of Object.keys(by)) {

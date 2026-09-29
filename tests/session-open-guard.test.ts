@@ -94,6 +94,8 @@ interface HarnessOptions {
   hold?: boolean
   /** Whether the phone ends up as the only holder, as the device's strand does. */
   soleHolder?: () => boolean
+  /** The reference rows the app publishes for the session, when it publishes any. */
+  retention?: { referenceCount: number; retainedBy: Record<string, number> }
 }
 
 function harness(
@@ -109,7 +111,12 @@ function harness(
   const holding = new Set<string>()
   const live = new Map<string, FakeSession>([[session.sessionId, session]])
   const service = (): unknown => {
-    if (shape === 'session') return { manager: { sessions: live } }
+    if (shape === 'session') {
+      return {
+        manager: { sessions: live },
+        ...(options.retention === undefined ? {} : { retentionSnapshot: () => options.retention }),
+      }
+    }
     if (shape === 'empty') return { manager: { sessions: new Map() } }
     if (shape === 'array') return { manager: { sessions: [] } }
     return undefined
@@ -213,9 +220,10 @@ describe('installSessionOpenGuard', () => {
     expect(noFrame).toHaveLength(1)
     expect(noFrame[0]).toMatchObject({ sessionId: 'session-1', resyncs: 1 })
     expect(noFrame[0]?.waitedMs).toBeGreaterThanOrEqual(SESSION_OPEN_GUARD_NO_FRAME_MS)
-    // The retry is one per session and page load, whatever the state afterwards.
+    // The retry is capped per session and page load, whatever the state after.
     await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_NO_FRAME_MS * 10)
-    expect(session.resyncs).toBe(1)
+    expect(session.resyncs).toBe(2)
+    expect(rows.filter((row) => row.phase === 'no-frame')).toHaveLength(2)
     session.pending = false
     session.release?.()
     await vi.advanceTimersByTimeAsync(0)
@@ -234,6 +242,20 @@ describe('installSessionOpenGuard', () => {
     expect(invalidated).toHaveLength(1)
     expect(invalidated[0]).toMatchObject({ by: 'dispose', sessionId: 'session-1' })
     expect(typeof invalidated[0]?.stack).toBe('string')
+    stop()
+  })
+
+  it('reports the app\'s own reference rows when a loading session is invalidated', async () => {
+    const { session, rows, stop } = harness('session', undefined, {
+      retention: { referenceCount: 5, retainedBy: { mainView: 1, 'dsh-on-phone': 1, sidebarView: 3 } },
+    })
+    session.stranded = true
+    await session.open()
+    await vi.advanceTimersByTimeAsync(0)
+    const before = rows.length
+    await session.dispose()
+    const invalidated = rows.slice(before).filter((row) => row.phase === 'invalidated')
+    expect(invalidated[0]?.retention).toBe('5 mainView=1 dsh-on-phone=1 sidebarView=3')
     stop()
   })
 
@@ -337,6 +359,33 @@ describe('installSessionOpenGuard', () => {
     expect(rows.filter((row) => row.phase === 'handback')).toEqual([
       expect.objectContaining({ phase: 'handback', sessionId: 'session-1', reason: 'app' }),
     ])
+    stop()
+  })
+
+  it('takes its reference synchronously, inside the `open()` call itself', () => {
+    // The app's release happens in the same synchronous task as the open, so a
+    // microtask is already too late: no timer, no await here on purpose.
+    const { session, holds, stop } = harness('session', undefined, { hold: true })
+    void session.open()
+    expect(holds).toEqual(['session-1'])
+    stop()
+  })
+
+  it('takes its reference as the open starts, before `loading` is even visible', async () => {
+    // The device releases its own reference 12-16 ms into the open. A hold that
+    // waited for `openState === 'loading'` to be observable missed that window,
+    // so the guard takes it from the pass itself.
+    const Deferred = class extends FakeSession {
+      override async doOpen(): Promise<void> {
+        await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
+        this.openState = 'open'
+      }
+    }
+    const session = new Deferred('session-1')
+    const { holds, stop } = harness('session', session, { hold: true })
+    void session.open()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(holds).toEqual(['session-1'])
     stop()
   })
 
