@@ -121,7 +121,7 @@ function stalledSockets(overrides: Partial<SocketWatchStats> = {}): SocketWatchS
 function harness(options: {
   document?: StuckViewDocument
   delayMs?: number
-  reconnectBackoff?: number
+  reconnectGapsMs?: readonly number[]
   maxReconnects?: number
   reloadAfterMs?: number
   reconnect?: () => number
@@ -150,8 +150,8 @@ function harness(options: {
     storage: options.storage ?? memoryStorage(),
     location: { reload: () => { reloads += 1 } },
     delayMs: options.delayMs ?? 2_000,
-    reconnectBackoff: options.reconnectBackoff ?? 2,
-    maxReconnects: options.maxReconnects ?? 3,
+    reconnectGapsMs: options.reconnectGapsMs ?? [0, 1_200, 3_000, 6_000],
+    maxReconnects: options.maxReconnects ?? 4,
     reloadAfterMs: options.reloadAfterMs ?? 30_000,
     ...(options.stalled === undefined ? {} : { stalled: options.stalled }),
     online: () => options.online ?? true,
@@ -234,24 +234,31 @@ describe('installStuckViewWatch', () => {
     expect(test.reloads()).toBe(0)
   })
 
-  it('backs off between rebuilds: two seconds, then six, then fourteen', () => {
+  it('rebuilds quickly, and keeps trying: two seconds, then 3.2, 5 and 8', () => {
     const test = harness({})
     test.timers.tick()
     test.time.advance(2_000)
     test.timers.tick()
     expect(test.records.map(record => [record.phase, record.stuckMs])).toEqual([['detected', 2_000], ['reconnect', 2_000]])
-    test.time.advance(3_999)
+    // The second rebuild is one poll after the first attempt's 1.2 s gap.
+    test.time.advance(1_199)
     test.timers.tick()
     expect(test.records.filter(record => record.phase === 'reconnect')).toHaveLength(1)
     test.time.advance(1)
     test.timers.tick()
-    expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', attempt: 2, stuckMs: 6_000 })
-    test.time.advance(7_999)
+    expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', attempt: 2, stuckMs: 3_200 })
+    test.time.advance(1_799)
     test.timers.tick()
     expect(test.records.filter(record => record.phase === 'reconnect')).toHaveLength(2)
     test.time.advance(1)
     test.timers.tick()
-    expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', attempt: 3, stuckMs: 14_000 })
+    expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', attempt: 3, stuckMs: 5_000 })
+    test.time.advance(2_999)
+    test.timers.tick()
+    expect(test.records.filter(record => record.phase === 'reconnect')).toHaveLength(3)
+    test.time.advance(1)
+    test.timers.tick()
+    expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', attempt: 4, stuckMs: 8_000 })
     expect(test.reloads()).toBe(0)
   })
 
@@ -267,7 +274,8 @@ describe('installStuckViewWatch', () => {
     expect(test.reloads()).toBe(0)
     test.time.advance(16_000)
     test.timers.tick()
-    expect(test.phases()).toEqual(['detected', 'reconnect', 'reconnect', 'reconnect', 'reload'])
+    test.timers.tick()
+    expect(test.phases()).toEqual(['detected', 'reconnect', 'reconnect', 'reconnect', 'reconnect', 'reload'])
     expect(test.reloads()).toBe(1)
   })
 

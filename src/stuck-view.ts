@@ -25,7 +25,9 @@
  * waited 15 s to act; the HTTP page behind it had already answered in
  * milliseconds. So the watch now acts as soon as the placeholder is clearly not
  * momentary — the host's own hint element, an empty conversation, 2 s — and
- * retries the rebuild with a 2x backoff (2 s, 6 s, 14 s). A reload stays the
+ * retries the rebuild in quick succession (2 s, 3.2 s, 5 s, 8 s into the stall),
+ * because the device showed the second replacement carrier as the one that
+ * actually recovered the view. A reload stays the
  * last resort at 30 s, once per ten minutes, never while the page is hidden or
  * offline: it is visible (the shell paints before the remembered session opens)
  * while the socket rebuild is not.
@@ -45,11 +47,19 @@ import { openingWindowMissing, reconnectSockets, socketWatchStats, type SocketWa
  */
 export const STUCK_VIEW_DELAY_MS = 2_000
 
-/** Multiplier between rebuild attempts: 2 s, 6 s, 14 s into the stall. */
-export const STUCK_VIEW_RECONNECT_BACKOFF = 2
+/**
+ * How long after the stall began each rebuild runs, offset by the detection delay.
+ *
+ * Dense at the front on purpose. On the device the rebuild that recovered the
+ * view was the *second* one — a first replacement carrier published its own
+ * `session/follow` snapshot and the app still sat in its loading state — and each
+ * rebuild costs the app a full re-subscription (7-11 s on the device), so the
+ * earlier that second chance arrives the better.
+ */
+export const STUCK_VIEW_RECONNECT_GAPS_MS: readonly number[] = [0, 1_200, 3_000, 6_000]
 
 /** Rebuilds allowed before only the reload is left. */
-export const STUCK_VIEW_MAX_RECONNECTS = 3
+export const STUCK_VIEW_MAX_RECONNECTS = STUCK_VIEW_RECONNECT_GAPS_MS.length
 
 /** How long a rebuilt carrier gets before the page is reloaded. */
 export const STUCK_VIEW_RELOAD_AFTER_MS = 30_000
@@ -146,7 +156,7 @@ export interface StuckViewHost {
   online?: () => boolean
   stalled?: () => boolean
   delayMs?: number
-  reconnectBackoff?: number
+  reconnectGapsMs?: readonly number[]
   maxReconnects?: number
   reloadAfterMs?: number
   pollMs?: number
@@ -198,7 +208,7 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
   if (doc === undefined) return () => undefined
   const now = host.now ?? ((): number => Date.now())
   const delayMs = host.delayMs ?? STUCK_VIEW_DELAY_MS
-  const reconnectBackoff = host.reconnectBackoff ?? STUCK_VIEW_RECONNECT_BACKOFF
+  const reconnectGaps = host.reconnectGapsMs ?? STUCK_VIEW_RECONNECT_GAPS_MS
   const maxReconnects = host.maxReconnects ?? STUCK_VIEW_MAX_RECONNECTS
   const reloadAfterMs = host.reloadAfterMs ?? STUCK_VIEW_RELOAD_AFTER_MS
   const pollMs = host.pollMs ?? STUCK_VIEW_POLL_MS
@@ -323,9 +333,11 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
     if (!online()) return
     if (reconnects < maxReconnects && stuckMs >= nextReconnectAt) {
       reconnects += 1
-      // 2 s, then 6 s, then 14 s into the stall: each rebuild gets a fair
-      // chance to publish the window before the next one is tried.
-      nextReconnectAt = stuckMs + delayMs * reconnectBackoff ** reconnects
+      // 2 s, then 3.2 s, 5 s and 8 s into the stall: the second rebuild is the
+      // one the device showed recovering the view, so it must not be far behind
+      // the first.
+      const gap = reconnectGaps[reconnects] ?? reconnectGaps[reconnectGaps.length - 1] ?? 0
+      nextReconnectAt = delayMs + gap
       const closed = reconnect('stuck-view')
       report('reconnect', stuckMs, hint, { attempt: reconnects, closed })
       // Nothing to rebuild: the reload is the only lever left.
