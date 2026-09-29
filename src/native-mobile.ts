@@ -1,5 +1,5 @@
 import { installDrawerPan } from './drawer-pan.js'
-import { installGestureTelemetry } from './gesture-telemetry.js'
+import { TELEMETRY_ENDPOINT, installGestureTelemetry } from './gesture-telemetry.js'
 import { installPageFetchGuard, pageFetchStats } from './page-fetch-guard.js'
 import { installPageTiming } from './page-timing.js'
 import { installSocketWatch, reconnectSockets, socketWatchStats } from './socket-watch.js'
@@ -536,6 +536,33 @@ export function shouldFillEarlierHistory(hasScrollRange: boolean, atTop: boolean
 }
 
 /**
+ * Minimum gap between two history loads asked for by one finger gesture.
+ *
+ * iOS stops sending `scroll` events once the transcript is pinned at its top,
+ * and a transcript shorter than the viewport never sends one at all, so
+ * {@link shouldAutoLoadEarlier} cannot fire again however often the user swipes
+ * up. The gesture itself has to be able to ask for the next page.
+ */
+export const HISTORY_TOP_RETRY_MS = 1200
+
+/**
+ * Whether a swipe at the top of the transcript should ask for another page.
+ *
+ * Only the gesture path uses this: a scroll event carries the position delta
+ * {@link shouldAutoLoadEarlier} reacts to, while a finger on a pinned or
+ * unscrollable transcript produces nothing else to react to.
+ * @param currentTop - Current scroll offset of the transcript.
+ * @param sinceLastLoadMs - Time elapsed since the previous history load.
+ * @param loads - Pages this gesture already asked for.
+ * @returns Whether one more page should be requested.
+ */
+export function shouldRetryEarlierHistory(currentTop: number, sinceLastLoadMs: number, loads: number): boolean {
+  if (currentTop > AUTO_HISTORY_THRESHOLD_PX) return false
+  if (sinceLastLoadMs < HISTORY_TOP_RETRY_MS) return false
+  return loads < HISTORY_FILL_MAX_PAGES
+}
+
+/**
  * How long the DOM pass waits before re-scanning after an attribute change.
  *
  * The stock app rewrites `class`/`style` continuously while a turn streams, and
@@ -862,23 +889,95 @@ export function installNativeMobileSurface(): () => void {
   let historyFillHeight = -1
   let historyFillStalls = 0
   let historyFillPages = 0
+  let historyLoadAt = 0
+  let historyGestureLoads = 0
   const historyLoadButton = (): HTMLButtonElement | undefined => {
     const loader = historyScroller === undefined ? undefined : firstByClassSuffix(historyScroller, '_older')
     return loader?.querySelector<HTMLButtonElement>('button') ?? undefined
   }
+  /**
+   * Click the app's `load earlier` button when it is usable, and remember when.
+   *
+   * The gesture retry and the fill share the timestamp, so a finger and the
+   * fill can never ask for the same page twice.
+   * @returns Whether the click was delivered.
+   */
+  const clickEarlierHistory = (): boolean => {
+    const button = historyLoadButton()
+    if (button === undefined || button.disabled || button.getAttribute('aria-disabled') === 'true') return false
+    historyLoadAt = Date.now()
+    button.click()
+    return true
+  }
   const onHistoryScroll = (): void => {
     if (historyScroller === undefined) return
     const currentTop = Math.max(0, historyScroller.scrollTop)
+    // A scroll event at the top means the transcript is pinned there; iOS will
+    // not send another one until it moves again, so the retry has to run here
+    // too, not only on a finger.
     const shouldLoad = shouldAutoLoadEarlier(historyPreviousTop, currentTop)
+      || shouldRetryEarlierHistory(currentTop, Date.now() - historyLoadAt, historyGestureLoads)
     historyPreviousTop = currentTop
     // A fresh gesture deserves fresh fill attempts: the transcript may have
     // become scrollable while the fill had already given up.
     historyFillStalls = 0
     historyFillPages = 0
-    if (!shouldLoad) return
-    const button = historyLoadButton()
-    if (button === undefined || button.disabled || button.getAttribute('aria-disabled') === 'true') return
-    button.click()
+    if (shouldLoad) clickEarlierHistory()
+  }
+  /**
+   * Record one gesture-driven history load.
+   *
+   * The complaint this answers - a swipe up that loads nothing - only happens on
+   * the phone, so the attempt and the transcript's state at that moment have to
+   * be visible from here. Debug aid, removed with the other channels.
+   * @param top - Transcript scroll offset when the load was asked for.
+   */
+  const reportHistoryGesture = (top: number): void => {
+    if (typeof fetch !== 'function' || historyScroller === undefined) return
+    const body = JSON.stringify({
+      kind: 'history-gesture',
+      at: new Date().toISOString(),
+      top: Math.round(top),
+      range: Math.round(historyScroller.scrollHeight - historyScroller.clientHeight),
+      viewport: Math.round(historyScroller.clientHeight),
+      loads: historyGestureLoads,
+      stalls: historyFillStalls,
+      fills: historyFillPages,
+    })
+    void fetch(TELEMETRY_ENDPOINT, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body,
+      keepalive: true,
+    }).catch(() => undefined)
+  }
+  /** A new touch starts a new budget: the fill's give-up counters are per gesture. */
+  const onHistoryGestureStart = (): void => {
+    historyGestureLoads = 0
+    historyFillStalls = 0
+    historyFillPages = 0
+  }
+  /**
+   * Treat a finger on the transcript as a request for older history.
+   *
+   * Once the transcript is pinned at the top the app sends no further scroll
+   * events, and a transcript shorter than the viewport never sends one at all:
+   * in both cases swiping up used to do nothing.
+   */
+  const onHistoryGesture = (): void => {
+    if (historyScroller === undefined) return
+    const currentTop = Math.max(0, historyScroller.scrollTop)
+    if (historyScroller.scrollHeight - historyScroller.clientHeight <= AUTO_HISTORY_THRESHOLD_PX) {
+      // Nothing can scroll, so the fill owns this case; resetting its stall
+      // counter is what the scroll event it never got would have done.
+      historyFillStalls = 0
+      fillEarlierHistory()
+      return
+    }
+    if (!shouldRetryEarlierHistory(currentTop, Date.now() - historyLoadAt, historyGestureLoads)) return
+    if (!clickEarlierHistory()) return
+    historyGestureLoads += 1
+    reportHistoryGesture(currentTop)
   }
   /**
    * Pull one page of older history while the transcript is too short to scroll.
@@ -900,14 +999,23 @@ export function installNativeMobileSurface(): () => void {
     historyFillHeight = height
     historyFillAt = Date.now()
     historyFillPages += 1
-    button.click()
+    clickEarlierHistory()
   }
   const bindHistoryScroller = (next: HTMLElement | undefined): void => {
     if (historyScroller === next) return
     historyScroller?.removeEventListener('scroll', onHistoryScroll)
+    historyScroller?.removeEventListener('touchstart', onHistoryGestureStart)
+    historyScroller?.removeEventListener('touchmove', onHistoryGesture)
+    historyScroller?.removeEventListener('pointerdown', onHistoryGestureStart)
+    historyScroller?.removeEventListener('pointermove', onHistoryGesture)
     historyScroller = next
     historyPreviousTop = next?.scrollTop ?? 0
+    historyGestureLoads = 0
     historyScroller?.addEventListener('scroll', onHistoryScroll, { passive: true })
+    historyScroller?.addEventListener('touchstart', onHistoryGestureStart, { passive: true })
+    historyScroller?.addEventListener('touchmove', onHistoryGesture, { passive: true })
+    historyScroller?.addEventListener('pointerdown', onHistoryGestureStart, { passive: true })
+    historyScroller?.addEventListener('pointermove', onHistoryGesture, { passive: true })
   }
   const animateNavigation = (event: MouseEvent): void => {
     if (!(event.target instanceof Element)) return

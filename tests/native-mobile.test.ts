@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { BACKDROP_SETTLE_MS, HISTORY_FILL_INTERVAL_MS, HISTORY_FILL_MAX_PAGES, HISTORY_FILL_MAX_STALLS, NATIVE_MOBILE_STYLES, drawerBackgroundColor, findDetailsSheetHost, findRightPanelHost, isComposerEditorFocus, isMenuSearchFocus, nextSyncDelay, preservesMenuFocus, rightColumnOpen, rightPanelOpen, selectsSidebarRow, shouldAutoLoadEarlier, shouldFillEarlierHistory } from '../src/native-mobile.js'
+import { BACKDROP_SETTLE_MS, HISTORY_FILL_INTERVAL_MS, HISTORY_FILL_MAX_PAGES, HISTORY_FILL_MAX_STALLS, HISTORY_TOP_RETRY_MS, NATIVE_MOBILE_STYLES, drawerBackgroundColor, findDetailsSheetHost, findRightPanelHost, isComposerEditorFocus, isMenuSearchFocus, nextSyncDelay, preservesMenuFocus, rightColumnOpen, rightPanelOpen, selectsSidebarRow, shouldAutoLoadEarlier, shouldFillEarlierHistory, shouldRetryEarlierHistory } from '../src/native-mobile.js'
 
 /** Minimal stand-in for an element whose `closest` resolves to a fixed match. */
 function fakeElement(closest: Element | null): Element {
@@ -174,6 +174,17 @@ describe('native mobile presentation', () => {
     expect(shouldFillEarlierHistory(false, true, true, HISTORY_FILL_INTERVAL_MS, HISTORY_FILL_MAX_STALLS, 0)).toBe(false)
     // Nor is a transcript that keeps growing but never becomes scrollable.
     expect(shouldFillEarlierHistory(false, true, true, HISTORY_FILL_INTERVAL_MS, 0, HISTORY_FILL_MAX_PAGES)).toBe(false)
+  })
+
+  it('retries a history load from the gesture once the transcript is pinned at the top', () => {
+    // A finger at the top is the signal iOS withholds from the scroll trigger.
+    expect(shouldRetryEarlierHistory(0, HISTORY_TOP_RETRY_MS, 0)).toBe(true)
+    expect(shouldRetryEarlierHistory(64, HISTORY_TOP_RETRY_MS, 0)).toBe(true)
+    // Never twice inside the retry gap, never away from the top.
+    expect(shouldRetryEarlierHistory(0, HISTORY_TOP_RETRY_MS - 1, 0)).toBe(false)
+    expect(shouldRetryEarlierHistory(65, HISTORY_TOP_RETRY_MS * 10, 0)).toBe(false)
+    // One gesture cannot drain the whole session either.
+    expect(shouldRetryEarlierHistory(0, HISTORY_TOP_RETRY_MS, HISTORY_FILL_MAX_PAGES)).toBe(false)
   })
 
   it('treats a row control as a control, not as selecting the row', () => {

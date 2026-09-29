@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-tailscale",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "private": false,
   "description": "DeepSeek Harness 移动端适配插件：通过 Tailscale Serve 让同一 tailnet 里的手机浏览器安全访问电脑上的 DSH。",
   "type": "module",
