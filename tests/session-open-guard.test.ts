@@ -159,6 +159,15 @@ afterEach(() => {
 })
 
 describe('installSessionOpenGuard', () => {
+  /**
+   * A strand is only repaired once the open has stood for a whole opening frame:
+   * what settles a pass earlier than that is the app disposing its own stream on
+   * the way to the next one, which the device measured 20-24 ms into a switch.
+   */
+  const settleGrace = async (): Promise<void> => {
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_NO_FRAME_MS)
+  }
+
   it('leaves a healthy open alone', async () => {
     const { session, rows, stop } = harness()
     await session.open()
@@ -176,7 +185,7 @@ describe('installSessionOpenGuard', () => {
     // The app's own `open()` settled without publishing anything: repair it.
     session.stranded = false
     await pass
-    await vi.advanceTimersByTimeAsync(0)
+    await settleGrace()
     expect(session.openPromise).toBe(null)
     expect(session.opens).toBe(2)
     expect(session.openState).toBe('open')
@@ -187,13 +196,28 @@ describe('installSessionOpenGuard', () => {
     stop()
   })
 
+  it('waits out the opening frame before it calls a settled pass stranded', async () => {
+    const { session, rows, stop } = harness()
+    session.stranded = true
+    await session.open()
+    // The app disposes its own stream on the way to the next one, so the pass
+    // settles long before the first frame could have landed: not a strand yet.
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_NO_FRAME_MS - 1)
+    expect(session.opens).toBe(1)
+    expect(rows).toEqual([])
+    await vi.advanceTimersByTimeAsync(1)
+    expect(session.opens).toBe(2)
+    expect(rows.filter((row) => row.phase === 'stranded')).toHaveLength(1)
+    stop()
+  })
+
   it('gives up after the repair cap rather than reopening in a loop', async () => {
     const { session, rows, stop } = harness()
     session.stranded = true
     await session.open()
-    await vi.advanceTimersByTimeAsync(1)
-    await vi.advanceTimersByTimeAsync(1)
-    await vi.advanceTimersByTimeAsync(1)
+    await settleGrace()
+    await settleGrace()
+    await settleGrace()
     expect(session.opens).toBe(3)
     expect(rows.filter((row) => row.phase === 'stranded')).toHaveLength(2)
     stop()
@@ -266,7 +290,7 @@ describe('installSessionOpenGuard', () => {
     session.stranded = true
     live.delete(session.sessionId)
     await session.open()
-    await vi.advanceTimersByTimeAsync(1)
+    await settleGrace()
     expect(asked).toEqual(['session-1'])
     expect(rows).toHaveLength(1)
     expect(rows[0]).toMatchObject({ kind: 'session-open', phase: 'reselect', sessionId: 'session-1', repairs: 1 })
@@ -282,7 +306,8 @@ describe('installSessionOpenGuard', () => {
     session.stranded = true
     live.delete(session.sessionId)
     await session.open()
-    await vi.advanceTimersByTimeAsync(1)
+    await settleGrace()
+    await settleGrace()
     // Asked once, refused, and not asked again; the in-place repair takes over
     // and spends its own budget.
     expect(asked).toEqual(['session-1'])
@@ -296,10 +321,11 @@ describe('installSessionOpenGuard', () => {
     session.stranded = true
     live.delete(session.sessionId)
     await session.open()
-    await vi.advanceTimersByTimeAsync(1)
+    await settleGrace()
     // Budget spent, so the next strand falls back to the in-place repair.
     await session.open()
-    await vi.advanceTimersByTimeAsync(1)
+    await settleGrace()
+    await settleGrace()
     expect(asked).toEqual(['session-1'])
     expect(rows.filter((row) => row.phase === 'reselect')).toHaveLength(1)
     expect(rows.filter((row) => row.phase === 'stranded')).toHaveLength(2)
@@ -323,7 +349,7 @@ describe('installSessionOpenGuard', () => {
     const second = harness('session', session)
     session.stranded = true
     await session.open()
-    await vi.advanceTimersByTimeAsync(1)
+    await settleGrace()
     expect(second.rows).toEqual([])
     expect(rows.filter((row) => row.phase === 'stranded').length).toBeGreaterThan(0)
     stop()

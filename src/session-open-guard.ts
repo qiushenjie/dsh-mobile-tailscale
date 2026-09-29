@@ -28,7 +28,10 @@
  * gives it back at the next sweep — no socket, no reload, no re-navigation. When
  * the app's own pass still settles with the state at `"loading"` and nobody
  * opening, the guard clears the stale `openPromise` and calls the app's own
- * `open()` again: a round trip, no socket touched. It also times out a first
+ * `open()` again: a round trip, no socket touched — but only once the open has
+ * stood for the same four seconds a first frame gets, because a pass settles the
+ * instant the app disposes its stream, which is not the same thing as a session
+ * that nothing will publish. It also times out a first
  * frame that never arrives and asks the app for its own `resync()`, and it
  * instruments `dispose()`/`resync()` so a device row names what invalidated a
  * session mid-open.
@@ -276,6 +279,8 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   const reselects = new Map<string, number>()
   /** Sessions the app would not re-open; one refusal ends the app-level path. */
   const reselectRefused = new Set<string>()
+  /** Sessions whose stranded repair is waiting out the opening frame's own deadline. */
+  const strandRechecks = new Set<string>()
   /** When each session last entered a pass, for `waitedMs`. */
   const loadingSince = new Map<string, number>()
   let sent = 0
@@ -576,6 +581,10 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
    * it — including one this guard starts — hangs until something kills it, which
    * is exactly the loop the device showed. For that case the repair is the app's
    * own navigation instead, which retains a current instance for the id.
+   *
+   * Neither repair runs before the open has stood for
+   * {@link SESSION_OPEN_GUARD_NO_FRAME_MS}: what settles a pass this early is the
+   * app disposing its own stream on the way to the next one, not a lost wake-up.
    */
   const repairStranded = (
     session: GuardableSession,
@@ -596,6 +605,28 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
     const stranded = isStaleOpenPromise(session, pass) && canReopen
     const canReselect = retired && options.reopenSession !== undefined
     if (!canReselect && !stranded) return
+    // A pass settles the moment the app disposes its stream — measured 20-24 ms
+    // into a switch — and that settle lands while the opening frame the view is
+    // waiting for is still on the wire. Repairing there aborts a frame that is
+    // simply still arriving (297 KB, about 1.1 s on the device) and starts the
+    // whole open over: the device showed two such repairs inside 340 ms and no
+    // history on screen for the wait that followed. The strand is only real once
+    // the open has stood for as long as an opening frame gets
+    // ({@link SESSION_OPEN_GUARD_NO_FRAME_MS}); until then this looks again.
+    const elapsed = now() - startedAt
+    if (elapsed < noFrameMs) {
+      if (strandRechecks.has(sessionId)) return
+      strandRechecks.add(sessionId)
+      schedule(() => {
+        strandRechecks.delete(sessionId)
+        try {
+          repairStranded(session, sessionId, pass, startedAt, resyncedThisPass)
+        } catch {
+          // A repair that throws is still better than a broken app.
+        }
+      }, noFrameMs - elapsed)
+      return
+    }
     const mode = modeOf(session)
     if (canReselect) {
       const asked = reselects.get(sessionId) ?? 0
