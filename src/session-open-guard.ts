@@ -43,11 +43,17 @@ import { holdSessionOpen, readRetention, type SessionHoldHandle } from './sessio
 
 /**
  * How long a `doOpen` pass gets to publish its opening frame before the app's
- * own `resync()` is asked for one. A healthy open publishes within a few hundred
- * milliseconds (the device measured 97-239 ms for a first paint), so this is the
- * earliest deadline that a slow-but-healthy open cannot trip.
+ * own `resync()` is asked for one.
+ *
+ * The opening frame is a single atomic mux item, and for the heavy 242-turn
+ * session it measured 297 KB / 68 records. The phone moves a comparable payload
+ * in ~544 ms (a 232 KB page), and the p99 of 490 measured pages was 1.9 s, so
+ * this deadline has to sit above a real transfer: the app has no timeout of its
+ * own, and a repair that fires mid-transfer aborts the very frame it is waiting
+ * for. Four seconds is 2x the worst healthy page we have seen and still leaves a
+ * lost frame corrected while the user is watching.
  */
-export const SESSION_OPEN_GUARD_NO_FRAME_MS = 800
+export const SESSION_OPEN_GUARD_NO_FRAME_MS = 4000
 
 /**
  * No-frame repairs allowed per sessionId per page load. One lost opening frame
@@ -751,7 +757,8 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
             })
             void session.resync?.()
           } catch {
-            // The resync is best-effort; the DOM watch remains the outer net.
+            // The resync is best-effort; once the repair budget is spent a
+            // session that cannot open is left to the app.
           }
         }, noFrameMs)
 
