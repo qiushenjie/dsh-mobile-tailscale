@@ -53,7 +53,7 @@ dsh plugin --profile web add "$PWD/$(ls -1 dsh-mobile-tailscale-*.tgz | sort -V 
 dsh --profile web
 ```
 
-macOS's DSH Desktop does not add `dsh` to PATH. The simplest fix is a global CLI matching your Desktop version — `npm install -g @deepseek-ai/dsh@0.1.7-rc.2` — after which the commands above just use `dsh`.
+macOS's DSH Desktop does not add `dsh` to PATH. The simplest fix is a global CLI matching your Desktop version — `npm install -g @deepseek-ai/dsh@0.2.0-rc.2` — after which the commands above just use `dsh`.
 
 Older builds unpacked the implementation inside the app bundle, so the bundled CLI also works there (the current app is `DeepSeek Harness.app`, whose implementation is packed into `Contents/Resources/app.asar`, so this path only exists on older versions):
 
@@ -135,7 +135,7 @@ For the full threat model see [SECURITY.md](SECURITY.md).
 
 ## Compatibility
 
-Verified against DSH `0.1.0-rc.5`, `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.1-rc.2`, `0.1.2-alpha.1`, `0.1.2-rc.1`, `0.1.7-rc.2`. An unlisted version only records one warning and continues starting up; a newer DSH may reject the whole plugin before loading it based on `peerDependencies`, in which case upgrade the plugin, or explicitly grant an exemption for that exact version combination.
+Verified against DSH `0.1.0-rc.5`, `0.1.0-rc.6`, `0.1.0-rc.7`, `0.1.1-rc.2`, `0.1.2-alpha.1`, `0.1.2-rc.1`, `0.1.7-rc.2`, `0.2.0-rc.2`. An unlisted version only records one warning and continues starting up; a newer DSH may reject the whole plugin before loading it based on `peerDependencies`, in which case upgrade the plugin, or explicitly grant an exemption for that exact version combination. Since DSH `0.2.0-rc.2` that check is a hard gate: an incompatible bundle is **skipped** (listed in `skippedBundles`), so the plugin looks installed but does nothing; the exemption lives in the profile's `compatibility.json` and is inherited by neither a plugin upgrade nor a DSH upgrade.
 
 ## Uninstall
 

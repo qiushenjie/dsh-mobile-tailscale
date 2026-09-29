@@ -53,7 +53,7 @@ dsh plugin --profile web add "$PWD/$(ls -1 dsh-mobile-tailscale-*.tgz | sort -V 
 dsh --profile web
 ```
 
-macOS 的 DSH Desktop 不把 `dsh` 加进 PATH。最省事的是装一个与 Desktop 同版本的全局 CLI：`npm install -g @deepseek-ai/dsh@0.1.7-rc.2`，之后上面的命令直接用 `dsh`。
+macOS 的 DSH Desktop 不把 `dsh` 加进 PATH。最省事的是装一个与 Desktop 同版本的全局 CLI：`npm install -g @deepseek-ai/dsh@0.2.0-rc.2`，之后上面的命令直接用 `dsh`。
 
 旧版应用把实现解包在 app bundle 里，也可以走内置 CLI（当前版本叫 `DeepSeek Harness.app`，实现收进 `Contents/Resources/app.asar`，所以下面这条路径只在旧版存在）：
 
@@ -135,7 +135,7 @@ node "$DSH_APP/Contents/Resources/app/node_modules/@deepseek-ai/dsh/lib/bin.js" 
 
 ## 兼容性
 
-已验证 DSH `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1`、`0.1.2-rc.1`、`0.1.7-rc.2`。未列入的版本只记录一条告警并继续启动；较新的 DSH 可能按 `peerDependencies` 在加载前拒绝整个插件，这种情况请升级插件，或为该精确版本组合显式授权豁免。
+已验证 DSH `0.1.0-rc.5`、`0.1.0-rc.6`、`0.1.0-rc.7`、`0.1.1-rc.2`、`0.1.2-alpha.1`、`0.1.2-rc.1`、`0.1.7-rc.2`、`0.2.0-rc.2`。未列入的版本只记录一条告警并继续启动；较新的 DSH 可能按 `peerDependencies` 在加载前拒绝整个插件，这种情况请升级插件，或为该精确版本组合显式授权豁免。从 DSH `0.2.0-rc.2` 起这条检查是硬门禁：不兼容的 bundle 会被**跳过加载**（列入 `skippedBundles`），插件看起来「装了但没反应」；豁免记在 profile 的 `compatibility.json`，且插件升级与 DSH 升级都不会继承它。
 
 ## 卸载
 
