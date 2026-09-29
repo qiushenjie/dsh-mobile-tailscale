@@ -1,5 +1,6 @@
 import { createElement } from 'react'
 import { installNativeMobileSurface, NATIVE_MOBILE_STYLES } from './native-mobile.js'
+import { installSessionOpenGuard } from './session-open-guard.js'
 import { resyncLoadingSessions } from './session-resync.js'
 
 interface ClientContext {
@@ -868,6 +869,35 @@ div:has(.dsh-mobile-control__trigger){flex-wrap:wrap}
 @media (prefers-reduced-motion:reduce){.dsh-mobile-control__provider,.dsh-mobile-control__cpolar-connect{transition:none}.dsh-mobile-control__diagnostic-summary.is-running .dsh-mobile-control__diagnostic-summary-icon::before,.dsh-mobile-control__diagnostic-checks{animation:none}}
 `
 
+/**
+ * Install the object-layer session-open guard, when this build has a sessions
+ * service to find.
+ *
+ * The service is resolved per arm attempt rather than here: this client half is
+ * evaluated before the app's own services register, so the guard polls a bounded
+ * number of times until a live session hands it the class prototype — and that
+ * prototype then covers every instance the app builds afterwards. A host whose
+ * service never appears, or whose shape differs, simply keeps the DOM watch as
+ * its recovery.
+ * @param ctx - The plugin's client context.
+ * @returns A function that stops the arming poll.
+ */
+function installSessionOpenGuardSafely(ctx: ClientContext): () => void {
+  try {
+    return installSessionOpenGuard({
+      sessions: () => {
+        try {
+          return ctx.get('sessions')
+        } catch {
+          return undefined
+        }
+      },
+    })
+  } catch {
+    return () => undefined
+  }
+}
+
 /** Mount the desktop control or mobile feature enhancements. */
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => {
@@ -926,7 +956,11 @@ export function apply(ctx: ClientContext): void {
           }
         },
       })
-      return () => { removeCustom(); removeSurface(); style.remove() }
+      // The strand lives in the app's session class, not in the DOM: wrap its
+      // prototype so an open the app discarded is re-opened in a round trip,
+      // and report who invalidated it when a round trip is not enough.
+      const stopOpenGuard = installSessionOpenGuardSafely(ctx)
+      return () => { removeCustom(); removeSurface(); stopOpenGuard(); style.remove() }
     }
     const control = installControl()
     const disposeSlot = ctx.slots.inject('sidebar.footer.action', () => ctx.slots.register<{ wide: boolean }>({ name: 'sidebar.footer.action', id: 'dsh-mobile' }, ({ wide }) => createElement('button', {
