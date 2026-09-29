@@ -546,6 +546,15 @@ export function shouldFillEarlierHistory(hasScrollRange: boolean, atTop: boolean
 export const HISTORY_TOP_RETRY_MS = 1200
 
 /**
+ * Where the gesture listeners sit in the event path.
+ *
+ * Capture phase, because the app's own touch handling can stop a bubbling
+ * `touchmove` from a transcript row before it ever reaches the scroller the
+ * history binding watches.
+ */
+const HISTORY_TOUCH_OPTIONS: AddEventListenerOptions = { passive: true, capture: true }
+
+/**
  * Whether a swipe at the top of the transcript should ask for another page.
  *
  * Only the gesture path uses this: a scroll event carries the position delta
@@ -1004,18 +1013,18 @@ export function installNativeMobileSurface(): () => void {
   const bindHistoryScroller = (next: HTMLElement | undefined): void => {
     if (historyScroller === next) return
     historyScroller?.removeEventListener('scroll', onHistoryScroll)
-    historyScroller?.removeEventListener('touchstart', onHistoryGestureStart)
-    historyScroller?.removeEventListener('touchmove', onHistoryGesture)
-    historyScroller?.removeEventListener('pointerdown', onHistoryGestureStart)
-    historyScroller?.removeEventListener('pointermove', onHistoryGesture)
+    historyScroller?.removeEventListener('touchstart', onHistoryGestureStart, HISTORY_TOUCH_OPTIONS)
+    historyScroller?.removeEventListener('touchmove', onHistoryGesture, HISTORY_TOUCH_OPTIONS)
+    historyScroller?.removeEventListener('pointerdown', onHistoryGestureStart, HISTORY_TOUCH_OPTIONS)
+    historyScroller?.removeEventListener('pointermove', onHistoryGesture, HISTORY_TOUCH_OPTIONS)
     historyScroller = next
     historyPreviousTop = next?.scrollTop ?? 0
     historyGestureLoads = 0
     historyScroller?.addEventListener('scroll', onHistoryScroll, { passive: true })
-    historyScroller?.addEventListener('touchstart', onHistoryGestureStart, { passive: true })
-    historyScroller?.addEventListener('touchmove', onHistoryGesture, { passive: true })
-    historyScroller?.addEventListener('pointerdown', onHistoryGestureStart, { passive: true })
-    historyScroller?.addEventListener('pointermove', onHistoryGesture, { passive: true })
+    historyScroller?.addEventListener('touchstart', onHistoryGestureStart, HISTORY_TOUCH_OPTIONS)
+    historyScroller?.addEventListener('touchmove', onHistoryGesture, HISTORY_TOUCH_OPTIONS)
+    historyScroller?.addEventListener('pointerdown', onHistoryGestureStart, HISTORY_TOUCH_OPTIONS)
+    historyScroller?.addEventListener('pointermove', onHistoryGesture, HISTORY_TOUCH_OPTIONS)
   }
   const animateNavigation = (event: MouseEvent): void => {
     if (!(event.target instanceof Element)) return
