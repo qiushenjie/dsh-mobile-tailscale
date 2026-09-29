@@ -61,6 +61,15 @@ export const STUCK_VIEW_RECONNECT_GAPS_MS: readonly number[] = [0, 1_200, 3_000,
 /** Rebuilds allowed before only the reload is left. */
 export const STUCK_VIEW_MAX_RECONNECTS = STUCK_VIEW_RECONNECT_GAPS_MS.length
 
+/**
+ * How long the app's own re-open gets before carriers start being rebuilt.
+ *
+ * `resync()` answers over the carrier that is already open when the host is
+ * healthy, so this is a blink; it only has to outlast one poll plus the round
+ * trip.
+ */
+export const STUCK_VIEW_RESYNC_GRACE_MS = 1_000
+
 /** How long a rebuilt carrier gets before the page is reloaded. */
 export const STUCK_VIEW_RELOAD_AFTER_MS = 30_000
 
@@ -116,7 +125,7 @@ export interface StuckViewStorage {
 }
 
 /** What the watch was doing when it reported. */
-export type StuckViewPhase = 'detected' | 'reconnect' | 'reload' | 'recovered' | 'gave-up'
+export type StuckViewPhase = 'detected' | 'resync' | 'reconnect' | 'reload' | 'recovered' | 'gave-up'
 
 /** One report about a view that would not open. */
 export interface StuckViewRecord {
@@ -135,6 +144,8 @@ export interface StuckViewRecord {
   attempt?: number
   /** Sockets the rebuild closed, on `reconnect`. */
   closed?: number
+  /** Sessions the app was asked to re-open, on `resync`. */
+  resynced?: number
   sockets: SocketWatchStats | null
   pageFetch: PageFetchStats | null
 }
@@ -156,6 +167,11 @@ export interface StuckViewHost {
   online?: () => boolean
   stalled?: () => boolean
   delayMs?: number
+  /**
+   * Ask the app to re-open sessions it reports as loading. Returns how many it
+   * was asked to re-open; zero means the socket rebuild should start at once.
+   */
+  softResync?: () => number
   reconnectGapsMs?: readonly number[]
   maxReconnects?: number
   reloadAfterMs?: number
@@ -208,6 +224,7 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
   if (doc === undefined) return () => undefined
   const now = host.now ?? ((): number => Date.now())
   const delayMs = host.delayMs ?? STUCK_VIEW_DELAY_MS
+  const softResync = host.softResync
   const reconnectGaps = host.reconnectGapsMs ?? STUCK_VIEW_RECONNECT_GAPS_MS
   const maxReconnects = host.maxReconnects ?? STUCK_VIEW_MAX_RECONNECTS
   const reloadAfterMs = host.reloadAfterMs ?? STUCK_VIEW_RELOAD_AFTER_MS
@@ -236,12 +253,13 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
   let reconnects = 0
   let nextReconnectAt = 0
   let gaveUp = false
+  let softResynced = false
 
   const report = (
     phase: StuckViewPhase,
     stuckMs: number,
     hint: string | null,
-    extra: { attempt?: number; closed?: number } = {},
+    extra: { attempt?: number; closed?: number; resynced?: number } = {},
   ): void => {
     const record: StuckViewRecord = {
       kind: 'stuck-view',
@@ -258,6 +276,7 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
     }
     if (extra.attempt !== undefined) record.attempt = extra.attempt
     if (extra.closed !== undefined) record.closed = extra.closed
+    if (extra.resynced !== undefined) record.resynced = extra.resynced
     send(endpoint, JSON.stringify(record))
   }
 
@@ -302,6 +321,7 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
     reconnects = 0
     nextReconnectAt = 0
     gaveUp = false
+    softResynced = false
   }
 
   const tick = (): void => {
@@ -331,6 +351,18 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
     }
     // Without a network there is nothing to rebuild and no page to reload.
     if (!online()) return
+    // The app's own retry first: re-opening on the carrier that is already up
+    // costs a round trip, while rebuilding carriers costs the app every
+    // subscription it holds (measured at 7-11 s on the device).
+    if (!softResynced) {
+      softResynced = true
+      const resynced = softResync?.() ?? 0
+      if (resynced > 0) {
+        report('resync', stuckMs, hint, { resynced })
+        nextReconnectAt = delayMs + STUCK_VIEW_RESYNC_GRACE_MS
+        return
+      }
+    }
     if (reconnects < maxReconnects && stuckMs >= nextReconnectAt) {
       reconnects += 1
       // 2 s, then 3.2 s, 5 s and 8 s into the stall: the second rebuild is the

@@ -127,6 +127,7 @@ function harness(options: {
   reconnect?: () => number
   sockets?: () => SocketWatchStats | undefined
   stalled?: () => boolean
+  softResync?: () => number
   storage?: StuckViewStorage
   turns?: number | (() => number)
   online?: boolean
@@ -154,6 +155,7 @@ function harness(options: {
     maxReconnects: options.maxReconnects ?? 4,
     reloadAfterMs: options.reloadAfterMs ?? 30_000,
     ...(options.stalled === undefined ? {} : { stalled: options.stalled }),
+    ...(options.softResync === undefined ? {} : { softResync: options.softResync }),
     online: () => options.online ?? true,
   })
   const phases = (): string[] => records.map(record => record.phase)
@@ -260,6 +262,35 @@ describe('installStuckViewWatch', () => {
     test.timers.tick()
     expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', attempt: 4, stuckMs: 8_000 })
     expect(test.reloads()).toBe(0)
+  })
+
+  it('asks the app to re-open the view first, and rebuilds only if it would not', () => {
+    const resyncs: number[] = []
+    const test = harness({ softResync: () => { resyncs.push(resyncs.length + 1); return 1 } })
+    test.timers.tick()
+    test.time.advance(2_000)
+    test.timers.tick()
+    expect(test.records.map(record => [record.phase, record.stuckMs, record.resynced])).toEqual([
+      ['detected', 2_000, undefined],
+      ['resync', 2_000, 1],
+    ])
+    expect(resyncs).toHaveLength(1)
+    // The carrier stays up for the grace period: re-opening on it is a round trip.
+    test.time.advance(999)
+    test.timers.tick()
+    expect(test.records.filter(record => record.phase === 'reconnect')).toHaveLength(0)
+    test.time.advance(1)
+    test.timers.tick()
+    expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', attempt: 1, stuckMs: 3_000 })
+    expect(resyncs).toHaveLength(1)
+  })
+
+  it('rebuilds at once when the app has no session to re-open', () => {
+    const test = harness({ softResync: () => 0 })
+    test.timers.tick()
+    test.time.advance(2_000)
+    test.timers.tick()
+    expect(test.records.map(record => record.phase)).toEqual(['detected', 'reconnect'])
   })
 
   it('stops rebuilding and reloads thirty seconds into the stall', () => {

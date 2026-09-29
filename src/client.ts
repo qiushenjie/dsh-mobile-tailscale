@@ -1,9 +1,17 @@
 import { createElement } from 'react'
 import { installNativeMobileSurface, NATIVE_MOBILE_STYLES } from './native-mobile.js'
+import { resyncLoadingSessions } from './session-resync.js'
 
 interface ClientContext {
   effect(effect: () => void | (() => void), label?: string): void
   get(name: 'connection'): MobileConnectionHandle
+  /**
+   * The app's session service, read opportunistically — see
+   * {@link resyncLoadingSessions}. Deliberately not declared in `inject`: a hard
+   * dependency would keep this client half from loading at all on an app build
+   * that names the service differently.
+   */
+  get(name: 'sessions'): unknown
   slots: {
     inject(key: string, callback: () => (() => void)): () => void
     register<Props>(options: { name: string; id: string; order?: number; label?: string }, component: (props: Props) => unknown): () => void
@@ -883,7 +891,18 @@ export function apply(ctx: ClientContext): void {
     document.head.append(style)
     if (!desktop) {
       const removeCustom = installCustomAssets()
-      const removeSurface = installNativeMobileSurface()
+      const removeSurface = installNativeMobileSurface({
+        // Resolved per stall, not at mount: the session service may register
+        // after this surface does, and an app build without it must still fall
+        // back to the socket rebuild.
+        resyncLoadingSessions: () => {
+          try {
+            return resyncLoadingSessions(ctx.get('sessions'))
+          } catch {
+            return 0
+          }
+        },
+      })
       return () => { removeCustom(); removeSurface(); style.remove() }
     }
     const control = installControl()

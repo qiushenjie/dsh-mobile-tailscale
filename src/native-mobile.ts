@@ -733,8 +733,19 @@ export function isMenuSearchFocus(target: Element): boolean {
   return target.closest('[role="menu"]') !== null
 }
 
+/** What the caller can lend the surface, when the running app has it. */
+export interface NativeMobileSurfaceOptions {
+  /**
+   * Ask the app to re-open sessions it reports as loading, returning how many
+   * it was asked to re-open. See {@link resyncLoadingSessions}.
+   */
+  resyncLoadingSessions?: () => number
+}
+
 /** Add mobile semantics without replacing feature trees. */
-export function installNativeMobileSurface(): () => void {
+export function installNativeMobileSurface(
+  options: NativeMobileSurfaceOptions = {},
+): () => void {
   document.documentElement.classList.add('dsh-native-mobile-active')
   const setInputMode = (mode: 'keyboard' | 'touch'): void => {
     document.documentElement.dataset.dshMobileInput = mode
@@ -1282,6 +1293,7 @@ export function installNativeMobileSurface(): () => void {
     pageStats: pageFetchStats,
     reconnect: reconnectSockets,
     turns: () => document.querySelectorAll('[data-chat-turn]').length,
+    ...(options.resyncLoadingSessions === undefined ? {} : { softResync: options.resyncLoadingSessions }),
   })
   sync()
   return () => {
