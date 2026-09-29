@@ -65,6 +65,10 @@ interface Harness {
   readonly service: () => unknown
   readonly rows: SessionOpenRecord[]
   readonly stop: () => void
+  /** The manager's id-to-instance map, as the app hands it out and drops from it. */
+  readonly live: Map<string, FakeSession>
+  /** The session ids the guard asked the app's navigation to re-open. */
+  readonly asked: string[]
 }
 
 /**
@@ -72,16 +76,28 @@ interface Harness {
  * page load, so tests must not share it (a mark from an earlier test would
  * leave that test's wrappers — and its telemetry — in charge).
  */
-function newSession(): FakeSession {
+function newSession(id = 'session-1'): FakeSession {
   const Fresh = class extends FakeSession {}
-  return new Fresh('session-1')
+  return new Fresh(id)
 }
 
-function harness(shape: 'session' | 'empty' | 'array' | 'none' = 'session', held?: FakeSession): Harness {
+interface HarnessOptions {
+  /** Whether the app's navigation accepts the re-open; it always gets asked. */
+  reopenAccepted?: boolean
+  maxReselects?: number
+}
+
+function harness(
+  shape: 'session' | 'empty' | 'array' | 'none' = 'session',
+  held?: FakeSession,
+  options: HarnessOptions = {},
+): Harness {
   const session = held ?? newSession()
   const rows: SessionOpenRecord[] = []
+  const asked: string[] = []
+  const live = new Map<string, FakeSession>([[session.sessionId, session]])
   const service = (): unknown => {
-    if (shape === 'session') return { manager: { sessions: new Map([[session.sessionId, session]]) } }
+    if (shape === 'session') return { manager: { sessions: live } }
     if (shape === 'empty') return { manager: { sessions: new Map() } }
     if (shape === 'array') return { manager: { sessions: [] } }
     return undefined
@@ -89,9 +105,14 @@ function harness(shape: 'session' | 'empty' | 'array' | 'none' = 'session', held
   const stop = installSessionOpenGuard({
     sessions: service,
     endpoint: '/__dsh-mobile/telemetry',
+    reopenSession: (sessionId) => {
+      asked.push(sessionId)
+      return options.reopenAccepted ?? true
+    },
+    ...(options.maxReselects === undefined ? {} : { maxReselects: options.maxReselects }),
     send: (_endpoint, payload) => { rows.push(JSON.parse(payload) as SessionOpenRecord) },
   })
-  return { session, service, rows, stop }
+  return { session, service, rows, stop, live, asked }
 }
 
 beforeEach(() => {
@@ -185,6 +206,53 @@ describe('installSessionOpenGuard', () => {
     expect(invalidated).toHaveLength(1)
     expect(invalidated[0]).toMatchObject({ by: 'dispose', sessionId: 'session-1' })
     expect(typeof invalidated[0]?.stack).toBe('string')
+    stop()
+  })
+
+  it('asks the app to re-open a session whose instance it has already retired', async () => {
+    const { session, rows, live, asked, stop } = harness()
+    // The main view's navigation was aborted: the retain was released, the scope
+    // retired, and the manager dropped the instance the phone is still rendering.
+    session.stranded = true
+    live.delete(session.sessionId)
+    await session.open()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(asked).toEqual(['session-1'])
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: 'session-open', phase: 'reselect', sessionId: 'session-1', repairs: 1 })
+    expect(rows[0]?.mode).toBe('direct')
+    // The orphan itself is left alone: opening it again only waits on a carrier
+    // that is gone, which is the loop the device sat in for thirty seconds.
+    expect(session.opens).toBe(1)
+    stop()
+  })
+
+  it('repairs the retired instance in place when the app refuses to re-open it', async () => {
+    const { session, rows, live, asked, stop } = harness('session', undefined, { reopenAccepted: false })
+    session.stranded = true
+    live.delete(session.sessionId)
+    await session.open()
+    await vi.advanceTimersByTimeAsync(1)
+    // Asked once, refused, and not asked again; the in-place repair takes over
+    // and spends its own budget.
+    expect(asked).toEqual(['session-1'])
+    expect(rows.filter((row) => row.phase === 'stranded')).toHaveLength(2)
+    expect(session.opens).toBe(3)
+    stop()
+  })
+
+  it('re-opens a retired session from the app only up to its own cap', async () => {
+    const { session, rows, live, asked, stop } = harness('session', undefined, { maxReselects: 1 })
+    session.stranded = true
+    live.delete(session.sessionId)
+    await session.open()
+    await vi.advanceTimersByTimeAsync(1)
+    // Budget spent, so the next strand falls back to the in-place repair.
+    await session.open()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(asked).toEqual(['session-1'])
+    expect(rows.filter((row) => row.phase === 'reselect')).toHaveLength(1)
+    expect(rows.filter((row) => row.phase === 'stranded')).toHaveLength(2)
     stop()
   })
 

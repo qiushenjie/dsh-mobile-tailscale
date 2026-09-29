@@ -51,6 +51,19 @@ export const SESSION_OPEN_GUARD_NO_FRAME_MS = 1_500
  */
 export const SESSION_OPEN_GUARD_MAX_REPAIRS = 2
 
+/**
+ * App-level re-selections allowed per sessionId per page load.
+ *
+ * When the instance the phone renders is no longer the one the app hands out for
+ * that id — the main view's retain was aborted, so the scope was retired and the
+ * instance disposed — the only repair that can work is the app's own "open this
+ * session", the call the sidebar makes on a tap. It is idempotent and cheap, but
+ * it does move the main view, so it is budgeted separately from the in-place
+ * repairs and a little more generously: the device showed the same session
+ * stranded twice within three seconds.
+ */
+export const SESSION_OPEN_GUARD_MAX_RESELECTS = 6
+
 /** Telemetry rows allowed per page load; a storm must not fill the log. */
 export const SESSION_OPEN_GUARD_TELEMETRY_LIMIT = 12
 
@@ -80,7 +93,7 @@ const PROTOTYPE_MARK = '__dshMobileSessionOpenGuard__'
 const UNKNOWN_SESSION_ID = 'unknown'
 
 /** Which half of the strand a row describes. */
-export type SessionOpenPhase = 'stranded' | 'no-frame' | 'invalidated'
+export type SessionOpenPhase = 'stranded' | 'no-frame' | 'invalidated' | 'reselect'
 
 /** The method that bumped the generation while a session was loading. */
 export type SessionInvalidator = 'dispose' | 'resync'
@@ -121,7 +134,15 @@ export interface GuardableSession {
 /** The app's `sessions` service, as far as this guard reaches into it. */
 export interface SessionOpenGuardService {
   manager?: {
-    sessions?: { values?: () => Iterable<GuardableSession | undefined> }
+    /**
+     * The app's id-to-instance map. `get` is what tells a live instance from one
+     * the app has already retired: the retired instance is no longer the value
+     * under its own id, and nothing will ever open it again.
+     */
+    sessions?: {
+      get?: (sessionId: string) => unknown
+      values?: () => Iterable<GuardableSession | undefined>
+    }
   }
 }
 
@@ -129,6 +150,13 @@ export interface SessionOpenGuardService {
 export interface SessionOpenGuardOptions {
   /** The app's `sessions` service, resolved lazily: it may register after mount. */
   sessions: () => unknown
+  /**
+   * The app's own "open this session in the main view", normally
+   * {@link reselectSession} over `ctx.get('uiWorkspace')`. Called when the
+   * instance the phone renders is no longer the one the app hands out for that
+   * id; returns whether the app could be asked.
+   */
+  reopenSession?: (sessionId: string) => boolean
   endpoint?: string
   send?: (endpoint: string, payload: string) => void
   now?: () => number
@@ -138,6 +166,7 @@ export interface SessionOpenGuardOptions {
   clearInterval?: (handle: number) => void
   noFrameMs?: number
   maxRepairs?: number
+  maxReselects?: number
   telemetryLimit?: number
   armIntervalMs?: number
   armAttempts?: number
@@ -174,6 +203,7 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   const endpoint = options.endpoint ?? TELEMETRY_ENDPOINT
   const noFrameMs = options.noFrameMs ?? SESSION_OPEN_GUARD_NO_FRAME_MS
   const maxRepairs = options.maxRepairs ?? SESSION_OPEN_GUARD_MAX_REPAIRS
+  const maxReselects = options.maxReselects ?? SESSION_OPEN_GUARD_MAX_RESELECTS
   const telemetryLimit = options.telemetryLimit ?? SESSION_OPEN_GUARD_TELEMETRY_LIMIT
   const armIntervalMs = options.armIntervalMs ?? SESSION_OPEN_GUARD_ARM_INTERVAL_MS
   const armAttempts = options.armAttempts ?? SESSION_OPEN_GUARD_ARM_ATTEMPTS
@@ -184,6 +214,10 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   const repairs = new Map<string, number>()
   /** Sessions already asked to `resync()`, per page load. */
   const resynced = new Set<string>()
+  /** App-level re-selections the app accepted, per sessionId, for this page load. */
+  const reselects = new Map<string, number>()
+  /** Sessions the app would not re-open; one refusal ends the app-level path. */
+  const reselectRefused = new Set<string>()
   /** When each session last entered a pass, for `waitedMs`. */
   const loadingSince = new Map<string, number>()
   let sent = 0
@@ -277,6 +311,35 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
     }
   }
 
+  /**
+   * Whether the app has already retired this instance.
+   *
+   * The main view holds a session by retaining it; when a fast switch aborts the
+   * navigation, the retain is released, the scope retires, and the manager drops
+   * the instance. That instance is what the phone keeps rendering, and it can
+   * never open again — its transport belongs to a connection generation that is
+   * gone. The managers map is the only place that says so.
+   * @param session - The instance the stranded pass ran on.
+   * @param sessionId - The id it was published under.
+   * @returns True when the app no longer hands this instance out for that id.
+   */
+  const isRetired = (session: GuardableSession, sessionId: string): boolean => {
+    if (sessionId === UNKNOWN_SESSION_ID) return false
+    let service: unknown
+    try {
+      service = options.sessions()
+    } catch {
+      return false
+    }
+    const live = (service as SessionOpenGuardService | undefined)?.manager?.sessions
+    if (live === undefined || typeof live.get !== 'function') return false
+    try {
+      return live.get(sessionId) !== session
+    } catch {
+      return false
+    }
+  }
+
   /** The live sessions the app is holding, when the service has the shape we know. */
   const liveSessions = (): GuardableSession[] => {
     let service: unknown
@@ -345,6 +408,12 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
    * and no open is scheduled. Repairing means clearing the promise the settled
    * pass already cleared (so `open()` cannot return it) and asking the app to
    * open again on the carrier that is up.
+   *
+   * One instance cannot be repaired that way at all: the retired one. Its
+   * transport belongs to a connection generation that is gone, so every pass on
+   * it — including one this guard starts — hangs until something kills it, which
+   * is exactly the loop the device showed. For that case the repair is the app's
+   * own navigation instead, which retains a current instance for the id.
    */
   const repairStranded = (
     session: GuardableSession,
@@ -356,19 +425,53 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
     if (resyncedThisPass) return
     if (isRemoved(session)) return
     if (!isLoading(session)) return
-    if (!isStaleOpenPromise(session, pass)) return
-    if (session.open === undefined) return
+    const retired = isRetired(session, sessionId)
+    const canReopen = session.open !== undefined
+    // A live instance is repaired only when its own pass settled without opening
+    // it; a retired one is repaired whenever it is still loading, because the pass
+    // it may be waiting on belongs to a dead generation. Either way an open has to
+    // be available, or there is nothing to hand the repair to.
+    const stranded = isStaleOpenPromise(session, pass) && canReopen
+    const canReselect = retired && options.reopenSession !== undefined
+    if (!canReselect && !stranded) return
+    const mode = modeOf(session)
+    if (canReselect) {
+      const asked = reselects.get(sessionId) ?? 0
+      if (asked < maxReselects && !reselectRefused.has(sessionId)) {
+        let reopened = false
+        try {
+          reopened = options.reopenSession?.(sessionId) === true
+        } catch {
+          reopened = false
+        }
+        if (reopened) {
+          reselects.set(sessionId, asked + 1)
+          loadingSince.set(sessionId, now())
+          report('reselect', sessionId, now() - startedAt, {
+            ...(mode === undefined ? {} : { mode }),
+            repairs: asked + 1,
+          })
+          return
+        }
+        // Asked and refused: the app's navigation is not going to move for this
+        // session, so the in-place repair is what is left, and asking again would
+        // only add a call per strand.
+        reselectRefused.add(sessionId)
+      }
+    }
+    if (!stranded) return
+    const reopen = session.open
+    if (reopen === undefined) return
     const spent = repairs.get(sessionId) ?? 0
     if (spent >= maxRepairs) return
     repairs.set(sessionId, spent + 1)
     loadingSince.set(sessionId, now())
-    const mode = modeOf(session)
     report('stranded', sessionId, now() - startedAt, {
       ...(mode === undefined ? {} : { mode }),
       repairs: spent + 1,
     })
     session.openPromise = null
-    session.open()
+    reopen.call(session)
   }
 
   /**

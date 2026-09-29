@@ -1,6 +1,7 @@
 import { createElement } from 'react'
 import { installNativeMobileSurface, NATIVE_MOBILE_STYLES } from './native-mobile.js'
 import { installSessionOpenGuard } from './session-open-guard.js'
+import { reselectSession } from './session-reselect.js'
 import { resyncLoadingSessions } from './session-resync.js'
 
 interface ClientContext {
@@ -13,6 +14,12 @@ interface ClientContext {
    * that names the service differently.
    */
   get(name: 'sessions'): unknown
+  /**
+   * The app's workspace navigation service, read the same opportunistic way —
+   * see {@link reselectSession}. Its `openSession` is what the sidebar calls on a
+   * tap, and it is the only repair for a session whose retain was aborted.
+   */
+  get(name: 'uiWorkspace'): unknown
   slots: {
     inject(key: string, callback: () => (() => void)): () => void
     register<Props>(options: { name: string; id: string; order?: number; label?: string }, component: (props: Props) => unknown): () => void
@@ -883,15 +890,17 @@ div:has(.dsh-mobile-control__trigger){flex-wrap:wrap}
  * @returns A function that stops the arming poll.
  */
 function installSessionOpenGuardSafely(ctx: ClientContext): () => void {
+  const read = (name: 'sessions' | 'uiWorkspace'): unknown => {
+    try {
+      return (ctx.get as (service: string) => unknown)(name)
+    } catch {
+      return undefined
+    }
+  }
   try {
     return installSessionOpenGuard({
-      sessions: () => {
-        try {
-          return ctx.get('sessions')
-        } catch {
-          return undefined
-        }
-      },
+      sessions: () => read('sessions'),
+      reopenSession: sessionId => reselectSession(read('uiWorkspace'), sessionId),
     })
   } catch {
     return () => undefined
