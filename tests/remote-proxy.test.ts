@@ -8,12 +8,14 @@ import {
   type ServerResponse,
 } from 'node:http'
 import { createRequire } from 'node:module'
+import { connect, type Socket } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MOBILE_HISTORY_CONTINUATION_PAGE_MESSAGES } from '../src/history-page-clamp.js'
 import { RemotePassthroughProxy } from '../src/remote-proxy.js'
-import { MOBILE_HISTORY_PAGE_MESSAGES } from '../src/websocket-frames.js'
+import { DEFLATE_EXTENSION, deflateMessage, inflateMessage } from '../src/websocket-deflate.js'
+import { MOBILE_HISTORY_PAGE_MESSAGES, encodeServerFrame, parseFrame, type ParsedFrame } from '../src/websocket-frames.js'
 import { websocketAccept } from '../src/gateway.js'
 import { resolveLiveUpstream } from '../src/upstream.js'
 
@@ -68,6 +70,70 @@ function trackServer(server: HttpServer): { close: () => Promise<void> } {
   const handle = { close: async () => { await new Promise<void>((resolve) => server.close(() => resolve())) } }
   servers.push(handle)
   return handle
+}
+
+interface SocketReader {
+  /** Reads up to and including `marker`, leaving everything after it for the next read. */
+  readonly until: (marker: string) => Promise<string>
+  /** Reads exactly one WebSocket frame, buffering whatever else arrived with it. */
+  readonly frame: () => Promise<ParsedFrame>
+}
+
+/**
+ * One async iterator per socket, shared by every read: mixing `for await` with
+ * `once('data')` on the same socket drops whatever the iterator already
+ * buffered.
+ */
+function reader(socket: Socket): SocketReader {
+  const iterator = socket[Symbol.asyncIterator]()
+  let buffer = Buffer.alloc(0)
+  const fill = async (): Promise<void> => {
+    const next = await iterator.next()
+    if (next.done === true) throw new Error('socket closed while waiting for data')
+    buffer = Buffer.concat([buffer, next.value as Buffer])
+  }
+  return {
+    async until(marker: string): Promise<string> {
+      for (;;) {
+        const end = buffer.indexOf(marker)
+        if (end !== -1) {
+          const text = buffer.subarray(0, end + marker.length).toString('latin1')
+          buffer = buffer.subarray(end + marker.length)
+          return text
+        }
+        await fill()
+      }
+    },
+    async frame(): Promise<ParsedFrame> {
+      for (;;) {
+        const frame = parseFrame(buffer)
+        if (frame !== undefined) {
+          buffer = buffer.subarray(frame.size)
+          return frame
+        }
+        await fill()
+      }
+    },
+  }
+}
+
+/** A masked client frame that carries a compressed (RSV1) message. */
+function compressedClientFrame(payload: Buffer): Buffer {
+  const mask = Buffer.from([0x11, 0x22, 0x33, 0x44])
+  const header = payload.length < 65_536 ? Buffer.allocUnsafe(4) : Buffer.allocUnsafe(10)
+  header[0] = 0x80 | 0x40 | 0x1
+  if (payload.length < 65_536) {
+    header[1] = 0x80 | 126
+    header.writeUInt16BE(payload.length, 2)
+  } else {
+    header[1] = 0x80 | 127
+    header.writeBigUInt64BE(BigInt(payload.length), 2)
+  }
+  const masked = Buffer.from(payload)
+  for (let index = 0; index < masked.length; index += 1) {
+    masked[index] = (masked[index] as number) ^ (mask[index & 3] as number)
+  }
+  return Buffer.concat([header, mask, masked])
 }
 
 interface RecordedRequest {
@@ -401,6 +467,89 @@ describe('RemotePassthroughProxy', () => {
     })
     expect(recordedHost).toEqual([new URL(upstreamOrigin).host])
     expect(recordedOrigin).toEqual([upstreamOrigin])
+  })
+
+  it('accepts the phone\'s permessage-deflate offer itself, and relays compressed frames both ways', async () => {
+    // Both ends here are raw sockets, because that is what the phone and the
+    // mux are. (A `requestHttp` client calls `client.end()`, which half-closes
+    // the connection, and a fake upstream with the default
+    // `allowHalfOpen: false` turns that around into a close the phone sees as
+    // `socket closed before a frame arrived`.)
+    const recordedExtensions: Array<string | undefined> = []
+    const upstreamServer = createHttpServer()
+    let upstreamSocket: Socket | undefined
+    upstreamServer.on('upgrade', (request, socket) => {
+      recordedExtensions.push(request.headers['sec-websocket-extensions'] as string | undefined)
+      upstreamSocket = socket as Socket
+      socket.write([
+        'HTTP/1.1 101 Switching Protocols',
+        'Upgrade: websocket',
+        'Connection: Upgrade',
+        `Sec-WebSocket-Accept: ${websocketAccept(String(request.headers['sec-websocket-key']))}`,
+        '',
+        '',
+      ].join('\r\n'))
+    })
+    const upstreamPort = await listen(upstreamServer)
+    trackServer(upstreamServer)
+
+    const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(`http://127.0.0.1:${upstreamPort}`) })
+    proxies.push(proxy)
+    await proxy.start()
+
+    const proxyPort = Number(new URL(proxy.origin()).port)
+    const phone = connect(proxyPort, '127.0.0.1')
+    try {
+      const onPhone = reader(phone)
+      await once(phone, 'connect')
+      phone.write([
+        'GET /api/events.mux HTTP/1.1',
+        `Host: 127.0.0.1:${proxyPort}`,
+        'Connection: Upgrade',
+        'Upgrade: websocket',
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+        'Sec-WebSocket-Version: 13',
+        'Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits',
+        'Origin: https://qiushenjiemacbookpro.taile854bf.ts.net',
+        '',
+        '',
+      ].join('\r\n'))
+
+      const head = await onPhone.until('\r\n\r\n')
+      expect(head.split('\r\n')[0]).toContain('101')
+      // The offer is answered here: the mux never sees it, and it would have
+      // declined, taking the extension away from the phone that is about to use it.
+      expect(recordedExtensions).toEqual([undefined])
+      expect(head).toContain(`Sec-WebSocket-Extensions: ${DEFLATE_EXTENSION}`)
+
+      const upstream = upstreamSocket as Socket
+      const onUpstream = reader(upstream)
+
+      // Mux → phone: one 4 KiB message arrives as a single compressed RSV1 frame.
+      const snapshot = Buffer.from(JSON.stringify({ type: 'item', payload: 'x'.repeat(4096) }))
+      upstream.write(encodeServerFrame(0x1, snapshot, false))
+      const delivered = await onPhone.frame()
+      expect(delivered.opcode).toBe(0x1)
+      expect(delivered.rsv1).toBe(true)
+      expect(inflateMessage(delivered.payload).equals(snapshot)).toBe(true)
+
+      // Phone → mux: a compressed request arrives as plain JSON, still masked
+      // because the client half of a WebSocket is required to mask.
+      // (`job/list` keeps this judgement on the inflate alone; the history clamp
+      // that reads the inflated request has its own unit coverage.)
+      const request = Buffer.from(JSON.stringify({ type: 'open', streamId: 's-1', endpoint: 'job/list', payload: { args: {} } }))
+      phone.write(compressedClientFrame(deflateMessage(request)))
+      const forwarded = await onUpstream.frame()
+      expect(forwarded.opcode).toBe(0x1)
+      expect(forwarded.rsv1).toBe(false)
+      expect(forwarded.masked).toBe(true)
+      expect(forwarded.payload.equals(request)).toBe(true)
+    } finally {
+      // Tear both sockets down: a live connection keeps `server.close()` from
+      // ever calling back, which shows up as a ten-second hook timeout.
+      phone.destroy()
+      upstreamSocket?.destroy()
+    }
   })
 
   it('refuses the loopback-only admin surface instead of forwarding it', async () => {

@@ -25,6 +25,7 @@
 import { randomBytes } from 'node:crypto'
 import type { Socket } from 'node:net'
 import { Transform, type TransformCallback } from 'node:stream'
+import { deflateMessage, inflateMessage } from './websocket-deflate.js'
 
 /**
  * Messages the phone is allowed to pull per history page. Deliberately small:
@@ -55,11 +56,22 @@ export const MOBILE_HISTORY_PAGE_MESSAGES = 12
 export const MOBILE_HISTORY_TURN_MIN_MESSAGES = 8
 
 const OPCODE_TEXT = 0x1
+const OPCODE_BINARY = 0x2
+const OPCODE_CONTINUATION = 0x0
 /** Client frames are small (open/cancel/uplink); anything larger stays raw. */
 const MAX_REWRITE_PAYLOAD = 64 * 1024
 /** Refuse to buffer an oversized frame header from a client. */
 const MAX_CLIENT_FRAME_BYTES = 4 * 1024 * 1024
 const SESSION_ENDPOINT_PREFIX = 'session/'
+
+/**
+ * Smallest upstream message worth compressing. Below this the deflate framing
+ * costs more than it saves, and RFC 7692 lets a frame stay uncompressed with
+ * RSV1 clear, so control chatter and tiny `item` deltas travel as they do
+ * today. The snapshot item that dominates a phone's switch latency is hundreds
+ * of KB; 1 KiB keeps every such frame in scope.
+ */
+export const SERVER_COMPRESS_MIN_BYTES = 1024
 
 export interface HistoryClampRecord {
   readonly endpoint: string
@@ -131,12 +143,11 @@ export function parseFrame(buffer: Buffer): ParsedFrame | undefined {
   return { fin, rsv1, opcode, masked, payload, size: offset + length }
 }
 
-/** Encode one masked, unfragmented text frame the way a client must send it. */
-export function encodeMaskedTextFrame(text: string): Buffer {
-  const payload = Buffer.from(text, 'utf8')
+/** Encode one masked, unfragmented client frame for any data opcode. */
+function encodeMaskedFrame(opcode: number, payload: Buffer): Buffer {
   const length = payload.length
   const header = length < 126 ? Buffer.allocUnsafe(6) : length < 65_536 ? Buffer.allocUnsafe(8) : Buffer.allocUnsafe(14)
-  header[0] = 0x80 | OPCODE_TEXT
+  header[0] = 0x80 | (opcode & 0x0f)
   let maskOffset: number
   if (length < 126) {
     header[1] = 0x80 | length
@@ -157,6 +168,32 @@ export function encodeMaskedTextFrame(text: string): Buffer {
     body[index] = (payload[index] as number) ^ (mask[index & 3] as number)
   }
   return Buffer.concat([header, body])
+}
+
+/** Encode one masked, unfragmented text frame the way a client must send it. */
+export function encodeMaskedTextFrame(text: string): Buffer {
+  return encodeMaskedFrame(OPCODE_TEXT, Buffer.from(text, 'utf8'))
+}
+
+/**
+ * Encode one unmasked server frame, optionally marking a compressed message
+ * with RSV1. Server frames never carry a mask, and the snapshot payload that
+ * motivates compression is hundreds of KB, so all three length forms matter.
+ */
+export function encodeServerFrame(opcode: number, payload: Buffer, rsv1 = false): Buffer {
+  const length = payload.length
+  const header = length < 126 ? Buffer.allocUnsafe(2) : length < 65_536 ? Buffer.allocUnsafe(4) : Buffer.allocUnsafe(10)
+  header[0] = 0x80 | (rsv1 ? 0x40 : 0x00) | (opcode & 0x0f)
+  if (length < 126) {
+    header[1] = length
+  } else if (length < 65_536) {
+    header[1] = 126
+    header.writeUInt16BE(length, 2)
+  } else {
+    header[1] = 127
+    header.writeBigUInt64BE(BigInt(length), 2)
+  }
+  return Buffer.concat([header, payload])
 }
 
 function requestOf(payload: unknown): Record<string, unknown> | undefined {
@@ -250,16 +287,48 @@ export function clampHistoryRequest(text: string): HistoryClampResult | undefine
   }
 }
 
+function isDataOpcode(opcode: number): boolean {
+  return opcode === OPCODE_TEXT || opcode === OPCODE_BINARY
+}
+
+function isControlOpcode(opcode: number): boolean {
+  return (opcode & 0x08) !== 0
+}
+
+/** One frame of a compressed client message being reassembled. */
+interface Fragment {
+  /** The frame exactly as it arrived, for the raw-passthrough fallback. */
+  readonly raw: Buffer
+  /** Its unmasked payload, for the inflate. */
+  readonly payload: Buffer
+}
+
 /**
  * Rewrites client→upstream frames. Anything it cannot safely parse is passed
  * through verbatim for the rest of the connection: a mis-parse must degrade to
  * today's raw pipe, never to a corrupted mux stream.
+ *
+ * With `deflate` on — the client negotiated permessage-deflate and upstream
+ * frames from this client may carry RSV1 — a compressed message (an RSV1 first
+ * frame plus RSV1-clear continuations) is inflated and re-emitted as one plain
+ * masked frame. Compressed bytes cannot be forwarded verbatim: the upstream mux
+ * declined the extension, so it would read deflate output as JSON and corrupt
+ * the connection. A failed inflate, an oversized buffer or an unexpected frame
+ * mid-message therefore falls back to the class's raw passthrough (see
+ * {@link ClientFrameRewriter.bypass}) — the connection is already lost at that
+ * point, but nothing we emit claims to be a message it is not.
  */
 export class ClientFrameRewriter extends Transform {
   private buffer: Buffer = Buffer.alloc(0)
   private bypassed = false
+  private fragments: Fragment[] | undefined
+  private fragmentOpcode: number = OPCODE_TEXT
+  private fragmentLength = 0
 
-  constructor(private readonly onClamp?: (record: HistoryClampRecord) => void) {
+  constructor(
+    private readonly onClamp?: (record: HistoryClampRecord) => void,
+    private readonly deflate = false,
+  ) {
     super()
   }
 
@@ -287,7 +356,17 @@ export class ClientFrameRewriter extends Transform {
       if (frame === undefined) break
       const consumed = this.buffer.subarray(0, frame.size)
       this.buffer = this.buffer.subarray(frame.size)
-      output.push(this.rewrite(frame, consumed))
+      const rewritten = this.rewrite(frame, consumed)
+      if (rewritten !== undefined) output.push(rewritten)
+      if (this.bypassed) {
+        // A failed inflate cannot be repaired frame by frame; the rest of the
+        // buffered stream is handed on verbatim, exactly like a parse failure.
+        if (this.buffer.length > 0) {
+          output.push(this.buffer)
+          this.buffer = Buffer.alloc(0)
+        }
+        return output
+      }
     }
     return output
   }
@@ -298,7 +377,82 @@ export class ClientFrameRewriter extends Transform {
     callback()
   }
 
-  private rewrite(frame: ParsedFrame, consumed: Buffer): Buffer {
+  private rewrite(frame: ParsedFrame, consumed: Buffer): Buffer | undefined {
+    if (this.fragments !== undefined) return this.continueMessage(frame, consumed)
+    // RFC 6455 requires client frames to be masked; an unmasked RSV1 frame is
+    // not something to guess about, so it keeps the old verbatim path.
+    if (this.deflate && frame.rsv1 && frame.masked && isDataOpcode(frame.opcode)) {
+      this.fragments = [{ raw: consumed, payload: frame.payload }]
+      this.fragmentOpcode = frame.opcode
+      this.fragmentLength = frame.payload.length
+      if (this.fragmentLength > MAX_REWRITE_PAYLOAD) return this.abandonMessage()
+      return frame.fin ? this.finishMessage() : undefined
+    }
+    return this.rewriteText(frame, consumed)
+  }
+
+  /** Accumulate the fragments of one compressed message. */
+  private continueMessage(frame: ParsedFrame, consumed: Buffer): Buffer | undefined {
+    const fragments = this.fragments as Fragment[]
+    // A control frame may legally sit between fragments and keeps its place.
+    if (isControlOpcode(frame.opcode)) return consumed
+    fragments.push({ raw: consumed, payload: frame.payload })
+    if (frame.opcode !== OPCODE_CONTINUATION || frame.rsv1 || !frame.masked) return this.abandonMessage()
+    this.fragmentLength += frame.payload.length
+    if (this.fragmentLength > MAX_REWRITE_PAYLOAD) return this.abandonMessage()
+    return frame.fin ? this.finishMessage() : undefined
+  }
+
+  /** Inflate a completed message and re-emit it as one plain masked frame. */
+  private finishMessage(): Buffer {
+    const fragments = this.fragments as Fragment[]
+    const opcode = this.fragmentOpcode
+    const compressed = fragments.length === 1
+      ? (fragments[0] as Fragment).payload
+      : Buffer.concat(fragments.map(fragment => fragment.payload))
+    let payload: Buffer
+    try {
+      // The upstream mux frame cap bounds the inflate, so a few KB of deflate
+      // cannot be expanded into an unbounded allocation.
+      payload = inflateMessage(compressed, MAX_CLIENT_FRAME_BYTES)
+    } catch {
+      return this.abandonMessage()
+    }
+    this.fragments = undefined
+    this.fragmentOpcode = OPCODE_TEXT
+    this.fragmentLength = 0
+    // A compressed request is still a request: the history clamp applies to
+    // what was inflated, exactly as it does to a plain text frame.
+    const clamped = opcode === OPCODE_TEXT ? clampHistoryRequest(payload.toString('utf8')) : undefined
+    if (clamped !== undefined) {
+      this.onClamp?.(clamped.record)
+      return encodeMaskedTextFrame(clamped.text)
+    }
+    return encodeMaskedFrame(opcode, payload)
+  }
+
+  /**
+   * Give up on a compressed message and stop interpreting the stream.
+   *
+   * The frames themselves go on unchanged, RSV1 and all. That does end the
+   * connection — the mux never agreed to permessage-deflate, so it reads an
+   * RSV1 frame as a protocol error — and that is the point: a message we could
+   * not inflate cannot be turned back into a message, and the alternatives are
+   * worse. Re-emitting the compressed bytes as a plain frame would hand the mux
+   * deflate output to parse as JSON, and dropping them would silently lose an
+   * uplink frame. Nothing downstream is interpreted from here on; the caller
+   * hands the rest of the buffered stream straight through.
+   */
+  private abandonMessage(): Buffer {
+    const fragments = this.fragments ?? []
+    this.fragments = undefined
+    this.fragmentOpcode = OPCODE_TEXT
+    this.fragmentLength = 0
+    this.bypassed = true
+    return Buffer.concat(fragments.map(fragment => fragment.raw))
+  }
+
+  private rewriteText(frame: ParsedFrame, consumed: Buffer): Buffer {
     // Only whole, unmasked-by-us, uncompressed text frames are worth reading,
     // and only when the client actually masked them (RFC 6455 requires it).
     if (!frame.fin || frame.rsv1 || frame.opcode !== OPCODE_TEXT || !frame.masked
@@ -313,7 +467,74 @@ export class ClientFrameRewriter extends Transform {
 }
 
 /**
- * Wire an upgraded socket pair: upstream→client stays a raw pipe, client→
+ * Compresses upstream→client messages once the phone negotiated
+ * permessage-deflate. Only complete single-frame data messages of at least
+ * {@link SERVER_COMPRESS_MIN_BYTES} are compressed: RFC 7692 lets any frame
+ * stay uncompressed with RSV1 clear, so fragmented messages, control frames,
+ * small deltas and anything this class cannot parse confidently pass through
+ * byte for byte. Client→upstream never flows through here.
+ */
+export class ServerFrameCompressor extends Transform {
+  private buffer: Buffer = Buffer.alloc(0)
+  private bypassed = false
+
+  /** True once the compressor gave up and became a passthrough. */
+  get bypass(): boolean {
+    return this.bypassed
+  }
+
+  /** Consume a chunk and return the bytes to forward, in order. */
+  pushChunk(chunk: Buffer): Buffer[] {
+    if (this.bypassed) return chunk.length === 0 ? [] : [chunk]
+    if (chunk.length === 0) return []
+    this.buffer = this.buffer.length === 0 ? chunk : Buffer.concat([this.buffer, chunk])
+    const output: Buffer[] = []
+    while (this.buffer.length > 0) {
+      let frame: ParsedFrame | undefined
+      try {
+        frame = parseFrame(this.buffer)
+      } catch {
+        // An upstream frame this parser refuses (today: larger than the 4 MiB
+        // inspect cap) stays uncompressed; the client reads it fine, because a
+        // frame without RSV1 is an ordinary message under the extension too.
+        this.bypassed = true
+        output.push(this.buffer)
+        this.buffer = Buffer.alloc(0)
+        return output
+      }
+      if (frame === undefined) break
+      const consumed = this.buffer.subarray(0, frame.size)
+      this.buffer = this.buffer.subarray(frame.size)
+      output.push(this.compress(frame, consumed))
+    }
+    return output
+  }
+
+  /** @inheritdoc */
+  override _transform(chunk: Buffer, _encoding: BufferEncoding, callback: TransformCallback): void {
+    for (const frame of this.pushChunk(chunk)) this.push(frame)
+    callback()
+  }
+
+  private compress(frame: ParsedFrame, consumed: Buffer): Buffer {
+    if (!frame.fin || frame.rsv1 || !isDataOpcode(frame.opcode) || frame.payload.length < SERVER_COMPRESS_MIN_BYTES) {
+      return consumed
+    }
+    return encodeServerFrame(frame.opcode, deflateMessage(frame.payload), true)
+  }
+}
+
+/** Options for {@link relayUpgradedWebSocket}. */
+export interface RelayOptions {
+  /** Called for every history request the rewriter clamped. */
+  readonly onClamp?: (record: HistoryClampRecord) => void
+  /** True once permessage-deflate was negotiated with the client. */
+  readonly deflate?: boolean
+}
+
+/**
+ * Wire an upgraded socket pair: upstream→client goes straight to the client
+ * (or through a {@link ServerFrameCompressor} when `deflate` is on), client→
  * upstream goes through {@link ClientFrameRewriter}.
  *
  * `head` is the data that arrived with the upgrade request, so it must be
@@ -324,9 +545,9 @@ export function relayUpgradedWebSocket(
   client: Socket,
   upstream: Socket,
   head: Buffer,
-  onClamp?: (record: HistoryClampRecord) => void,
+  options?: RelayOptions,
 ): ClientFrameRewriter {
-  const rewriter = new ClientFrameRewriter(onClamp)
+  const rewriter = new ClientFrameRewriter(options?.onClamp, options?.deflate === true)
   if (head.length > 0) {
     for (const chunk of rewriter.pushChunk(head)) upstream.write(chunk)
   }
@@ -335,7 +556,11 @@ export function relayUpgradedWebSocket(
   // the connection's lifetime instead.
   client.setTimeout(0)
   upstream.setTimeout(0)
-  upstream.pipe(client)
+  if (options?.deflate === true) {
+    upstream.pipe(new ServerFrameCompressor()).pipe(client)
+  } else {
+    upstream.pipe(client)
+  }
   client.pipe(rewriter).pipe(upstream)
   client.resume()
   return rewriter

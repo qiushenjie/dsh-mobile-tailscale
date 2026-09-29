@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-tailscale",
-  "version": "0.7.4",
+  "version": "0.8.0",
   "private": false,
   "description": "DeepSeek Harness 移动端适配插件：通过 Tailscale Serve 让同一 tailnet 里的手机浏览器安全访问电脑上的 DSH。",
   "type": "module",
@@ -60,7 +60,8 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "prepack": "npm run check:version && npm run build",
-    "verify": "npm run check:version && npm run typecheck && npm run test && npm run build && npm pack --dry-run"
+    "verify": "npm run check:version && npm run typecheck && npm run test && npm run build && npm run check:bundle && npm pack --dry-run",
+    "check:bundle": "node ./scripts/check-bundle.mjs"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

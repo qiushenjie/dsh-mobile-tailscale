@@ -57,6 +57,7 @@ import {
 } from './version.js'
 import { addressAllowed, isLoopbackAddress, type ParsedCidr, RequestTrustPolicy } from './network.js'
 import { relayUpgradedWebSocket } from './websocket-frames.js'
+import { DEFLATE_EXTENSION, offersPerMessageDeflate } from './websocket-deflate.js'
 import { clampHistoryPageBody, HISTORY_PAGE_PATH, HistoryPageBudget } from './history-page-clamp.js'
 import type { DeviceStore } from './storage.js'
 import { listComputerImages, readComputerImage } from './computer-images.js'
@@ -2010,7 +2011,7 @@ export class MobileAccessGateway {
     }
   }
 
-  private async readUpgradeResponse(upstream: Socket, expectedAccept: string): Promise<{ header: string; remainder: Buffer }> {
+  private async readUpgradeResponse(upstream: Socket, expectedAccept: string, deflate: boolean): Promise<{ header: string; remainder: Buffer }> {
     return new Promise((resolve, reject) => {
       let buffer = Buffer.alloc(0)
       const failed = (error: Error): void => { cleanup(); reject(error) }
@@ -2059,7 +2060,10 @@ export class MobileAccessGateway {
         const protocol = selected.get('sec-websocket-protocol')
         const extensions = selected.get('sec-websocket-extensions')
         if (protocol !== undefined) output.push(`Sec-WebSocket-Protocol: ${protocol}`)
+        // The offer was never passed upstream, so any upstream extension would
+        // be a surprise; ours is only advertised while the upstream has none.
         if (extensions !== undefined) output.push(`Sec-WebSocket-Extensions: ${extensions}`)
+        else if (deflate) output.push(`Sec-WebSocket-Extensions: ${DEFLATE_EXTENSION}`)
         output.push('Referrer-Policy: no-referrer', 'X-Content-Type-Options: nosniff', '', '')
         resolve({ header: output.join('\r\n'), remainder: buffer.subarray(end + 4) })
       }
@@ -2152,16 +2156,18 @@ export class MobileAccessGateway {
       ]
       if (upstreamCookie !== undefined) requestLines.push(`Cookie: ${upstreamCookie}`)
       const protocol = headerValue(request.headers, 'sec-websocket-protocol')
-      const extensions = headerValue(request.headers, 'sec-websocket-extensions')
       if (protocol !== undefined) requestLines.push(`Sec-WebSocket-Protocol: ${protocol}`)
-      if (extensions !== undefined) requestLines.push(`Sec-WebSocket-Extensions: ${extensions}`)
+      // The client's `Sec-WebSocket-Extensions` is deliberately not forwarded:
+      // the upstream mux must stay plain, and the gateway accepts the offer on
+      // its own behalf (see the 101 response below).
+      const deflate = offersPerMessageDeflate(headerValue(request.headers, 'sec-websocket-extensions'))
       requestLines.push('', '')
       upstream.write(requestLines.join('\r\n'))
-      const handshake = await this.readUpgradeResponse(upstream, websocketAccept(key))
+      const handshake = await this.readUpgradeResponse(upstream, websocketAccept(key), deflate)
       upstream.setTimeout(0)
       client.write(handshake.header)
       if (handshake.remainder.length > 0) client.write(handshake.remainder)
-      relayUpgradedWebSocket(client, upstream, head)
+      relayUpgradedWebSocket(client, upstream, head, { deflate })
     } catch (error) {
       closeBoth()
       if (error instanceof HttpError) throw error

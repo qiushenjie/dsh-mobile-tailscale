@@ -39,6 +39,7 @@ import {
   websocketAccept,
 } from './gateway.js'
 import { relayUpgradedWebSocket } from './websocket-frames.js'
+import { DEFLATE_EXTENSION, offersPerMessageDeflate } from './websocket-deflate.js'
 import { clampHistoryPageBody, HISTORY_PAGE_PATH, HistoryPageBudget } from './history-page-clamp.js'
 import {
   MAX_TELEMETRY_BODY_BYTES,
@@ -496,20 +497,25 @@ export class RemotePassthroughProxy {
       ]
       if (upstreamCookie !== undefined) requestLines.push(`Cookie: ${upstreamCookie}`)
       const protocol = request.headers['sec-websocket-protocol']
-      const extensions = request.headers['sec-websocket-extensions']
       if (protocol !== undefined) requestLines.push(`Sec-WebSocket-Protocol: ${protocol}`)
-      if (extensions !== undefined) requestLines.push(`Sec-WebSocket-Extensions: ${extensions}`)
+      // The client's `Sec-WebSocket-Extensions` is deliberately not forwarded:
+      // the upstream mux must stay plain, and the proxy accepts the offer on
+      // its own behalf (see the 101 response below).
+      const deflate = offersPerMessageDeflate(request.headers['sec-websocket-extensions'])
       requestLines.push('', '')
       upstreamSocket.write(requestLines.join('\r\n'))
-      const handshake = await this.readUpgradeResponse(upstreamSocket, websocketAccept(key))
+      const handshake = await this.readUpgradeResponse(upstreamSocket, websocketAccept(key), deflate)
       upstreamSocket.setTimeout(0)
       client.write(handshake.header)
       if (handshake.remainder.length > 0) client.write(handshake.remainder)
-      relayUpgradedWebSocket(client, upstreamSocket, head, (record) => {
-        // The opening clamp is the phone's time-to-first-content, so what a
-        // device asked for and what it was granted belongs in the log next to
-        // the frame it sized. Nothing else consumes this record.
-        this.telemetry.append({ at: new Date().toISOString(), kind: 'history-clamp', ...record })
+      relayUpgradedWebSocket(client, upstreamSocket, head, {
+        onClamp: (record) => {
+          // The opening clamp is the phone's time-to-first-content, so what a
+          // device asked for and what it was granted belongs in the log next to
+          // the frame it sized. Nothing else consumes this record.
+          this.telemetry.append({ at: new Date().toISOString(), kind: 'history-clamp', ...record })
+        },
+        deflate,
       })
     } catch (error) {
       // Destroy only the upstream here: the upgrade wiring above still needs
@@ -621,6 +627,7 @@ export class RemotePassthroughProxy {
   private readUpgradeResponse(
     upstream: Socket,
     expectedAccept: string,
+    deflate: boolean,
   ): Promise<{ header: string; remainder: Buffer }> {
     return new Promise((resolve, reject) => {
       let buffer = Buffer.alloc(0)
@@ -670,7 +677,10 @@ export class RemotePassthroughProxy {
         const protocol = selected.get('sec-websocket-protocol')
         const extensions = selected.get('sec-websocket-extensions')
         if (protocol !== undefined) output.push(`Sec-WebSocket-Protocol: ${protocol}`)
+        // The offer was never passed upstream, so any upstream extension would
+        // be a surprise; ours is only advertised while the upstream has none.
         if (extensions !== undefined) output.push(`Sec-WebSocket-Extensions: ${extensions}`)
+        else if (deflate) output.push(`Sec-WebSocket-Extensions: ${DEFLATE_EXTENSION}`)
         output.push('Referrer-Policy: no-referrer', 'X-Content-Type-Options: nosniff', '', '')
         resolve({ header: output.join('\r\n'), remainder: buffer.subarray(end + 4) })
       }

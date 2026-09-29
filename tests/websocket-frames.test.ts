@@ -1,12 +1,17 @@
+import { randomBytes } from 'node:crypto'
 import { connect, createServer, type Socket } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
 import { websocketAccept } from '../src/gateway.js'
+import { deflateMessage, inflateMessage } from '../src/websocket-deflate.js'
 import {
   ClientFrameRewriter,
   MOBILE_HISTORY_PAGE_MESSAGES,
   MOBILE_HISTORY_TURN_MIN_MESSAGES,
+  SERVER_COMPRESS_MIN_BYTES,
+  ServerFrameCompressor,
   clampHistoryRequest,
   encodeMaskedTextFrame,
+  encodeServerFrame,
   parseFrame,
   relayUpgradedWebSocket,
 } from '../src/websocket-frames.js'
@@ -31,6 +36,40 @@ const followFrame = (overrides: Record<string, unknown> = {}): string => JSON.st
 const requestOf = (text: string): Record<string, unknown> => {
   const frame = JSON.parse(text) as { payload: { args: { request: Record<string, unknown> } } }
   return frame.payload.args.request
+}
+
+interface FrameShape {
+  readonly fin?: boolean
+  readonly rsv1?: boolean
+  readonly mask?: boolean
+}
+
+/** A WebSocket frame the real encoders cannot express (RSV1, fragmentation). */
+function buildFrame(opcode: number, payload: Buffer, shape: FrameShape = {}): Buffer {
+  const fin = shape.fin ?? true
+  const rsv1 = shape.rsv1 ?? false
+  const masked = shape.mask ?? false
+  const length = payload.length
+  const headerLength = length < 126 ? 2 : length < 65_536 ? 4 : 10
+  const header = Buffer.allocUnsafe(headerLength + (masked ? 4 : 0))
+  header[0] = (fin ? 0x80 : 0) | (rsv1 ? 0x40 : 0) | (opcode & 0x0f)
+  if (length < 126) {
+    header[1] = (masked ? 0x80 : 0) | length
+  } else if (length < 65_536) {
+    header[1] = (masked ? 0x80 : 0) | 126
+    header.writeUInt16BE(length, 2)
+  } else {
+    header[1] = (masked ? 0x80 : 0) | 127
+    header.writeBigUInt64BE(BigInt(length), 2)
+  }
+  if (!masked) return Buffer.concat([header, payload])
+  const mask = randomBytes(4)
+  mask.copy(header, headerLength)
+  const body = Buffer.allocUnsafe(length)
+  for (let index = 0; index < length; index += 1) {
+    body[index] = (payload[index] as number) ^ (mask[index & 3] as number)
+  }
+  return Buffer.concat([header, body])
 }
 
 describe('history page clamp', () => {
@@ -132,6 +171,21 @@ describe('frame codec', () => {
     }
   })
 
+  it('encodes unmasked server frames with all length forms and an optional RSV1', () => {
+    for (const payload of [Buffer.from('{}'), Buffer.alloc(200, 0x61), Buffer.alloc(70_000, 0x62)]) {
+      const plain = parseFrame(encodeServerFrame(0x1, payload))
+      expect(plain?.masked).toBe(false)
+      expect(plain?.fin).toBe(true)
+      expect(plain?.rsv1).toBe(false)
+      expect(plain?.opcode).toBe(0x1)
+      expect(plain?.payload).toEqual(payload)
+      const compressed = parseFrame(encodeServerFrame(0x2, payload, true))
+      expect(compressed?.rsv1).toBe(true)
+      expect(compressed?.opcode).toBe(0x2)
+      expect(compressed?.payload).toEqual(payload)
+    }
+  })
+
   it('asks for more bytes when a frame is still incomplete', () => {
     const encoded = encodeMaskedTextFrame('hello world')
     for (let length = 0; length < encoded.length; length += 1) {
@@ -189,6 +243,116 @@ describe('client frame rewriter', () => {
     const binary = Buffer.from([0x82, 0x83, 5, 6, 7, 8, 9, 9, 9])
     expect(rewriter.pushChunk(ping)).toEqual([ping])
     expect(rewriter.pushChunk(binary)).toEqual([binary])
+  })
+})
+
+describe('compressed client messages', () => {
+  it('inflates a masked RSV1 message into one plain masked frame', () => {
+    const rewriter = new ClientFrameRewriter(undefined, true)
+    const compressed = deflateMessage(Buffer.from(followFrame(), 'utf8'))
+    const output = rewriter.pushChunk(buildFrame(0x1, compressed, { rsv1: true, mask: true }))
+    expect(output).toHaveLength(1)
+    const parsed = parseFrame(output[0] as Buffer)
+    expect(parsed?.masked).toBe(true)
+    expect(parsed?.rsv1).toBe(false)
+    expect(parsed?.fin).toBe(true)
+    expect(parsed?.opcode).toBe(0x1)
+    // The inflated request still goes through the history clamp.
+    expect(requestOf(parsed?.payload.toString('utf8') ?? '').maxMessages).toBe(MOBILE_HISTORY_PAGE_MESSAGES)
+  })
+
+  it('reassembles a two-fragment compressed message into one frame', () => {
+    const rewriter = new ClientFrameRewriter(undefined, true)
+    const compressed = deflateMessage(Buffer.from(followFrame(), 'utf8'))
+    const half = Math.floor(compressed.length / 2)
+    expect(rewriter.pushChunk(buildFrame(0x1, compressed.subarray(0, half), { rsv1: true, mask: true, fin: false }))).toHaveLength(0)
+    const output = rewriter.pushChunk(buildFrame(0x0, compressed.subarray(half), { mask: true, fin: true }))
+    expect(output).toHaveLength(1)
+    const parsed = parseFrame(output[0] as Buffer)
+    expect(parsed?.rsv1).toBe(false)
+    expect(parsed?.fin).toBe(true)
+    expect(requestOf(parsed?.payload.toString('utf8') ?? '').maxMessages).toBe(MOBILE_HISTORY_PAGE_MESSAGES)
+  })
+
+  it('lets a control frame between fragments take its place in the stream', () => {
+    const rewriter = new ClientFrameRewriter(undefined, true)
+    const text = JSON.stringify({ type: 'cancel', streamId: 'x' })
+    const compressed = deflateMessage(Buffer.from(text, 'utf8'))
+    const half = Math.floor(compressed.length / 2)
+    const ping = buildFrame(0x9, Buffer.from('p'), { mask: true })
+    expect(rewriter.pushChunk(buildFrame(0x1, compressed.subarray(0, half), { rsv1: true, mask: true, fin: false }))).toHaveLength(0)
+    expect(rewriter.pushChunk(ping)).toEqual([ping])
+    const output = rewriter.pushChunk(buildFrame(0x0, compressed.subarray(half), { mask: true, fin: true }))
+    expect(output).toHaveLength(1)
+    expect(parseFrame(output[0] as Buffer)?.payload.toString('utf8')).toBe(text)
+  })
+
+  it('carries a binary message through with its opcode intact', () => {
+    const rewriter = new ClientFrameRewriter(undefined, true)
+    const payload = randomBytes(4096)
+    const output = rewriter.pushChunk(buildFrame(0x2, deflateMessage(payload), { rsv1: true, mask: true }))
+    const parsed = parseFrame(output[0] as Buffer)
+    expect(parsed?.opcode).toBe(0x2)
+    expect(parsed?.rsv1).toBe(false)
+    expect(parsed?.payload).toEqual(payload)
+  })
+
+  it('falls back to raw passthrough when an inflate fails', () => {
+    const rewriter = new ClientFrameRewriter(undefined, true)
+    const garbage = buildFrame(0x1, Buffer.from([0xde, 0xad, 0xbe, 0xef]), { rsv1: true, mask: true })
+    expect(rewriter.pushChunk(garbage)).toEqual([garbage])
+    expect(rewriter.bypass).toBe(true)
+    // Later frames are no longer interpreted at all.
+    const later = encodeMaskedTextFrame('{"type":"cancel"}')
+    expect(rewriter.pushChunk(later)).toEqual([later])
+  })
+
+  it('leaves compressed frames alone when the option is absent', () => {
+    const rewriter = new ClientFrameRewriter()
+    const compressed = buildFrame(0x1, deflateMessage(Buffer.from(followFrame(), 'utf8')), { rsv1: true, mask: true })
+    expect(rewriter.pushChunk(compressed)).toEqual([compressed])
+    expect(rewriter.bypass).toBe(false)
+  })
+})
+
+describe('server frame compressor', () => {
+  it('compresses a large server message and restores it exactly', () => {
+    const compressor = new ServerFrameCompressor()
+    const payload = Buffer.from(JSON.stringify({ type: 'item', value: 'z'.repeat(200 * 1024) }), 'utf8')
+    const output = compressor.pushChunk(encodeServerFrame(0x1, payload))
+    expect(output).toHaveLength(1)
+    const frame = output[0] as Buffer
+    expect(frame.length).toBeLessThan(encodeServerFrame(0x1, payload).length)
+    const parsed = parseFrame(frame)
+    expect(parsed?.rsv1).toBe(true)
+    expect(parsed?.opcode).toBe(0x1)
+    expect(inflateMessage(parsed?.payload as Buffer)).toEqual(payload)
+  })
+
+  it('passes small, fragmented and control frames through byte for byte', () => {
+    const compressor = new ServerFrameCompressor()
+    const small = encodeServerFrame(0x1, Buffer.alloc(SERVER_COMPRESS_MIN_BYTES - 1, 0x61))
+    const ping = encodeServerFrame(0x9, Buffer.alloc(64, 0x62))
+    const fragmentOne = buildFrame(0x1, Buffer.alloc(4096, 0x63), { fin: false })
+    const fragmentTwo = buildFrame(0x0, Buffer.alloc(4096, 0x64), { fin: true })
+    for (const bytes of [small, ping, fragmentOne, fragmentTwo]) {
+      expect(compressor.pushChunk(bytes)).toEqual([bytes])
+    }
+    expect(compressor.bypass).toBe(false)
+  })
+
+  it('reassembles a frame split across chunk boundaries before compressing', () => {
+    const compressor = new ServerFrameCompressor()
+    const payload = Buffer.from(JSON.stringify({ type: 'item', value: 'z'.repeat(50 * 1024) }), 'utf8')
+    const encoded = encodeServerFrame(0x1, payload)
+    const output: Buffer[] = []
+    for (let index = 0; index < encoded.length; index += 1000) {
+      output.push(...compressor.pushChunk(encoded.subarray(index, index + 1000)))
+    }
+    expect(output).toHaveLength(1)
+    const parsed = parseFrame(output[0] as Buffer)
+    expect(parsed?.rsv1).toBe(true)
+    expect(inflateMessage(parsed?.payload as Buffer)).toEqual(payload)
   })
 })
 
@@ -257,13 +421,13 @@ async function nextFrame(entry: Reader): Promise<Buffer> {
  * Two socket pairs: the relay's `client` socket is wired to a phone we drive,
  * its `upstream` socket to an origin we drive and observe.
  */
-async function harness(): Promise<Harness> {
+async function harness(options?: { deflate?: boolean }): Promise<Harness> {
   const phoneLink = await tcpPair()
   const originLink = await tcpPair()
   const phoneReads = collector(phoneLink.near)
   const originReads = collector(originLink.near)
   return {
-    relay: (head: Buffer) => { relayUpgradedWebSocket(phoneLink.far, originLink.far, head) },
+    relay: (head: Buffer) => { relayUpgradedWebSocket(phoneLink.far, originLink.far, head, options) },
     phoneSends: (bytes: Buffer) => { phoneLink.near.write(bytes) },
     originSends: (bytes: Buffer) => { originLink.near.write(bytes) },
     originFrame: () => nextFrame(originReads),
@@ -301,7 +465,7 @@ describe('relay wiring', () => {
     }
   })
 
-  it('passes upstream bytes to the client untouched', async () => {
+  it('leaves upstream bytes untouched when deflate is off', async () => {
     const { relay, originSends, phoneFrame, close } = await harness()
     try {
       relay(Buffer.alloc(0))
@@ -322,6 +486,33 @@ describe('relay wiring', () => {
       relay(encodeMaskedTextFrame(followFrame()))
       const parsed = parseFrame(await originFrame())
       expect(requestOf(parsed?.payload.toString('utf8') ?? '').maxMessages).toBe(MOBILE_HISTORY_PAGE_MESSAGES)
+    } finally {
+      close()
+    }
+  })
+
+  it('relays a negotiated compressed session over real sockets in both directions', async () => {
+    const { relay, phoneSends, originSends, originFrame, phoneFrame, close } = await harness({ deflate: true })
+    try {
+      relay(Buffer.alloc(0))
+
+      // The phone compresses its `session/follow` request with permessage-deflate.
+      phoneSends(buildFrame(0x1, deflateMessage(Buffer.from(followFrame(), 'utf8')), { rsv1: true, mask: true }))
+
+      // The upstream still sees one plain masked frame, with the clamp applied.
+      const rewritten = parseFrame(await originFrame())
+      expect(rewritten?.masked).toBe(true)
+      expect(rewritten?.rsv1).toBe(false)
+      expect(rewritten?.fin).toBe(true)
+      expect(requestOf(rewritten?.payload.toString('utf8') ?? '').maxMessages).toBe(MOBILE_HISTORY_PAGE_MESSAGES)
+
+      // The 200 KB snapshot comes back compressed and inflates to the original.
+      const snapshot = Buffer.from(JSON.stringify({ type: 'item', value: 'z'.repeat(200 * 1024) }), 'utf8')
+      originSends(encodeServerFrame(0x1, snapshot))
+      const returned = parseFrame(await phoneFrame())
+      expect(returned?.rsv1).toBe(true)
+      expect(returned?.opcode).toBe(0x1)
+      expect(inflateMessage(returned?.payload as Buffer)).toEqual(snapshot)
     } finally {
       close()
     }
