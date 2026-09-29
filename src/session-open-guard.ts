@@ -25,13 +25,22 @@
  * Two things answer for it, both where the state actually lives. The first is the
  * hold ({@link holdSessionOpen}): the phone takes a reference of its own as the
  * open starts, so the app's release cannot drop the count to zero mid-open, and
- * gives it back at the next sweep — no socket, no reload, no re-navigation. When
+ * keeps it for the whole loading window — the app's navigation released its own
+ * reference again two seconds into a repaired open on the device, so the phone
+ * only hands the reference back once the session has actually left `loading` —
+ * no socket, no reload, no re-navigation. When
  * the app's own pass still settles with the state at `"loading"` and nobody
  * opening, the guard clears the stale `openPromise` and calls the app's own
  * `open()` again: a round trip, no socket touched — but only once the open has
  * stood for the same four seconds a first frame gets, because a pass settles the
  * instant the app disposes its stream, which is not the same thing as a session
- * that nothing will publish. It also times out a first
+ * that nothing will publish. A disposal observed mid-open shortens that wait
+ * for the killed instance — its pass can never publish, so only the app's own
+ * healthy re-open needs the grace — and once the same-carrier ladder (in-place
+ * rounds, then the app's own navigation) has come up empty, the guard rebuilds
+ * the carrier through the app Connection's own `reconnect()`: on the device
+ * every same-carrier repair failed while a full page reload, which is a fresh
+ * carrier, always opened the session. It also times out a first
  * frame that never arrives and asks the app for its own `resync()`, and it
  * instruments `dispose()`/`resync()` so a device row names what invalidated a
  * session mid-open.
@@ -57,6 +66,28 @@ import { holdSessionOpen, readRetention, type SessionHoldHandle } from './sessio
  * lost frame corrected while the user is watching.
  */
 export const SESSION_OPEN_GUARD_NO_FRAME_MS = 4000
+
+/**
+ * Grace before the first repair after an observed mid-open disposal, and the
+ * cadence of the invalidation fast chain after it.
+ *
+ * The app's own navigation re-opens a session right after the dispose race
+ * (measured 350-1100 ms on the device), so a repair may only fire once that
+ * healthy re-open is absent. But the dispose itself proves the killed pass can
+ * never publish — its generation is gone — so the chain does not wait out a
+ * whole opening frame the way the silent strand does. The same cadence carries
+ * the chain: one in-place round, then the app's own navigation.
+ */
+export const SESSION_OPEN_GUARD_FAST_RECHECK_MS = 2000
+
+/** App-navigation re-selections before the carrier is rebuilt once per session. */
+const RECONNECT_AFTER_RESELECTS = 1
+
+/**
+ * Silence that separates two telemetry bursts: the per-page cap bounds one
+ * incident's rows, and a stall this long after the last one gets a fresh cap.
+ */
+const SESSION_OPEN_GUARD_TELEMETRY_SILENCE_MS = 5 * 60_000
 
 /**
  * No-frame repairs allowed per sessionId per page load. One lost opening frame
@@ -128,7 +159,7 @@ const PROTOTYPE_MARK = '__dshMobileSessionOpenGuard__'
 const UNKNOWN_SESSION_ID = 'unknown'
 
 /** Which half of the strand a row describes. */
-export type SessionOpenPhase = 'hold' | 'handback' | 'stranded' | 'no-frame' | 'invalidated' | 'reselect'
+export type SessionOpenPhase = 'hold' | 'handback' | 'stranded' | 'no-frame' | 'invalidated' | 'reselect' | 'carrier'
 
 /** The method that bumped the generation while a session was loading. */
 export type SessionInvalidator = 'dispose' | 'resync'
@@ -204,6 +235,14 @@ export interface SessionOpenGuardOptions {
    */
   reopenSession?: (sessionId: string) => boolean
   /**
+   * Rebuild the browser's connection to the host — the app Connection service's
+   * own `reconnect()`. Called once per session once the same-carrier ladder
+   * (in-place rounds, then the app's own navigation) has come up empty, because
+   * on the device every same-carrier repair failed while a full page reload —
+   * a fresh carrier — always opened the session.
+   */
+  reconnectCarrier?: () => void
+  /**
    * The phone's own reference to a session that is opening, normally
    * {@link holdSessionOpen} over `ctx.get('sessions')`. This is what keeps the
    * app from retiring — and disposing — a session whose open is in flight.
@@ -218,6 +257,7 @@ export interface SessionOpenGuardOptions {
   setInterval?: (callback: () => void, ms: number) => number
   clearInterval?: (handle: number) => void
   noFrameMs?: number
+  fastRecheckMs?: number
   maxRepairs?: number
   maxNoFrameRepairs?: number
   maxReselects?: number
@@ -257,6 +297,7 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   const send = options.send ?? defaultSend
   const endpoint = options.endpoint ?? TELEMETRY_ENDPOINT
   const noFrameMs = options.noFrameMs ?? SESSION_OPEN_GUARD_NO_FRAME_MS
+  const fastRecheckMs = options.fastRecheckMs ?? SESSION_OPEN_GUARD_FAST_RECHECK_MS
   const maxRepairs = options.maxRepairs ?? SESSION_OPEN_GUARD_MAX_REPAIRS
   const maxNoFrameRepairs = options.maxNoFrameRepairs ?? SESSION_OPEN_GUARD_MAX_NO_FRAME_REPAIRS
   const maxReselects = options.maxReselects ?? SESSION_OPEN_GUARD_MAX_RESELECTS
@@ -281,8 +322,14 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   const reselectRefused = new Set<string>()
   /** Sessions whose stranded repair is waiting out the opening frame's own deadline. */
   const strandRechecks = new Set<string>()
+  /** Instances a mid-open disposal was observed on; their strands get the short gate. */
+  const invalidatedByDispose = new WeakSet<object>()
+  /** Sessions whose carrier was rebuilt once the same-carrier ladder came up empty. */
+  const reconnected = new Set<string>()
   /** When each session last entered a pass, for `waitedMs`. */
   const loadingSince = new Map<string, number>()
+  /** When the last telemetry row went out; the per-page cap becomes per-incident. */
+  let lastSentAt = 0
   let sent = 0
 
   const report = (
@@ -299,7 +346,12 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
       retention?: string | undefined
     } = {},
   ): void => {
-    if (sent >= telemetryLimit) return
+    // The cap bounds one burst, not the page's whole life: a stall minutes
+    // after the last one must be visible again instead of silently unwatched.
+    if (sent >= telemetryLimit) {
+      if (now() - lastSentAt < SESSION_OPEN_GUARD_TELEMETRY_SILENCE_MS) return
+      sent = 0
+    }
     try {
       const record: SessionOpenRecord = {
         kind: 'session-open',
@@ -316,6 +368,7 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
         ...(extra.retention === undefined ? {} : { retention: extra.retention }),
       }
       sent += 1
+      lastSentAt = now()
       send(endpoint, JSON.stringify(record))
     } catch {
       // Telemetry must never surface as an error, and never disturb a repair.
@@ -363,6 +416,21 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   const isLoading = (session: GuardableSession): boolean => {
     try {
       return session.openState === 'loading'
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Whether the session has not started opening yet. A hold can exist in this
+   * state — it is taken inside `open()` before `doOpen` publishes `loading`,
+   * and `resync()` passes through `cold` again while it disposes the old
+   * stream — so the sweep treats it like `loading` rather than handing the
+   * reference back mid-transition.
+   */
+  const isCold = (session: GuardableSession): boolean => {
+    try {
+      return session.openState === 'cold'
     } catch {
       return false
     }
@@ -496,13 +564,19 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   }
 
   /**
-   * Give each held reference back once the app owns the session again.
+   * Give each held reference back once the session has opened and the app owns
+   * it again.
    *
-   * The healthy path hands the reference back on the sweep after the app's own
-   * `retain`, so the phone is never the reason a session stays alive. A session
-   * the app dropped — the aborted-navigation case — keeps the phone's reference
-   * until {@link SESSION_OPEN_GUARD_HOLD_MAX_MS} has passed, because the view that
-   * is already rendering it must finish its open.
+   * The phone keeps its reference for the whole loading window, even once the
+   * app holds one of its own: on the device the app's navigation released its
+   * own reference again two seconds into a repaired open (the retention row
+   * read `0`), retiring and disposing the very pass this guard had just
+   * restarted. "The app holds one" is therefore not "the open is safe". The
+   * healthy path hands the reference back on the first sweep after the session
+   * leaves `loading`/`cold`, so the phone is never the reason a session stays
+   * alive; a session the app dropped — the aborted-navigation case — keeps the
+   * phone's reference until {@link SESSION_OPEN_GUARD_HOLD_MAX_MS} has passed,
+   * because the view that is already rendering it must finish its open.
    */
   const sweepHolds = (): void => {
     if (holds.size === 0) return
@@ -520,11 +594,39 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
         releaseHold(sessionId, 'replaced')
         continue
       }
+      // The grace period bounds every hold, including one for a session the
+      // app keeps referencing while its open never finishes.
+      if (now() - entry.startedAt >= holdMaxMs) {
+        releaseHold(sessionId, 'expired')
+        continue
+      }
+      // While the open has not settled one way or the other, the phone is what
+      // guarantees the instance stays live; an app reference can vanish again.
+      if (isLoading(session) || isCold(session)) continue
       if (!entry.handle.soleHolder()) {
         releaseHold(sessionId, 'app')
         continue
       }
-      if (now() - entry.startedAt >= holdMaxMs) releaseHold(sessionId, 'expired')
+    }
+  }
+
+  /**
+   * Give a session that settled (open or error) a fresh repair budget. The
+   * caps exist to stop a session that cannot open from being repaired in a
+   * loop, not to leave a long-lived page naked: a session that opened once
+   * must be repairable again when it strands hours later.
+   */
+  const resetSettledBudgets = (): void => {
+    for (const session of liveSessions()) {
+      if (isLoading(session) || isCold(session)) continue
+      const sessionId = idOf(session)
+      if (sessionId === UNKNOWN_SESSION_ID) continue
+      repairs.delete(sessionId)
+      noFrameRepairs.delete(sessionId)
+      reselects.delete(sessionId)
+      reselectRefused.delete(sessionId)
+      reconnected.delete(sessionId)
+      invalidatedByDispose.delete(session)
     }
   }
 
@@ -568,6 +670,44 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
       ...(stack === undefined ? {} : { stack }),
       ...retentionField(sessionId),
     })
+    // A mid-open disposal proves the killed pass can never publish: the strand
+    // for this instance gets the short gate instead of the full frame window.
+    if (by === 'dispose' && victim === session) invalidatedByDispose.add(session)
+  }
+
+  /**
+   * Ask the app's own navigation to re-open the session — the sidebar's call,
+   * which retains a fresh instance on a lifetime signal the app never aborts.
+   * Shared by the four-second strand repair and the invalidation fast chain.
+   * @returns whether the app was asked, refused, or the budget/refusal skips it.
+   */
+  const attemptReselect = (
+    session: GuardableSession,
+    sessionId: string,
+    waitedMs: number,
+  ): 'accepted' | 'refused' | 'skipped' => {
+    const asked = reselects.get(sessionId) ?? 0
+    if (asked >= maxReselects || reselectRefused.has(sessionId)) return 'skipped'
+    let reopened = false
+    try {
+      reopened = options.reopenSession?.(sessionId) === true
+    } catch {
+      reopened = false
+    }
+    if (!reopened) {
+      // Asked and refused: the app's navigation is not going to move for this
+      // session, so asking again would only add a call per strand.
+      reselectRefused.add(sessionId)
+      return 'refused'
+    }
+    reselects.set(sessionId, asked + 1)
+    loadingSince.set(sessionId, now())
+    const mode = modeOf(session)
+    report('reselect', sessionId, waitedMs, {
+      ...(mode === undefined ? {} : { mode }),
+      repairs: asked + 1,
+    })
+    return 'accepted'
   }
 
   /**
@@ -582,9 +722,29 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
    * is exactly the loop the device showed. For that case the repair is the app's
    * own navigation instead, which retains a current instance for the id.
    *
-   * Neither repair runs before the open has stood for
-   * {@link SESSION_OPEN_GUARD_NO_FRAME_MS}: what settles a pass this early is the
-   * app disposing its own stream on the way to the next one, not a lost wake-up.
+   * The device also showed the in-place repair failing on instances the app
+   * still hands out: the same session stranded on every repaired pass (each new
+   * pass was silently invalidated by the app's own navigation) while the
+   * instance stayed in the manager map, so `isRetired` never turned true and
+   * the escalation never ran — the two in-place repairs were spent on passes
+   * that could never finish. Once that budget is gone, the repair therefore
+   * escalates to the app's own navigation anyway: it is the sidebar's call,
+   * re-retaining a fresh instance on a lifetime signal the app never aborts.
+   *
+   * Neither repair runs before the open has stood for its gate: a whole
+   * opening frame ({@link SESSION_OPEN_GUARD_NO_FRAME_MS}) normally, or the
+   * short gate ({@link SESSION_OPEN_GUARD_FAST_RECHECK_MS}) for a live instance
+   * whose mid-open disposal was observed — that pass can never publish, so only
+   * the app's own healthy re-open (measured 350-1100 ms) needs the grace. A
+   * retired instance keeps the full window: its strand is checked against a
+   * fresh instance's in-flight open, which deserves the frame it may still be
+   * waiting for.
+   *
+   * When the app's navigation has been asked a few times without the session
+   * opening, the guard rebuilds the carrier once — the connection's own
+   * `reconnect()` — because the device showed every same-carrier repair fail
+   * while a full page reload, which is a fresh carrier, always opened the
+   * session.
    */
   const repairStranded = (
     session: GuardableSession,
@@ -603,7 +763,11 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
     // it may be waiting on belongs to a dead generation. Either way an open has to
     // be available, or there is nothing to hand the repair to.
     const stranded = isStaleOpenPromise(session, pass) && canReopen
-    const canReselect = retired && options.reopenSession !== undefined
+    const spent = repairs.get(sessionId) ?? 0
+    // A retired instance escalates immediately; a live one escalates once its
+    // in-place repairs are spent, because the device showed those repairs
+    // landing on passes the app's navigation kills every time.
+    const canReselect = (retired || spent >= maxRepairs) && options.reopenSession !== undefined
     if (!canReselect && !stranded) return
     // A pass settles the moment the app disposes its stream — measured 20-24 ms
     // into a switch — and that settle lands while the opening frame the view is
@@ -611,10 +775,13 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
     // simply still arriving (297 KB, about 1.1 s on the device) and starts the
     // whole open over: the device showed two such repairs inside 340 ms and no
     // history on screen for the wait that followed. The strand is only real once
-    // the open has stood for as long as an opening frame gets
-    // ({@link SESSION_OPEN_GUARD_NO_FRAME_MS}); until then this looks again.
+    // the open has stood for its gate: the full frame window, or the short gate
+    // for a live instance whose mid-open disposal was observed — that pass can
+    // never publish, so only the app's healthy re-open needs the grace. Until
+    // then this looks again.
+    const gateMs = !retired && invalidatedByDispose.has(session) ? fastRecheckMs : noFrameMs
     const elapsed = now() - startedAt
-    if (elapsed < noFrameMs) {
+    if (elapsed < gateMs) {
       if (strandRechecks.has(sessionId)) return
       strandRechecks.add(sessionId)
       schedule(() => {
@@ -624,38 +791,40 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
         } catch {
           // A repair that throws is still better than a broken app.
         }
-      }, noFrameMs - elapsed)
+      }, gateMs - elapsed)
       return
     }
     const mode = modeOf(session)
     if (canReselect) {
       const asked = reselects.get(sessionId) ?? 0
-      if (asked < maxReselects && !reselectRefused.has(sessionId)) {
-        let reopened = false
+      // Every same-carrier repair failed on the device while a full page reload
+      // — a fresh carrier — always opened the session. Once the app's own
+      // navigation has been asked once without the session opening, rebuild the
+      // carrier before asking again; the reconnect resets the connection
+      // generation the app's streams are built to resume on.
+      if (
+        asked >= RECONNECT_AFTER_RESELECTS
+        && !reconnected.has(sessionId)
+        && options.reconnectCarrier !== undefined
+      ) {
+        reconnected.add(sessionId)
         try {
-          reopened = options.reopenSession?.(sessionId) === true
+          options.reconnectCarrier()
         } catch {
-          reopened = false
+          // The ladder continues without a rebuilt carrier.
         }
-        if (reopened) {
-          reselects.set(sessionId, asked + 1)
-          loadingSince.set(sessionId, now())
-          report('reselect', sessionId, now() - startedAt, {
-            ...(mode === undefined ? {} : { mode }),
-            repairs: asked + 1,
-          })
-          return
-        }
-        // Asked and refused: the app's navigation is not going to move for this
-        // session, so the in-place repair is what is left, and asking again would
-        // only add a call per strand.
-        reselectRefused.add(sessionId)
+        report('carrier', sessionId, now() - startedAt, {
+          ...(mode === undefined ? {} : { mode }),
+        })
+        return
       }
+      if (attemptReselect(session, sessionId, now() - startedAt) === 'accepted') return
+      // Asked and refused, or the budget/refusal skips it: the in-place repair
+      // below is what is left, and asking again would only add a call per strand.
     }
     if (!stranded) return
     const reopen = session.open
     if (reopen === undefined) return
-    const spent = repairs.get(sessionId) ?? 0
     if (spent >= maxRepairs) return
     repairs.set(sessionId, spent + 1)
     loadingSince.set(sessionId, now())
@@ -947,6 +1116,7 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   sweep = scheduleInterval(() => {
     try {
       sweepHolds()
+      resetSettledBudgets()
     } catch {
       // A sweep that throws must not take the app down with it.
     }

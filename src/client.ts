@@ -884,7 +884,7 @@ div:has(.dsh-mobile-control__trigger){flex-wrap:wrap}
  * @returns A function that stops the arming poll and gives every hold back.
  */
 function installSessionOpenGuardSafely(ctx: ClientContext): () => void {
-  const read = (name: 'sessions' | 'uiWorkspace'): unknown => {
+  const read = (name: 'sessions' | 'uiWorkspace' | 'connection'): unknown => {
     try {
       return (ctx.get as (service: string) => unknown)(name)
     } catch {
@@ -896,6 +896,17 @@ function installSessionOpenGuardSafely(ctx: ClientContext): () => void {
       sessions: () => read('sessions'),
       reopenSession: sessionId => reselectSession(read('uiWorkspace'), sessionId),
       holdSession: sessionId => holdSessionOpen(read('sessions'), sessionId),
+      // The app's documented recovery seam: once the same-carrier repairs have
+      // come up empty, rebuild the connection generation the app's streams are
+      // built to resume on — what a full page reload does, without the reload.
+      reconnectCarrier: (): void => {
+        try {
+          const connection = read('connection') as { reconnect?: () => unknown } | undefined
+          if (typeof connection?.reconnect === 'function') connection.reconnect()
+        } catch {
+          // The ladder continues without a rebuilt carrier.
+        }
+      },
     })
   } catch {
     return () => undefined

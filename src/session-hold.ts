@@ -10,10 +10,12 @@
  * rendering it sits on 「载入历史…」 with nothing left to wake it up.
  *
  * The phone therefore takes a reference of its own for exactly that window. It is
- * acquired as the session enters `loading`, and given back as soon as the app
- * holds the session again (or after the guard's bounded grace period), so the
- * app's release can no longer drop the count to zero mid-open. Nothing else is
- * touched: no socket, no reload, no re-navigation.
+ * acquired as the session enters `loading`, and kept until the session has
+ * actually left `loading` and the app holds it again (or until the guard's
+ * bounded grace period): on the device the app's navigation released its own
+ * reference again two seconds into a repaired open, so "the app holds one" does
+ * not mean the open is safe. Nothing else is touched: no socket, no reload, no
+ * re-navigation.
  * @module dsh-mobile-tailscale/session-hold
  */
 

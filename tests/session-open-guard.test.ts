@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   installSessionOpenGuard,
+  SESSION_OPEN_GUARD_FAST_RECHECK_MS,
   SESSION_OPEN_GUARD_HOLD_MAX_MS,
   SESSION_OPEN_GUARD_NO_FRAME_MS,
   type SessionOpenRecord,
@@ -25,6 +26,8 @@ class FakeSession {
   stranded = false
   /** Reproduce a first frame that never arrives: never settle the pass. */
   pending = false
+  /** Reproduce the device's order: the pass settles only after the dispose lands. */
+  deferredStrand = false
   release: (() => void) | undefined
 
   constructor(sessionId: string) {
@@ -45,6 +48,7 @@ class FakeSession {
   async doOpen(): Promise<void> {
     this.openState = 'loading'
     if (this.pending) await new Promise<void>((resolve) => { this.release = resolve })
+    if (this.deferredStrand) await new Promise<void>((resolve) => { setTimeout(resolve, 0) })
     if (this.stranded) return
     this.openState = 'open'
   }
@@ -74,6 +78,8 @@ interface Harness {
   readonly holds: string[]
   /** Why each held reference was given back, in order. */
   readonly handbacks: string[]
+  /** The session ids the guard rebuilt the carrier for. */
+  readonly reconnects: string[]
 }
 
 /**
@@ -96,6 +102,10 @@ interface HarnessOptions {
   soleHolder?: () => boolean
   /** The reference rows the app publishes for the session, when it publishes any. */
   retention?: { referenceCount: number; retainedBy: Record<string, number> }
+  /** Called when the guard rebuilds the carrier; records the id into `reconnects`. */
+  reconnect?: () => void
+  /** An accepted re-open also re-runs the session's open, like the app's navigation. */
+  reopenReruns?: boolean
 }
 
 function harness(
@@ -108,6 +118,7 @@ function harness(
   const asked: string[] = []
   const holds: string[] = []
   const handbacks: string[] = []
+  const reconnects: string[] = []
   const holding = new Set<string>()
   const live = new Map<string, FakeSession>([[session.sessionId, session]])
   const service = (): unknown => {
@@ -126,8 +137,17 @@ function harness(
     endpoint: '/__dsh-mobile/telemetry',
     reopenSession: (sessionId) => {
       asked.push(sessionId)
+      if (options.reopenReruns === true) void session.open()
       return options.reopenAccepted ?? true
     },
+    ...(options.reconnect === undefined
+      ? {}
+      : {
+          reconnectCarrier: () => {
+            reconnects.push(session.sessionId)
+            options.reconnect?.()
+          },
+        }),
     ...(options.hold === true
       ? {
           holdSession: (sessionId: string) => {
@@ -147,7 +167,7 @@ function harness(
     ...(options.maxReselects === undefined ? {} : { maxReselects: options.maxReselects }),
     send: (_endpoint, payload) => { rows.push(JSON.parse(payload) as SessionOpenRecord) },
   })
-  return { session, service, rows, stop, live, asked, holds, handbacks }
+  return { session, service, rows, stop, live, asked, holds, handbacks, reconnects }
 }
 
 beforeEach(() => {
@@ -211,8 +231,8 @@ describe('installSessionOpenGuard', () => {
     stop()
   })
 
-  it('gives up after the repair cap rather than reopening in a loop', async () => {
-    const { session, rows, stop } = harness()
+  it('escalates to the app\'s own navigation once the in-place repairs are spent', async () => {
+    const { session, rows, asked, stop } = harness()
     session.stranded = true
     await session.open()
     await settleGrace()
@@ -220,6 +240,28 @@ describe('installSessionOpenGuard', () => {
     await settleGrace()
     expect(session.opens).toBe(3)
     expect(rows.filter((row) => row.phase === 'stranded')).toHaveLength(2)
+    // The instance stayed in the manager map, so the two in-place repairs ran
+    // first; once spent, the strand escalates to the app's own navigation.
+    expect(asked).toEqual(['session-1'])
+    expect(rows.filter((row) => row.phase === 'reselect')).toEqual([
+      expect.objectContaining({ phase: 'reselect', sessionId: 'session-1', repairs: 1 }),
+    ])
+    stop()
+  })
+
+  it('gives up after the in-place cap when the app refuses to re-open the session', async () => {
+    const { session, rows, asked, stop } = harness('session', undefined, { reopenAccepted: false })
+    session.stranded = true
+    await session.open()
+    await settleGrace()
+    await settleGrace()
+    await settleGrace()
+    // Asked once, refused, and not asked again; the spent in-place budget then
+    // leaves the session alone instead of reopening in a loop.
+    expect(asked).toEqual(['session-1'])
+    expect(rows.filter((row) => row.phase === 'reselect')).toHaveLength(0)
+    expect(rows.filter((row) => row.phase === 'stranded')).toHaveLength(2)
+    expect(session.opens).toBe(3)
     stop()
   })
 
@@ -266,6 +308,69 @@ describe('installSessionOpenGuard', () => {
     expect(invalidated).toHaveLength(1)
     expect(invalidated[0]).toMatchObject({ by: 'dispose', sessionId: 'session-1' })
     expect(typeof invalidated[0]?.stack).toBe('string')
+    stop()
+  })
+
+  it('repairs a live instance invalidated mid-open at the short gate', async () => {
+    const { session, rows, stop } = harness()
+    session.stranded = true
+    session.deferredStrand = true
+    void session.open()
+    // The device's order: the app disposes the pass while it is still in flight,
+    // and only then does the pass settle into the strand.
+    await session.dispose()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_FAST_RECHECK_MS)
+    expect(session.opens).toBe(2)
+    const stranded = rows.filter((row) => row.phase === 'stranded')
+    expect(stranded).toHaveLength(1)
+    // The observed disposal proves the pass can never publish, so the repair
+    // fires at the short gate instead of the full four-second window.
+    expect(stranded[0]?.waitedMs).toBeLessThan(SESSION_OPEN_GUARD_NO_FRAME_MS)
+    stop()
+  })
+
+  it('rebuilds the carrier once the app\'s navigation has been asked without success', async () => {
+    const { session, rows, asked, reconnects, stop } = harness('session', undefined, { reconnect: () => undefined, reopenReruns: true })
+    session.stranded = true
+    session.deferredStrand = true
+    void session.open()
+    await session.dispose()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_FAST_RECHECK_MS)   // in-place #1
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_FAST_RECHECK_MS)   // in-place #2
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_FAST_RECHECK_MS)   // reselect #1
+    expect(asked).toEqual(['session-1'])
+    expect(rows.filter((row) => row.phase === 'reselect')).toHaveLength(1)
+    expect(reconnects).toEqual([])
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_FAST_RECHECK_MS)   // carrier rebuild
+    expect(reconnects).toEqual(['session-1'])
+    expect(rows.filter((row) => row.phase === 'carrier')).toHaveLength(1)
+    // The rebuild is once per session per page load.
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_FAST_RECHECK_MS)
+    expect(reconnects).toEqual(['session-1'])
+    stop()
+  })
+
+  it('gives a settled session a fresh repair budget', async () => {
+    const { session, rows, stop } = harness()
+    session.stranded = true
+    await session.open()
+    await settleGrace()
+    await settleGrace()
+    expect(rows.filter((row) => row.phase === 'stranded')).toHaveLength(2)
+    session.stranded = false
+    await session.open()
+    await vi.advanceTimersByTimeAsync(250)
+    // A later strand starts from a fresh budget instead of staying silent.
+    session.openState = 'loading'
+    session.openPromise = null
+    session.stranded = true
+    void session.open()
+    await settleGrace()
+    const stranded = rows.filter((row) => row.phase === 'stranded')
+    expect(stranded).toHaveLength(3)
+    expect(stranded[2]?.repairs).toBe(1)
     stop()
   })
 
@@ -368,7 +473,7 @@ describe('installSessionOpenGuard', () => {
     }
   })
 
-  it('holds its own reference while a session opens, and hands it back once the app owns it', async () => {
+  it('holds its own reference while a session opens, and hands it back once it is open and the app owns it', async () => {
     const { session, rows, stop, holds, handbacks } = harness('session', undefined, { hold: true })
     session.pending = true
     void session.open()
@@ -385,6 +490,55 @@ describe('installSessionOpenGuard', () => {
     expect(rows.filter((row) => row.phase === 'handback')).toEqual([
       expect.objectContaining({ phase: 'handback', sessionId: 'session-1', reason: 'app' }),
     ])
+    stop()
+  })
+
+  it('keeps its reference while the session is still loading, even when the app already holds one', async () => {
+    const { session, stop, holds, handbacks } = harness('session', undefined, { hold: true })
+    session.pending = true
+    void session.open()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(holds).toEqual(['session-1'])
+    // The app holds its own reference (soleHolder is false), but the open has
+    // not finished. The device showed the app releasing that reference again
+    // two seconds into a repaired open, so the phone keeps its hold.
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_NO_FRAME_MS * 3)
+    expect(handbacks).toEqual([])
+    // The first frame lands; only the next sweep hands the reference back.
+    session.release?.()
+    await vi.advanceTimersByTimeAsync(250)
+    expect(handbacks).toEqual(['app'])
+    stop()
+  })
+
+  it('keeps its reference through a repaired open, handing back only after it succeeds', async () => {
+    const { session, rows, stop, holds, handbacks } = harness('session', undefined, { hold: true })
+    session.stranded = true
+    await session.open()
+    await settleGrace()
+    expect(rows.filter((row) => row.phase === 'stranded')).toHaveLength(1)
+    // The repaired pass is in flight and the app holds its own reference; the
+    // phone's must outlive it, because the app can let go again mid-open.
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(handbacks).toEqual([])
+    expect(session.opens).toBe(2)
+    // The repaired pass publishes `open`; only now does the sweep hand back.
+    session.stranded = false
+    await settleGrace()
+    await vi.advanceTimersByTimeAsync(250)
+    expect(handbacks).toEqual(['app'])
+    stop()
+  })
+
+  it('bounds a loading hold with the grace period even when the app keeps referencing the session', async () => {
+    const { session, stop, holds, handbacks } = harness('session', undefined, { hold: true })
+    session.pending = true
+    void session.open()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(holds).toEqual(['session-1'])
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_HOLD_MAX_MS)
+    expect(handbacks).toEqual(['expired'])
+    expect(holds).toEqual(['session-1'])
     stop()
   })
 
