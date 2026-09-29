@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   installSessionOpenGuard,
+  SESSION_OPEN_GUARD_HOLD_MAX_MS,
   SESSION_OPEN_GUARD_NO_FRAME_MS,
   type SessionOpenRecord,
 } from '../src/session-open-guard.js'
@@ -69,6 +70,10 @@ interface Harness {
   readonly live: Map<string, FakeSession>
   /** The session ids the guard asked the app's navigation to re-open. */
   readonly asked: string[]
+  /** The session ids the phone took a reference to. */
+  readonly holds: string[]
+  /** Why each held reference was given back, in order. */
+  readonly handbacks: string[]
 }
 
 /**
@@ -85,6 +90,10 @@ interface HarnessOptions {
   /** Whether the app's navigation accepts the re-open; it always gets asked. */
   reopenAccepted?: boolean
   maxReselects?: number
+  /** Whether this harness lends the guard a session-holding callback. */
+  hold?: boolean
+  /** Whether the phone ends up as the only holder, as the device's strand does. */
+  soleHolder?: () => boolean
 }
 
 function harness(
@@ -95,6 +104,9 @@ function harness(
   const session = held ?? newSession()
   const rows: SessionOpenRecord[] = []
   const asked: string[] = []
+  const holds: string[] = []
+  const handbacks: string[] = []
+  const holding = new Set<string>()
   const live = new Map<string, FakeSession>([[session.sessionId, session]])
   const service = (): unknown => {
     if (shape === 'session') return { manager: { sessions: live } }
@@ -109,10 +121,26 @@ function harness(
       asked.push(sessionId)
       return options.reopenAccepted ?? true
     },
+    ...(options.hold === true
+      ? {
+          holdSession: (sessionId: string) => {
+            holds.push(sessionId)
+            holding.add(sessionId)
+            return {
+              sessionId,
+              soleHolder: () => options.soleHolder?.() ?? false,
+              release: (reason: string): void => {
+                if (!holding.delete(sessionId)) return
+                handbacks.push(reason)
+              },
+            }
+          },
+        }
+      : {}),
     ...(options.maxReselects === undefined ? {} : { maxReselects: options.maxReselects }),
     send: (_endpoint, payload) => { rows.push(JSON.parse(payload) as SessionOpenRecord) },
   })
-  return { session, service, rows, stop, live, asked }
+  return { session, service, rows, stop, live, asked, holds, handbacks }
 }
 
 beforeEach(() => {
@@ -290,6 +318,81 @@ describe('installSessionOpenGuard', () => {
       expect(session.opens).toBe(1)
       expect(() => stop()).not.toThrow()
     }
+  })
+
+  it('holds its own reference while a session opens, and hands it back once the app owns it', async () => {
+    const { session, rows, stop, holds, handbacks } = harness('session', undefined, { hold: true })
+    session.pending = true
+    void session.open()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(holds).toEqual(['session-1'])
+    expect(rows.filter((row) => row.phase === 'hold')).toEqual([
+      expect.objectContaining({ kind: 'session-open', phase: 'hold', sessionId: 'session-1', waitedMs: 0, mode: 'direct' }),
+    ])
+    // The first frame lands and the app takes the session back: no reason left
+    // for the phone to keep it alive.
+    session.release?.()
+    await vi.advanceTimersByTimeAsync(250)
+    expect(handbacks).toEqual(['app'])
+    expect(rows.filter((row) => row.phase === 'handback')).toEqual([
+      expect.objectContaining({ phase: 'handback', sessionId: 'session-1', reason: 'app' }),
+    ])
+    stop()
+  })
+
+  it('keeps the session alive when the app dropped it, then lets go of the hold', async () => {
+    const { session, rows, stop, holds, handbacks } = harness('session', undefined, {
+      hold: true,
+      soleHolder: () => true,
+    })
+    session.pending = true
+    void session.open()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(holds).toEqual(['session-1'])
+    // The app's navigation was aborted and released the only reference it had:
+    // the phone is now what keeps the session from being retired mid-open.
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_HOLD_MAX_MS - 250)
+    expect(handbacks).toEqual([])
+    // The hold is not repeated for the same session and page load: it is given
+    // back once, at the end of its grace period.
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_HOLD_MAX_MS)
+    expect(holds).toEqual(['session-1'])
+    expect(handbacks).toEqual(['expired'])
+    expect(rows.filter((row) => row.phase === 'handback')).toEqual([
+      expect.objectContaining({ phase: 'handback', reason: 'expired' }),
+    ])
+    stop()
+  })
+
+  it('gives the hold back when the instance it was taken on is dropped', async () => {
+    const { session, live, stop, holds, handbacks } = harness('session', undefined, {
+      hold: true,
+      soleHolder: () => true,
+    })
+    session.pending = true
+    void session.open()
+    await vi.advanceTimersByTimeAsync(0)
+    live.delete(session.sessionId)
+    await vi.advanceTimersByTimeAsync(250)
+    expect(holds).toEqual(['session-1'])
+    expect(handbacks).toEqual(['gone'])
+    stop()
+  })
+
+  it('gives every hold back when the surface is stopped', async () => {
+    const { session, stop, holds, handbacks } = harness('session', undefined, {
+      hold: true,
+      soleHolder: () => true,
+    })
+    session.pending = true
+    void session.open()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(holds).toEqual(['session-1'])
+    stop()
+    expect(handbacks).toEqual(['stopped'])
+    // Nothing is released twice.
+    await vi.advanceTimersByTimeAsync(SESSION_OPEN_GUARD_HOLD_MAX_MS * 2)
+    expect(handbacks).toEqual(['stopped'])
   })
 
   it('survives a sessions service that throws when read', async () => {

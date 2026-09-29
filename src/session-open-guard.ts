@@ -18,15 +18,20 @@
  * `openGeneration` is bumped in only three places in the controller: `resync()`,
  * `dispose()` and `failEventStream()`. `dispose()` is the interesting one: it
  * does *not* touch `openState`, so disposing a session whose open is in flight
- * leaves it at `"loading"` forever. The DOM watch in `stuck-view.ts` is the outer
- * net — it can only see the hint and can only answer by rebuilding carriers
- * (7-11 s on the device). This module answers where the state actually lives: it
- * wraps the session class' `doOpen` (once per prototype) and, after the original
- * settles with the state still `"loading"` and nobody opening, clears the stale
- * `openPromise` and calls the app's own `open()` again — a round trip, no socket
- * touched. It also times out a first frame that never arrives and asks the app
- * for its own `resync()`, and it instruments `dispose()`/`resync()` so the next
- * device row finally names which call invalidated a session mid-open.
+ * leaves it at `"loading"` forever. The device showed exactly that: a session
+ * whose open started, and was disposed 12-24 ms later, because the navigation
+ * that retained it was aborted and the app released the only reference.
+ *
+ * Two things answer for it, both where the state actually lives. The first is the
+ * hold ({@link holdSessionOpen}): the phone takes a reference of its own as the
+ * open starts, so the app's release cannot drop the count to zero mid-open, and
+ * gives it back at the next sweep — no socket, no reload, no re-navigation. When
+ * the app's own pass still settles with the state at `"loading"` and nobody
+ * opening, the guard clears the stale `openPromise` and calls the app's own
+ * `open()` again: a round trip, no socket touched. It also times out a first
+ * frame that never arrives and asks the app for its own `resync()`, and it
+ * instruments `dispose()`/`resync()` so a device row names what invalidated a
+ * session mid-open.
  *
  * Everything here is feature-detected and wrapped: this is a guest in the app's
  * internals, so a shape that does not match reports zero and changes nothing.
@@ -34,6 +39,7 @@
  */
 
 import { TELEMETRY_ENDPOINT } from './page-timing.js'
+import { holdSessionOpen, type SessionHoldHandle } from './session-hold.js'
 
 /**
  * How long a `doOpen` pass gets to publish its opening frame before the app's
@@ -64,6 +70,18 @@ export const SESSION_OPEN_GUARD_MAX_REPAIRS = 2
  */
 export const SESSION_OPEN_GUARD_MAX_RESELECTS = 6
 
+/**
+ * How long the phone's own reference may outlive the app's interest in a session.
+ *
+ * A hold taken while a session opens is given back as soon as the app holds it
+ * again, which on the healthy path is the same tick. A session the app dropped
+ * and never asked for again is the case where the phone is the only thing keeping
+ * the view it already renders alive; it is held for this long, and then the
+ * reference goes back so an abandoned session cannot be kept open for the life of
+ * the page.
+ */
+export const SESSION_OPEN_GUARD_HOLD_MAX_MS = 60_000
+
 /** Telemetry rows allowed per page load; a storm must not fill the log. */
 export const SESSION_OPEN_GUARD_TELEMETRY_LIMIT = 12
 
@@ -93,7 +111,7 @@ const PROTOTYPE_MARK = '__dshMobileSessionOpenGuard__'
 const UNKNOWN_SESSION_ID = 'unknown'
 
 /** Which half of the strand a row describes. */
-export type SessionOpenPhase = 'stranded' | 'no-frame' | 'invalidated' | 'reselect'
+export type SessionOpenPhase = 'hold' | 'handback' | 'stranded' | 'no-frame' | 'invalidated' | 'reselect'
 
 /** The method that bumped the generation while a session was loading. */
 export type SessionInvalidator = 'dispose' | 'resync'
@@ -116,6 +134,8 @@ export interface SessionOpenRecord {
   repairs?: number
   /** Resyncs asked for, on `no-frame`. */
   resyncs?: number
+  /** Why a held reference was given back, on `handback`. */
+  reason?: string
 }
 
 /** One session instance, as far as this guard reaches into it. */
@@ -129,6 +149,13 @@ export interface GuardableSession {
   doOpen?(...args: unknown[]): unknown
   dispose?(): unknown
   resync?(): unknown
+}
+
+/** One held reference: the instance it was taken on, and when. */
+interface HoldEntry {
+  handle: SessionHoldHandle
+  session: GuardableSession
+  startedAt: number
 }
 
 /** The app's `sessions` service, as far as this guard reaches into it. */
@@ -157,6 +184,13 @@ export interface SessionOpenGuardOptions {
    * id; returns whether the app could be asked.
    */
   reopenSession?: (sessionId: string) => boolean
+  /**
+   * The phone's own reference to a session that is opening, normally
+   * {@link holdSessionOpen} over `ctx.get('sessions')`. This is what keeps the
+   * app from retiring — and disposing — a session whose open is in flight.
+   * Absent, or returning undefined, leaves the app exactly as it was.
+   */
+  holdSession?: (sessionId: string) => SessionHoldHandle | undefined
   endpoint?: string
   send?: (endpoint: string, payload: string) => void
   now?: () => number
@@ -167,6 +201,7 @@ export interface SessionOpenGuardOptions {
   noFrameMs?: number
   maxRepairs?: number
   maxReselects?: number
+  holdMaxMs?: number
   telemetryLimit?: number
   armIntervalMs?: number
   armAttempts?: number
@@ -204,6 +239,7 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   const noFrameMs = options.noFrameMs ?? SESSION_OPEN_GUARD_NO_FRAME_MS
   const maxRepairs = options.maxRepairs ?? SESSION_OPEN_GUARD_MAX_REPAIRS
   const maxReselects = options.maxReselects ?? SESSION_OPEN_GUARD_MAX_RESELECTS
+  const holdMaxMs = options.holdMaxMs ?? SESSION_OPEN_GUARD_HOLD_MAX_MS
   const telemetryLimit = options.telemetryLimit ?? SESSION_OPEN_GUARD_TELEMETRY_LIMIT
   const armIntervalMs = options.armIntervalMs ?? SESSION_OPEN_GUARD_ARM_INTERVAL_MS
   const armAttempts = options.armAttempts ?? SESSION_OPEN_GUARD_ARM_ATTEMPTS
@@ -214,6 +250,10 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   const repairs = new Map<string, number>()
   /** Sessions already asked to `resync()`, per page load. */
   const resynced = new Set<string>()
+  /** The phone's own reference to each session whose open is in flight. */
+  const holds = new Map<string, HoldEntry>()
+  /** Sessions a `hold` row has already been written for, per page load. */
+  const holdReported = new Set<string>()
   /** App-level re-selections the app accepted, per sessionId, for this page load. */
   const reselects = new Map<string, number>()
   /** Sessions the app would not re-open; one refusal ends the app-level path. */
@@ -232,6 +272,7 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
       stack?: string | undefined
       repairs?: number | undefined
       resyncs?: number | undefined
+      reason?: string | undefined
     } = {},
   ): void => {
     if (sent >= telemetryLimit) return
@@ -247,6 +288,7 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
         ...(extra.stack === undefined ? {} : { stack: extra.stack }),
         ...(extra.repairs === undefined ? {} : { repairs: extra.repairs }),
         ...(extra.resyncs === undefined ? {} : { resyncs: extra.resyncs }),
+        ...(extra.reason === undefined ? {} : { reason: extra.reason }),
       }
       sent += 1
       send(endpoint, JSON.stringify(record))
@@ -360,6 +402,86 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
       // A map that throws mid-iteration still yields the sessions it gave.
     }
     return found
+  }
+
+  /**
+   * Take the phone's own reference to a session that is opening.
+   *
+   * This is the repair that makes a session switch instant: the app's navigation
+   * can release its reference a few milliseconds into the open, and an unheld
+   * session is then retired and disposed *while loading*, which is the state the
+   * view never leaves. One row is written per session per page load; the sweeps
+   * that follow report the hand-back.
+   * @param session - The instance entering `loading`.
+   * @param sessionId - Its published id.
+   */
+  const takeHold = (session: GuardableSession, sessionId: string): void => {
+    if (sessionId === UNKNOWN_SESSION_ID) return
+    const existing = holds.get(sessionId)
+    if (existing !== undefined) {
+      if (existing.session === session) return
+      // The app re-materialised the id; the old instance is not what is opening.
+      releaseHold(sessionId, 'replaced')
+    }
+    if (!isLoading(session)) return
+    let handle: SessionHoldHandle | undefined
+    try {
+      handle = options.holdSession?.(sessionId)
+    } catch {
+      handle = undefined
+    }
+    if (handle === undefined) return
+    holds.set(sessionId, { handle, session, startedAt: now() })
+    if (holdReported.has(sessionId)) return
+    holdReported.add(sessionId)
+    const mode = modeOf(session)
+    report('hold', sessionId, 0, { ...(mode === undefined ? {} : { mode }) })
+  }
+
+  /** Give one held reference back, and say why. */
+  const releaseHold = (sessionId: string, reason: string): void => {
+    const entry = holds.get(sessionId)
+    if (entry === undefined) return
+    holds.delete(sessionId)
+    try {
+      entry.handle.release(reason)
+    } catch {
+      // The reference is gone either way; the session keeps its own life.
+    }
+    report('handback', sessionId, now() - entry.startedAt, { reason })
+  }
+
+  /**
+   * Give each held reference back once the app owns the session again.
+   *
+   * The healthy path hands the reference back on the sweep after the app's own
+   * `retain`, so the phone is never the reason a session stays alive. A session
+   * the app dropped — the aborted-navigation case — keeps the phone's reference
+   * until {@link SESSION_OPEN_GUARD_HOLD_MAX_MS} has passed, because the view that
+   * is already rendering it must finish its open.
+   */
+  const sweepHolds = (): void => {
+    if (holds.size === 0) return
+    const live = new Map<string, GuardableSession>()
+    for (const session of liveSessions()) live.set(idOf(session), session)
+    for (const sessionId of [...holds.keys()]) {
+      const entry = holds.get(sessionId)
+      if (entry === undefined) continue
+      const session = live.get(sessionId)
+      if (session === undefined) {
+        releaseHold(sessionId, 'gone')
+        continue
+      }
+      if (session !== entry.session) {
+        releaseHold(sessionId, 'replaced')
+        continue
+      }
+      if (!entry.handle.soleHolder()) {
+        releaseHold(sessionId, 'app')
+        continue
+      }
+      if (now() - entry.startedAt >= holdMaxMs) releaseHold(sessionId, 'expired')
+    }
   }
 
   /** The first known session the app currently reports as loading. */
@@ -501,6 +623,17 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
         const sessionId = idOf(session)
         const startedAt = now()
         loadingSince.set(sessionId, startedAt)
+        // Take the phone's reference as the open starts — but a microtask later,
+        // because retaining calls `open()` again and `open()` has not yet wired
+        // its own `openPromise` during this synchronous frame; taking it here
+        // would re-enter `doOpen` and start a second pass.
+        void Promise.resolve().then(() => {
+          try {
+            takeHold(session, sessionId)
+          } catch {
+            // A hold that cannot be taken leaves the app exactly as it was.
+          }
+        })
         let settled = false
         let resyncedThisPass = false
 
@@ -659,7 +792,38 @@ export function installSessionOpenGuard(options: SessionOpenGuardOptions): () =>
   interval = scheduleInterval(armTick, armIntervalMs)
   armTick()
 
-  return stopArming
+  // Holds outlive the arming poll, so their sweep gets its own interval: it runs
+  // for as long as this surface is mounted, which is exactly as long as a held
+  // reference may exist.
+  let sweep: number | undefined
+  const stopSweeping = (): void => {
+    if (sweep !== undefined) {
+      try {
+        unscheduleInterval(sweep)
+      } catch {
+        // Nothing to stop.
+      }
+      sweep = undefined
+    }
+    // Never leave a reference behind: a page that is going away must not keep a
+    // session open.
+    for (const sessionId of [...holds.keys()]) {
+      try {
+        releaseHold(sessionId, 'stopped')
+      } catch {
+        // The page is going away; a failed release is the app's to reap.
+      }
+    }
+  }
+  sweep = scheduleInterval(() => {
+    try {
+      sweepHolds()
+    } catch {
+      // A sweep that throws must not take the app down with it.
+    }
+  }, armIntervalMs)
+
+  return () => { stopArming(); stopSweeping() }
 }
 
 /**

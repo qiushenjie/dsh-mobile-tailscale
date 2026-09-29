@@ -1,15 +1,15 @@
 import { createElement } from 'react'
 import { installNativeMobileSurface, NATIVE_MOBILE_STYLES } from './native-mobile.js'
+import { holdSessionOpen } from './session-hold.js'
 import { installSessionOpenGuard } from './session-open-guard.js'
 import { reselectSession } from './session-reselect.js'
-import { resyncLoadingSessions } from './session-resync.js'
 
 interface ClientContext {
   effect(effect: () => void | (() => void), label?: string): void
   get(name: 'connection'): MobileConnectionHandle
   /**
    * The app's session service, read opportunistically — see
-   * {@link resyncLoadingSessions}. Deliberately not declared in `inject`: a hard
+   * {@link holdSessionOpen}. Deliberately not declared in `inject`: a hard
    * dependency would keep this client half from loading at all on an app build
    * that names the service differently.
    */
@@ -28,11 +28,6 @@ interface ClientContext {
 
 interface MobileConnectionHandle {
   isLoopback: boolean
-  /**
-   * The app's own carrier rebuild, when the installed build exposes one. Absent
-   * on older clients, where the socket watch has to close the wire itself.
-   */
-  reconnect?: () => void
 }
 
 interface MobileExtensionContext {
@@ -884,10 +879,9 @@ div:has(.dsh-mobile-control__trigger){flex-wrap:wrap}
  * evaluated before the app's own services register, so the guard polls a bounded
  * number of times until a live session hands it the class prototype — and that
  * prototype then covers every instance the app builds afterwards. A host whose
- * service never appears, or whose shape differs, simply keeps the DOM watch as
- * its recovery.
+ * service never appears, or whose shape differs, is left exactly as it was.
  * @param ctx - The plugin's client context.
- * @returns A function that stops the arming poll.
+ * @returns A function that stops the arming poll and gives every hold back.
  */
 function installSessionOpenGuardSafely(ctx: ClientContext): () => void {
   const read = (name: 'sessions' | 'uiWorkspace'): unknown => {
@@ -901,6 +895,7 @@ function installSessionOpenGuardSafely(ctx: ClientContext): () => void {
     return installSessionOpenGuard({
       sessions: () => read('sessions'),
       reopenSession: sessionId => reselectSession(read('uiWorkspace'), sessionId),
+      holdSession: sessionId => holdSessionOpen(read('sessions'), sessionId),
     })
   } catch {
     return () => undefined
@@ -935,39 +930,12 @@ export function apply(ctx: ClientContext): void {
     document.head.append(style)
     if (!desktop) {
       const removeCustom = installCustomAssets()
-      const removeSurface = installNativeMobileSurface({
-        // Resolved per stall, not at mount: the session service may register
-        // after this surface does, and an app build without it must still fall
-        // back to the socket rebuild.
-        resyncLoadingSessions: () => {
-          try {
-            return resyncLoadingSessions(ctx.get('sessions'))
-          } catch {
-            return 0
-          }
-        },
-        // The app rebuilds its own wire (aborting the current generation and
-        // resetting its backoff), which works even when the socket watch never
-        // saw the socket being constructed — the case the device hit at 02:30.
-        reconnectCarrier: () => {
-          let handle: MobileConnectionHandle | undefined
-          try {
-            handle = ctx.get('connection')
-          } catch {
-            return 0
-          }
-          if (typeof handle?.reconnect !== 'function') return 0
-          try {
-            handle.reconnect()
-            return 1
-          } catch {
-            return 0
-          }
-        },
-      })
-      // The strand lives in the app's session class, not in the DOM: wrap its
-      // prototype so an open the app discarded is re-opened in a round trip,
-      // and report who invalidated it when a round trip is not enough.
+      const removeSurface = installNativeMobileSurface()
+      // The strand lives in the app's session class, not in the DOM: while a
+      // session is opening, hold a reference of our own so the navigation that
+      // releases the app's reference cannot retire and dispose the session
+      // mid-open — which is the state the view never leaves. No reload, no
+      // socket rebuild.
       const stopOpenGuard = installSessionOpenGuardSafely(ctx)
       return () => { removeCustom(); removeSurface(); stopOpenGuard(); style.remove() }
     }

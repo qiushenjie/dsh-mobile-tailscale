@@ -2,16 +2,8 @@ import { installDrawerPan } from './drawer-pan.js'
 import { TELEMETRY_ENDPOINT, installGestureTelemetry } from './gesture-telemetry.js'
 import { installPageFetchGuard, pageFetchStats } from './page-fetch-guard.js'
 import { installPageTiming } from './page-timing.js'
-import { installSocketWatch, reconnectSockets, socketWatchStats } from './socket-watch.js'
 import { installStripSwipe } from './strip-swipe.js'
-import { installStuckViewWatch } from './stuck-view.js'
 import { installTerminalKeyRepair } from './terminal-keys.js'
-
-// Installed while this module is evaluated, not at mount: the app opens its mux
-// WebSocket as soon as the connection plugin activates, and a watch installed
-// later would never see the socket this exists to close. See
-// {@link installSocketWatch}.
-if (typeof window !== 'undefined') installSocketWatch()
 
 /** Mobile feature and compatibility rules applied to DSH React surfaces. */
 export const NATIVE_MOBILE_STYLES = `
@@ -733,24 +725,8 @@ export function isMenuSearchFocus(target: Element): boolean {
   return target.closest('[role="menu"]') !== null
 }
 
-/** What the caller can lend the surface, when the running app has it. */
-export interface NativeMobileSurfaceOptions {
-  /**
-   * Ask the app to re-open sessions it reports as loading, returning how many
-   * it was asked to re-open. See {@link resyncLoadingSessions}.
-   */
-  resyncLoadingSessions?: () => number
-  /**
-   * Ask the app to rebuild the carrier it owns, returning how many rebuilds it
-   * started. One means the watch does not have to close a socket itself.
-   */
-  reconnectCarrier?: () => number
-}
-
 /** Add mobile semantics without replacing feature trees. */
-export function installNativeMobileSurface(
-  options: NativeMobileSurfaceOptions = {},
-): () => void {
+export function installNativeMobileSurface(): () => void {
   document.documentElement.classList.add('dsh-native-mobile-active')
   const setInputMode = (mode: 'keyboard' | 'touch'): void => {
     document.documentElement.dataset.dshMobileInput = mode
@@ -1285,22 +1261,11 @@ export function installNativeMobileSurface(
   const removePageTiming = installPageTiming()
   // The page POST has no timeout anywhere in the stack, so a page read that dies
   // on a half-open socket never resolves; the call is an idempotent read, so a
-  // stalled attempt is replayed. This does not cover the stuck view: measured on
-  // the live app, 「载入历史…」 is the `session/follow` opening frame never
-  // arriving, which no page request can fix. See {@link installPageFetchGuard}.
+  // stalled attempt is replayed. This does not cover a first frame that never
+  // arrives: measured on the live app, 「载入历史…」 is the `session/follow`
+  // opening frame, which no page request can fix. See
+  // {@link installPageFetchGuard} and the client half's session-open guard.
   const removePageFetchGuard = installPageFetchGuard()
-  // The host keeps that placeholder up forever when the opening frame is lost,
-  // so the phone watches for the placeholder element itself — only while the
-  // conversation is empty — rebuilds the carrier, and reports what it saw.
-  // See {@link installStuckViewWatch}.
-  const removeStuckViewWatch = installStuckViewWatch({
-    sockets: socketWatchStats,
-    pageStats: pageFetchStats,
-    reconnect: reconnectSockets,
-    turns: () => document.querySelectorAll('[data-chat-turn]').length,
-    ...(options.resyncLoadingSessions === undefined ? {} : { softResync: options.resyncLoadingSessions }),
-    ...(options.reconnectCarrier === undefined ? {} : { carrierReconnect: options.reconnectCarrier }),
-  })
   sync()
   return () => {
     observer.disconnect()
@@ -1310,7 +1275,6 @@ export function installNativeMobileSurface(
     removeGestureTelemetry()
     removePageTiming()
     removePageFetchGuard()
-    removeStuckViewWatch()
     document.removeEventListener('click', onBranchClick, true)
     document.removeEventListener('click', onSidebarSessionSelect, true)
     document.removeEventListener('pointerdown', onPointerDownForFocus, true)
