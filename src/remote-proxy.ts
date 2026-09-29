@@ -505,7 +505,12 @@ export class RemotePassthroughProxy {
       upstreamSocket.setTimeout(0)
       client.write(handshake.header)
       if (handshake.remainder.length > 0) client.write(handshake.remainder)
-      relayUpgradedWebSocket(client, upstreamSocket, head)
+      relayUpgradedWebSocket(client, upstreamSocket, head, (record) => {
+        // The opening clamp is the phone's time-to-first-content, so what a
+        // device asked for and what it was granted belongs in the log next to
+        // the frame it sized. Nothing else consumes this record.
+        this.telemetry.append({ at: new Date().toISOString(), kind: 'history-clamp', ...record })
+      })
     } catch (error) {
       // Destroy only the upstream here: the upgrade wiring above still needs
       // the client socket to write the error response. Destroying the client

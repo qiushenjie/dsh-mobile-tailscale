@@ -36,6 +36,12 @@ import { Transform, type TransformCallback } from 'node:stream'
  * continuation page was 0.9-1.8 MB / 0.2-0.5 MB, and the phone showed nothing
  * but the host's "载入历史…" placeholder until a whole payload had landed. So a
  * page is 12 messages: one tap now stays well under 100 KB on the wire.
+ *
+ * Measured again on the device's 242-turn session (2026-09-29), frame by frame:
+ * a 12-message request still answered with 68-72 records / 184-297 KB, because
+ * the host aligns to the turn window the client asked for (two turns) instead of
+ * to the message cap. The opening request is therefore also cut to one turn; see
+ * {@link clampHistoryRequest}.
  */
 export const MOBILE_HISTORY_PAGE_MESSAGES = 12
 
@@ -57,9 +63,11 @@ const SESSION_ENDPOINT_PREFIX = 'session/'
 
 export interface HistoryClampRecord {
   readonly endpoint: string
+  readonly sessionId: string | undefined
   readonly requested: number | undefined
   readonly maxMessages: number
   readonly turnMinMessages: number | undefined
+  readonly turnMinTurns: number | undefined
 }
 
 export interface HistoryClampResult {
@@ -164,6 +172,13 @@ function positiveInteger(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : undefined
 }
 
+function sessionIdOf(request: Record<string, unknown>): string | undefined {
+  const address = request.address
+  if (typeof address !== 'object' || address === null) return undefined
+  const sessionId = (address as { sessionId?: unknown }).sessionId
+  return typeof sessionId === 'string' && sessionId.length > 0 ? sessionId : undefined
+}
+
 /**
  * Shrink the history page a mobile client asks for, in place.
  * @returns the rewritten frame text plus what changed, or `undefined` when the
@@ -192,14 +207,31 @@ export function clampHistoryRequest(text: string): HistoryClampResult | undefine
     ? positiveInteger((turnWindow as { minMessages?: unknown }).minMessages)
     : undefined
   let nextTurnWindow: Record<string, unknown> | undefined
+  // The opening frame of a session is the phone's whole time-to-first-content,
+  // and the turn window is what actually sizes it: the app asks for two turns,
+  // and two turns of this conversation measured 184-297 KB however hard
+  // `maxMessages` was clamped (68-72 records answered a 12-message request).
+  // The follow request is therefore cut to one turn. Continuation pages keep
+  // the app's own two: they land while the user is already reading.
+  const opening = open.endpoint === 'session/follow'
+  const turnMinTurns = typeof turnWindow === 'object' && turnWindow !== null && !Array.isArray(turnWindow)
+    ? positiveInteger((turnWindow as { minTurns?: unknown }).minTurns)
+    : undefined
   if (turnMinMessages !== undefined) {
-    nextTurnWindow = { ...(turnWindow as Record<string, unknown>), minMessages: Math.max(1, Math.min(turnMinMessages, maxMessages)) }
+    nextTurnWindow = {
+      ...(turnWindow as Record<string, unknown>),
+      minMessages: Math.max(1, Math.min(turnMinMessages, maxMessages)),
+      ...(opening ? { minTurns: 1 } : {}),
+    }
   } else if (turnWindow === undefined) {
-    nextTurnWindow = { minMessages: Math.min(MOBILE_HISTORY_TURN_MIN_MESSAGES, maxMessages), minTurns: 2 }
+    nextTurnWindow = { minMessages: Math.min(MOBILE_HISTORY_TURN_MIN_MESSAGES, maxMessages), minTurns: opening ? 1 : 2 }
   } else {
     return undefined
   }
-  if (maxMessages === requested && nextTurnWindow.minMessages === turnMinMessages) return undefined
+  if (maxMessages === requested && nextTurnWindow.minMessages === turnMinMessages
+    && nextTurnWindow.minTurns === turnMinTurns) {
+    return undefined
+  }
   const args = (open.payload as { args: Record<string, unknown> }).args
   const next = {
     ...(frame as Record<string, unknown>),
@@ -209,9 +241,11 @@ export function clampHistoryRequest(text: string): HistoryClampResult | undefine
     text: JSON.stringify(next),
     record: {
       endpoint: open.endpoint,
+      sessionId: sessionIdOf(request),
       requested,
       maxMessages,
       turnMinMessages: positiveInteger(nextTurnWindow.minMessages),
+      turnMinTurns: positiveInteger(nextTurnWindow.minTurns),
     },
   }
 }

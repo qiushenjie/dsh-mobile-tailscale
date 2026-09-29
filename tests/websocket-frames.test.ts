@@ -41,13 +41,25 @@ describe('history page clamp', () => {
     expect(request.maxMessages).toBe(MOBILE_HISTORY_PAGE_MESSAGES)
     // The client asked for turns of at least 50 messages; the host rejects a
     // window wider than the page, so it comes down to the page size itself.
-    expect(request.turnWindow).toEqual({ minMessages: MOBILE_HISTORY_PAGE_MESSAGES, minTurns: 2 })
+    expect(request.turnWindow).toEqual({ minMessages: MOBILE_HISTORY_PAGE_MESSAGES, minTurns: 1 })
     expect(result?.record).toEqual({
       endpoint: 'session/follow',
+      sessionId: 'session-2d63b0f1-6033-4229-9f97-d8fdbf6d8be8',
       requested: 500,
       maxMessages: MOBILE_HISTORY_PAGE_MESSAGES,
       turnMinMessages: MOBILE_HISTORY_PAGE_MESSAGES,
+      turnMinTurns: 1,
     })
+  })
+
+  it('cuts the opening request to one turn and leaves continuation pages two', () => {
+    // The opening frame is the phone's time-to-first-content, and two turns of
+    // the device's session are 184-297 KB whatever the message cap says; a page
+    // fetched while the reader is already looking at history keeps two.
+    const opening = requestOf(clampHistoryRequest(followFrame())?.text ?? '')
+    expect(opening.turnWindow).toEqual({ minMessages: MOBILE_HISTORY_PAGE_MESSAGES, minTurns: 1 })
+    const page = requestOf(clampHistoryRequest(followFrame().replace('"session/follow"', '"session/page"'))?.text ?? '')
+    expect(page.turnWindow).toEqual({ minMessages: MOBILE_HISTORY_PAGE_MESSAGES, minTurns: 2 })
   })
 
   it('never leaves turnWindow.minMessages above maxMessages, which the host rejects', () => {
@@ -80,14 +92,14 @@ describe('history page clamp', () => {
     })
     const follow = clampHistoryRequest(bare('session/follow'))
     expect(requestOf(follow?.text ?? '').maxMessages).toBe(MOBILE_HISTORY_PAGE_MESSAGES)
-    expect(requestOf(follow?.text ?? '').turnWindow).toEqual({ minMessages: MOBILE_HISTORY_TURN_MIN_MESSAGES, minTurns: 2 })
+    expect(requestOf(follow?.text ?? '').turnWindow).toEqual({ minMessages: MOBILE_HISTORY_TURN_MIN_MESSAGES, minTurns: 1 })
     expect(clampHistoryRequest(bare('session/page'))).toBeDefined()
     expect(clampHistoryRequest(bare('session/control'))).toBeUndefined()
   })
 
   it('leaves requests it cannot reason about exactly as they were', () => {
     // Already inside the budget: nothing to say.
-    expect(clampHistoryRequest(followFrame({ maxMessages: MOBILE_HISTORY_PAGE_MESSAGES, turnWindow: { minMessages: MOBILE_HISTORY_TURN_MIN_MESSAGES, minTurns: 2 } }))).toBeUndefined()
+    expect(clampHistoryRequest(followFrame({ maxMessages: MOBILE_HISTORY_PAGE_MESSAGES, turnWindow: { minMessages: MOBILE_HISTORY_TURN_MIN_MESSAGES, minTurns: 1 } }))).toBeUndefined()
     // A turn window it cannot read is a signal to stay out of the way: the
     // host owns the validation, and guessing would change size or fail.
     expect(clampHistoryRequest(followFrame({ turnWindow: { minTurns: 2 } }))).toBeUndefined()
