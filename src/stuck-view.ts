@@ -144,6 +144,8 @@ export interface StuckViewRecord {
   attempt?: number
   /** Sockets the rebuild closed, on `reconnect`. */
   closed?: number
+  /** True when the app rebuilt its own carrier instead, on `reconnect`. */
+  carrier?: number
   /** Sessions the app was asked to re-open, on `resync`. */
   resynced?: number
   sockets: SocketWatchStats | null
@@ -172,6 +174,11 @@ export interface StuckViewHost {
    * was asked to re-open; zero means the socket rebuild should start at once.
    */
   softResync?: () => number
+  /**
+   * Ask the app to rebuild its own carrier. Returns how many rebuilds it
+   * started; one means the watch does not have to close a socket itself.
+   */
+  carrierReconnect?: () => number
   reconnectGapsMs?: readonly number[]
   maxReconnects?: number
   reloadAfterMs?: number
@@ -225,6 +232,7 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
   const now = host.now ?? ((): number => Date.now())
   const delayMs = host.delayMs ?? STUCK_VIEW_DELAY_MS
   const softResync = host.softResync
+  const carrierReconnect = host.carrierReconnect
   const reconnectGaps = host.reconnectGapsMs ?? STUCK_VIEW_RECONNECT_GAPS_MS
   const maxReconnects = host.maxReconnects ?? STUCK_VIEW_MAX_RECONNECTS
   const reloadAfterMs = host.reloadAfterMs ?? STUCK_VIEW_RELOAD_AFTER_MS
@@ -259,7 +267,7 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
     phase: StuckViewPhase,
     stuckMs: number,
     hint: string | null,
-    extra: { attempt?: number; closed?: number; resynced?: number } = {},
+    extra: { attempt?: number; closed?: number; carrier?: number; resynced?: number } = {},
   ): void => {
     const record: StuckViewRecord = {
       kind: 'stuck-view',
@@ -276,6 +284,7 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
     }
     if (extra.attempt !== undefined) record.attempt = extra.attempt
     if (extra.closed !== undefined) record.closed = extra.closed
+    if (extra.carrier !== undefined) record.carrier = extra.carrier
     if (extra.resynced !== undefined) record.resynced = extra.resynced
     send(endpoint, JSON.stringify(record))
   }
@@ -370,10 +379,22 @@ export function installStuckViewWatch(host: StuckViewHost = {}): () => void {
       // the first.
       const gap = reconnectGaps[reconnects] ?? reconnectGaps[reconnectGaps.length - 1] ?? 0
       nextReconnectAt = delayMs + gap
-      const closed = reconnect('stuck-view')
-      report('reconnect', stuckMs, hint, { attempt: reconnects, closed })
+      // The app's own carrier rebuild first: it reopens the wire the app already
+      // owns and resets its retry backoff. Closing sockets is the fallback for
+      // builds whose connection service exposes no `reconnect()` — and the only
+      // lever at all when the watch never saw a socket being constructed.
+      let carrier = 0
+      if (carrierReconnect !== undefined) {
+        try {
+          carrier = carrierReconnect()
+        } catch {
+          carrier = 0
+        }
+      }
+      const closed = carrier > 0 ? 0 : reconnect('stuck-view')
+      report('reconnect', stuckMs, hint, { attempt: reconnects, closed, carrier })
       // Nothing to rebuild: the reload is the only lever left.
-      if (closed === 0) escalate(stuckMs, hint)
+      if (carrier === 0 && closed === 0) escalate(stuckMs, hint)
       return
     }
     if (reconnects >= maxReconnects && stuckMs >= reloadAfterMs) escalate(stuckMs, hint)

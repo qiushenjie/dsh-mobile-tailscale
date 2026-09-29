@@ -128,6 +128,7 @@ function harness(options: {
   sockets?: () => SocketWatchStats | undefined
   stalled?: () => boolean
   softResync?: () => number
+  carrierReconnect?: () => number
   storage?: StuckViewStorage
   turns?: number | (() => number)
   online?: boolean
@@ -156,6 +157,7 @@ function harness(options: {
     reloadAfterMs: options.reloadAfterMs ?? 30_000,
     ...(options.stalled === undefined ? {} : { stalled: options.stalled }),
     ...(options.softResync === undefined ? {} : { softResync: options.softResync }),
+    ...(options.carrierReconnect === undefined ? {} : { carrierReconnect: options.carrierReconnect }),
     online: () => options.online ?? true,
   })
   const phases = (): string[] => records.map(record => record.phase)
@@ -291,6 +293,51 @@ describe('installStuckViewWatch', () => {
     test.time.advance(2_000)
     test.timers.tick()
     expect(test.records.map(record => record.phase)).toEqual(['detected', 'reconnect'])
+  })
+
+  it('lets the app rebuild its own carrier instead of closing a socket', () => {
+    let rebuilds = 0
+    let closed = 0
+    const test = harness({
+      reconnect: () => { closed += 1; return 1 },
+      carrierReconnect: () => { rebuilds += 1; return 1 },
+    })
+    test.timers.tick()
+    test.time.advance(2_000)
+    test.timers.tick()
+    expect(rebuilds).toBe(1)
+    // The app owns the wire: the watch must not close a socket behind its back.
+    expect(closed).toBe(0)
+    expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', attempt: 1, closed: 0, carrier: 1 })
+  })
+
+  it('falls back to closing a socket when the app cannot rebuild its carrier', () => {
+    const test = harness({ carrierReconnect: () => 0, reconnect: () => 1 })
+    test.timers.tick()
+    test.time.advance(2_000)
+    test.timers.tick()
+    expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', attempt: 1, closed: 1, carrier: 0 })
+    expect(test.reloads()).toBe(0)
+  })
+
+  it('reloads at once when neither the app nor the watch can rebuild anything', () => {
+    const test = harness({ carrierReconnect: () => 0, reconnect: () => 0 })
+    test.timers.tick()
+    test.time.advance(2_000)
+    test.timers.tick()
+    expect(test.phases()).toEqual(['detected', 'reconnect', 'reload'])
+    expect(test.reloads()).toBe(1)
+  })
+
+  it('survives a carrier rebuild that throws', () => {
+    const test = harness({
+      carrierReconnect: () => { throw new Error('connection: no owner') },
+      reconnect: () => 1,
+    })
+    test.timers.tick()
+    test.time.advance(2_000)
+    test.timers.tick()
+    expect(test.records.at(-1)).toMatchObject({ phase: 'reconnect', closed: 1, carrier: 0 })
   })
 
   it('stops rebuilding and reloads thirty seconds into the stall', () => {

@@ -740,6 +740,11 @@ export interface NativeMobileSurfaceOptions {
    * it was asked to re-open. See {@link resyncLoadingSessions}.
    */
   resyncLoadingSessions?: () => number
+  /**
+   * Ask the app to rebuild the carrier it owns, returning how many rebuilds it
+   * started. One means the watch does not have to close a socket itself.
+   */
+  reconnectCarrier?: () => number
 }
 
 /** Add mobile semantics without replacing feature trees. */
@@ -1294,6 +1299,7 @@ export function installNativeMobileSurface(
     reconnect: reconnectSockets,
     turns: () => document.querySelectorAll('[data-chat-turn]').length,
     ...(options.resyncLoadingSessions === undefined ? {} : { softResync: options.resyncLoadingSessions }),
+    ...(options.reconnectCarrier === undefined ? {} : { carrierReconnect: options.reconnectCarrier }),
   })
   sync()
   return () => {

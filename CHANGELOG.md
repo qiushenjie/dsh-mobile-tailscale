@@ -2,6 +2,10 @@
 
 Notable changes to DSH Mobile are recorded here. GitHub Releases remain the source for downloadable packages and complete generated commit notes.
 
+## 0.6.8
+
+- **The stalled view is handed back to the app before the wire is cut.** Device rows from the 0.6.7 build record a stall the rebuild ladder could not touch: the placeholder was up with an empty conversation while the socket watch reported `sockets: 0` — the app had opened its mux socket before the plugin half was evaluated, so the watch owned nothing to close, every rung of the ladder closed zero sockets and the only lever left was the 30 s reload. The app’s connection service is the lever that does not need ownership: `ctx.get("connection")` exposes `reconnect()`, which aborts the current generation and resets the retry backoff exactly as the app does after a dropped wire. The watch now asks for that rebuild first on every rung and records it as `carrier: 1`; closing a socket remains the fallback for app builds without that method, and the immediate reload is now reserved for the case where neither lever exists.
+
 ## 0.6.7
 
 - **The stuck view is re-opened through the app's own session retry before any socket is touched.** Device rows from the 0.6.6 build record the session switch that leaves 「载入历史…」 on screen: the placeholder appears 2.0 s in, the first replacement carrier is up with its own `session/follow` snapshot 3.1 s later and the view is still loading, and only the *second* rebuild recovers it at 13.1 s. Rebuilding carriers is what costs that time — the app loses and re-establishes every subscription it holds (workspace follow, jobs, terminal). The session controller already carries the cheap retry for exactly this state: `resync()` bumps the open generation, disposes the stream and opens again on the carrier that is already up, which is what the app itself does when the viewed session's address changes. The watch now asks for that first, once per stall, and waits a one-second grace before starting the rebuild ladder — so a client-side stall recovers in a round trip while a host that really stopped answering still gets the carrier rebuilt behind it.

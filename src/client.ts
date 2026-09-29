@@ -20,6 +20,11 @@ interface ClientContext {
 
 interface MobileConnectionHandle {
   isLoopback: boolean
+  /**
+   * The app's own carrier rebuild, when the installed build exposes one. Absent
+   * on older clients, where the socket watch has to close the wire itself.
+   */
+  reconnect?: () => void
 }
 
 interface MobileExtensionContext {
@@ -898,6 +903,24 @@ export function apply(ctx: ClientContext): void {
         resyncLoadingSessions: () => {
           try {
             return resyncLoadingSessions(ctx.get('sessions'))
+          } catch {
+            return 0
+          }
+        },
+        // The app rebuilds its own wire (aborting the current generation and
+        // resetting its backoff), which works even when the socket watch never
+        // saw the socket being constructed — the case the device hit at 02:30.
+        reconnectCarrier: () => {
+          let handle: MobileConnectionHandle | undefined
+          try {
+            handle = ctx.get('connection')
+          } catch {
+            return 0
+          }
+          if (typeof handle?.reconnect !== 'function') return 0
+          try {
+            handle.reconnect()
+            return 1
           } catch {
             return 0
           }
