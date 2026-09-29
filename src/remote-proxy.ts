@@ -508,6 +508,30 @@ export class RemotePassthroughProxy {
       upstreamSocket.setTimeout(0)
       client.write(handshake.header)
       if (handshake.remainder.length > 0) client.write(handshake.remainder)
+      // What the phone's own WebSocket stack offered, and how much the link
+      // actually carried. One row per socket: a device whose browser never
+      // offers the extension looks exactly like a compressed one everywhere
+      // else, and these byte counts are the only measurement of what the
+      // compression saved on the wire.
+      const offered = request.headers['sec-websocket-extensions'] as string | string[] | undefined
+      const openedAt = Date.now()
+      let reported = false
+      const reportSocket = (): void => {
+        if (reported) return
+        reported = true
+        this.telemetry.append({
+          at: new Date().toISOString(),
+          kind: 'ws-deflate',
+          path: target.raw,
+          offered: typeof offered === 'string' ? offered : Array.isArray(offered) ? offered.join(', ') : undefined,
+          deflate,
+          upBytes: client.bytesRead,
+          downBytes: client.bytesWritten,
+          ms: Date.now() - openedAt,
+        })
+      }
+      client.once('close', reportSocket)
+      upstreamSocket.once('close', reportSocket)
       relayUpgradedWebSocket(client, upstreamSocket, head, {
         onClamp: (record) => {
           // The opening clamp is the phone's time-to-first-content, so what a

@@ -493,6 +493,8 @@ describe('RemotePassthroughProxy', () => {
     const upstreamPort = await listen(upstreamServer)
     trackServer(upstreamServer)
 
+    const home = await mkdtemp(join(tmpdir(), 'dsh-proxy-deflate-'))
+    vi.stubEnv('DSH_HOME', home)
     const proxy = new RemotePassthroughProxy({ resolveUpstream: () => new URL(`http://127.0.0.1:${upstreamPort}`) })
     proxies.push(proxy)
     await proxy.start()
@@ -550,6 +552,14 @@ describe('RemotePassthroughProxy', () => {
       phone.destroy()
       upstreamSocket?.destroy()
     }
+
+    // The row is written when the socket closes, and it is the only record of
+    // what a real browser offered and what the link carried.
+    const row = await readTelemetryKind(join(home, 'mobile-telemetry.jsonl'), 'ws-deflate')
+    expect(row).toMatchObject({ path: '/api/events.mux', deflate: true })
+    expect(String(row?.offered)).toContain('permessage-deflate')
+    expect(Number(row?.downBytes)).toBeGreaterThan(0)
+    expect(Number(row?.upBytes)).toBeGreaterThan(0)
   })
 
   it('refuses the loopback-only admin surface instead of forwarding it', async () => {
@@ -621,6 +631,18 @@ describe('RemotePassthroughProxy', () => {
 })
 
 /** Wait for the queued telemetry write and return the single logged record. */
+async function readTelemetryKind(file: string, kind: string): Promise<Record<string, unknown> | undefined> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const text = await readFile(file, 'utf8').catch(() => '')
+    const found = text.split('\n').filter((line) => line.trim() !== '')
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .find((entry) => entry.kind === kind)
+    if (found !== undefined) return found
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  return undefined
+}
+
 async function readTelemetry(file: string): Promise<Record<string, unknown>> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
     const text = await readFile(file, 'utf8').catch(() => '')
